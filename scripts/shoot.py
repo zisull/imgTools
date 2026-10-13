@@ -64,6 +64,24 @@ PROBE = {
     MIC.render();
     await wait(400);
     ok('再重画一次涂抹层还在', ink()>0, ink());
+    /* 撤销：再涂第二笔，撤一次，像素必须真的少回去（而且扛得住重画） */
+    at('pointerdown',0.7,0.25);at('pointermove',0.85,0.45);at('pointerup',0.85,0.45);
+    await wait(80);
+    const two=ink();
+    const areaTxt=(document.getElementById('paintArea')||{}).textContent||'';
+    ok('面积读数跟着笔走', /已涂/.test(areaTxt), areaTxt);
+    MIC.inp.undo();
+    await wait(80);
+    const one=ink();
+    ok('撤销一笔后像素变少', two>0&&one>0&&one<two, two+' -> '+one);
+    MIC.render();
+    await wait(400);
+    ok('撤销的结果扛得住重画', Math.abs(ink()-one)<=two*0.15, one+' -> '+ink());
+    /* 移除原图：回到「点我选原图」的落区，别只剩「换图」一条路 */
+    MIC.inp.removeBase();
+    await wait(300);
+    ok('移除原图后回到选图态', !document.getElementById('paintCv')
+        && !!document.querySelector('.refdrop'));
     MIC.inp.pickBase();                 /* 换图：旧涂抹层对新图没意义 */
     await wait(800);
     ok('换图后涂抹层清空', ink()===0, ink());
@@ -72,7 +90,71 @@ PROBE = {
 })();
 </script>
 """,
+    # 成图 → 编辑页 的接力：在文生图页上跑，两个目标页都要顾到
+    "again": """
+<script>
+(async function(){
+  const R=[],ok=(n,c,x)=>R.push((c?'PASS ':'FAIL ')+n+(x!=null?' '+x:''));
+  const wait=ms=>new Promise(r=>setTimeout(r,ms));
+  const cells=()=>document.querySelectorAll('#view .gcell').length;
+  try{
+    await wait(1500);
+    MIC.s.st.last_image='D:/AI/Qwen-Image-2.1/outputs/gen_probe.png';
+    MIC.render();
+    await wait(600);
+    const btns=[].slice.call(document.querySelectorAll('#view button')).map(b=>b.textContent.trim());
+    ok('预览下有接力按钮', btns.some(t=>/局部改/.test(t))&&btns.some(t=>/整张再编辑/.test(t)),
+       btns.slice(-3).join('|'));
+    MIC.runner.again('edit');
+    await wait(900);
+    ok('送进图像编辑=一张参考图', cells()===1, 'cells='+cells());
+    ok('参考图上有 × 可移除', document.querySelectorAll('#view .gcell .gdel').length===1);
+    MIC.edit.del(0);
+    await wait(300);
+    ok('点 × 真的少一张', cells()===0, 'cells='+cells());
+    MIC.runner.again('inpaint');
+    await wait(900);
+    ok('送进局部编辑=出画布', !!document.getElementById('paintCv'));
+  }catch(e){ok('探针跑完',false,String(e));}
+  document.body.insertAdjacentHTML('beforeend','<pre id="probe">'+R.join('\\n')+'</pre>');
+})();
+</script>
+""",
+    # 载入进度条：后端把第三方文本条折算成百分比后，前端这段要换成真刻度
+    "loadbar": """
+<script>
+(async function(){
+  const R=[],ok=(n,c,x)=>R.push((c?'PASS ':'FAIL ')+n+(x!=null?' '+x:''));
+  const wait=ms=>new Promise(r=>setTimeout(r,ms));
+  const inp=()=>document.querySelector('#view [data-role=prog]');
+  const txt=()=>inp().parentElement.parentElement.querySelector('[data-role=pgtext]').textContent;
+  try{
+    await wait(1500);
+    const s=MIC.s.st, sv={};
+    ['running','status','load_pct','load_stage','done','total'].forEach(k=>sv[k]=s[k]);
+    /* 每次都「改状态 → 立刻 render → 立刻读 DOM」：mock 的定时器随时改写 st，
+       中间插一个 await 就可能被它覆盖，测出来的就不是这段逻辑了 */
+    s.running='load';s.load_pct=0;s.load_stage='';MIC.render();
+    ok('第一帧前用不确定动画', inp().parentElement.classList.contains('indet')
+        && inp().style.width==='', inp().style.width);
+    s.load_pct=42;s.load_stage='载入 text_encoder';MIC.render();
+    ok('有百分比就换成真刻度', !inp().parentElement.classList.contains('indet')
+        && inp().style.width==='42%', inp().style.width);
+    ok('文字带阶段名', /^载入 42% · 载入 text_encoder/.test(txt()), txt());
+    Object.keys(sv).forEach(k=>{s[k]=sv[k];});
+    s.running='gen';s.done=3;s.total=8;MIC.render();
+    ok('去噪阶段回到步数刻度', inp().style.width==='38%' && /^去噪 3\\/8/.test(txt()),
+        inp().style.width+' | '+txt());
+    Object.keys(sv).forEach(k=>{s[k]=sv[k];});MIC.render();
+  }catch(e){ok('探针跑完',false,String(e));}
+  document.body.insertAdjacentHTML('beforeend','<pre id="probe">'+R.join('\\n')+'</pre>');
+})();
+</script>
+""",
 }
+
+# 探针跑在哪一页上（键是探针名，值是 shoot 的页名）
+PROBE_PAGE = {"inpaint": "inpaint", "again": "t2i", "loadbar": "overview"}
 
 
 def main():
@@ -82,6 +164,8 @@ def main():
     ap.add_argument("--h", type=int, default=0, help="视口高度（配合 --full 用）")
     ap.add_argument("--toast", action="store_true", help="顺手把轻提示弹出来")
     ap.add_argument("--probe", choices=sorted(PROBE), help="跑交互探针，输出 PASS/FAIL 而不是截图")
+    ap.add_argument("--pre", default="", help="截图前先跑一段 JS（1.2s 后执行），用来铺状态")
+    ap.add_argument("--budget", type=int, default=0, help="无头虚拟时间预算 ms（截中途状态时调小）")
     args = ap.parse_args()
 
     out = os.path.join(tempfile.gettempdir(), "qic_shoot")
@@ -91,7 +175,7 @@ def main():
         print("找不到 Edge"); return 1
 
     if args.probe:
-        pages = [args.probe]
+        pages = [PROBE_PAGE.get(args.probe, args.probe)]
     else:
         pages = args.pages or ["settings"]
     base = assemble(mock=True)
@@ -105,6 +189,10 @@ def main():
         if args.toast:
             html = html.replace("</body>",
                                 "<script>setTimeout(function(){MIC.toast('轻提示位置核对');},5200);</script></body>")
+        if args.pre:
+            # 截图前先把页面铺成要看的样子（选过图 / 正在载入 / 接力之后）
+            html = html.replace("</body>",
+                                "<script>setTimeout(function(){%s},1200);</script></body>" % args.pre)
         if args.probe:
             html = html.replace("</body>", PROBE[args.probe] + "</body>")
         f = os.path.join(out, "%s%s.html" % (name, args.probe and "_probe" or ""))
@@ -136,7 +224,8 @@ def main():
         h = args.h or (1400 if args.full else 940)
         cmd = [edge, "--headless=new", "--no-sandbox", "--disable-gpu",
                "--hide-scrollbars", "--user-data-dir=" + os.path.join(out, "profile"),
-               "--window-size=1420,%d" % h, "--virtual-time-budget=6000",
+               "--window-size=1420,%d" % h,
+               "--virtual-time-budget=%d" % (args.budget or 6000),
                "--screenshot=" + png, url]
         if args.full:
             cmd.append("--force-device-scale-factor=1")

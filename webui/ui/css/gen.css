@@ -23,8 +23,9 @@
 .gcell img{display:block;width:100%;aspect-ratio:1/1;object-fit:cover;cursor:zoom-in;background:var(--track)}
 .gi{padding:6px 10px 0;font-size:12px;color:var(--fg2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .gf{padding:2px 10px 8px;font-size:11px;color:var(--fg3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+/* 移除按钮常显：只在 hover 现形的 × 会被当成「没有删除功能」 */
 .gdel{position:absolute;top:6px;right:6px;width:26px;height:26px;padding:0;display:flex;
-  align-items:center;justify-content:center;border-radius:8px;opacity:0;transition:opacity .12s;
+  align-items:center;justify-content:center;border-radius:8px;opacity:.72;transition:opacity .12s;
   background:rgba(0,0,0,.45);color:#fff;border:0}
 .gcell:hover .gdel{opacity:1}
 .gdel:hover{background:var(--danger)}

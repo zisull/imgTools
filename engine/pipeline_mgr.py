@@ -41,10 +41,13 @@ class PipelineMgr:
         self.state = EngineState()
         self.pipe = None
 
-    def load(self, repo_path: str, offload: bool = True, quant: Optional[str] = "fp8") -> None:
+    def load(self, repo_path: str, offload: bool = True, quant: Optional[str] = "fp8",
+             on_stage: Optional[Callable[[str], None]] = None) -> None:
         """quant="fp8": torchao Float8WeightOnly 量化 transformer+text_encoder。
         12G 卡实测唯一通路：bf16 单组件 13.3GB 溢出 WDDM 共享显存(每步~20s)；
-        bnb8 更慢；fp8 后 512/8步 24.5s、显存 9.8GB 不溢出。"""
+        bnb8 更慢；fp8 后 512/8步 24.5s、显存 9.8GB 不溢出。
+
+        on_stage：只报「现在在忙哪一段」的话术，百分比由 UI 侧从进度条工厂里取。"""
         if self.pipe is not None and self.state.loaded_repo == repo_path:
             return
         self.unload()
@@ -52,6 +55,8 @@ class PipelineMgr:
 
         self.state.loading = True
         t0 = time.time()
+        if on_stage:
+            on_stage("准备载入")
         self.log(f"加载模型: {repo_path} ({quant})")
         kwargs = {}
         if quant == "fp8":
@@ -68,10 +73,18 @@ class PipelineMgr:
             pipe = QwenImage21Pipeline.from_pretrained(
                 repo_path, dtype=torch.bfloat16, **kwargs
             )
+            if on_stage:
+                on_stage("整理显存…")
             if offload:
                 pipe.enable_model_cpu_offload()
             else:
                 pipe.to("cuda")
+            # 去噪那条文本条走的是 tqdm.auto，不吃上面的全局开关；
+            # 步数进度已经由 callback_on_step_end 实时喂给界面进度条，这里直接关掉
+            try:
+                pipe.set_progress_bar_config(disable=True)
+            except Exception:
+                pass
         except Exception as exc:
             self.state.last_error = f"{type(exc).__name__}: {exc}"
             self.state.loading = False

@@ -34,7 +34,7 @@ const st={running:null,status:'就绪',done:0,total:0,
   model_loaded:false,model_name:'Qwen-Image-2.1-Turbo',quant:'fp8',
   vram_used:0.6,vram_total:12,img_count:6,last_sec:28.4,
   last_image:'D:/AI/Qwen-Image-2.1/outputs/gen_20261013_094107.png',
-  api_on:false,api_url:''};
+  api_on:false,api_url:'',load_pct:0,load_stage:''};
 
 let seq=0;
 const logs=[];
@@ -107,10 +107,14 @@ function finishGen(){
 function advance(){
   if(st.running==='load'){
     loadTick++;
+    /* 与真后端同构：载入进度也是「百分比 + 阶段话术」，界面那条进度条不再只能空转 */
+    const LOAD=[[8,'载入 processor'],[42,'载入 text_encoder'],[88,'载入 transformer']][loadTick-1]
+      ||[99,'整理显存…'];
+    st.load_pct=LOAD[0];st.load_stage=LOAD[1];
     L(loadTick===1?'载入模型（fp8 量化 + CPU offload）…':
       loadTick===2?'文本编码器就位':'DiT 权重就位，预热一遍');
     if(loadTick>=3){
-      st.model_loaded=true;st.vram_used=9.6;st.status='模型已载入';
+      st.model_loaded=true;st.vram_used=9.6;st.status='模型已载入';st.load_pct=100;st.load_stage='已就绪';
       L('✅ 模型已载入 · 显存 9.6/12 GB');
       if(wantGen){wantGen=false;beginGen();}
       else st.running=null;

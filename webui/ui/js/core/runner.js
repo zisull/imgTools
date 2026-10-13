@@ -42,7 +42,16 @@ function unload(){
   }).catch(e=>MIC.toast('卸载失败：'+(e.message||e)));
 }
 
-MIC.runner={start,stop,toggle,load,unload,payload:{}};
+/* 成图接力：把上一张成图当输入送进编辑页。局部改=当原图去涂抹，整张改=当参考图。 */
+function again(target){
+  const p=MIC.s.st.last_image;
+  if(!p){MIC.toast('还没有成图');return;}
+  if(target==='inpaint')MIC.inp.useImage(p);
+  else if(target==='edit')MIC.edit.useImage(p);
+  else{MIC.toast('不认识的接力目标：'+target);return;}
+  MIC.nav.goto(target);
+}
+MIC.runner={start,stop,toggle,load,unload,again,payload:{}};
 
 /* 运行卡 + 成图预览 + 日志卡：文生图/编辑/局部/透明四页同构，收成一个 helper。
    startCall 是「空闲时点开始」要执行的表达式（如 "MIC.edit.start()"）；
@@ -55,7 +64,7 @@ MIC.runner.runCard=function(runNote,startCall){
   const statusBody=
     '<div class="status">'+
       C.strow('任务状态','<span class="dot '+(run?'run':'')+'" data-role="dot"></span><span data-role="st"></span>')+
-      C.strow('去噪进度','<div class="prog"><i data-role="prog"></i></div><span class="mut fine" data-role="pgtext"></span>')+
+      C.strow('进度','<div class="prog"><i data-role="prog"></i></div><span class="mut fine" data-role="pgtext"></span>')+
       C.strow('本轮结果','<span class="mut" data-role="result">'+(runNote||'就绪后开始')+'</span>')+'</div>'+
     '<div class="btnrow">'+btn+
       '<button class="btn" onclick="MIC.gen.openDir()">'+ic('folder','s')+'打开输出目录</button>'+

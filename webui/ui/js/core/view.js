@@ -46,7 +46,7 @@ function elText(){
 function pgText(){
   const s=MIC.s.st;
   if(!s.running)return s.status||'';
-  if(s.running==='load')return `载入模型中… ${elText()}`;
+  if(s.running==='load')return `载入 ${Number(s.load_pct)||0}%${s.load_stage?' · '+s.load_stage:''} · ${elText()}`;
   return `去噪 ${s.done||0}/${s.total||0} · ${pct()}% · ${elText()}`;
 }
 /* 显存条：>90% 变警告色——12G 卡上这就是「要不要降档」的决策线 */
@@ -79,7 +79,13 @@ function tick(){
         ?(s.model_loaded?'ok':''):(s.running?'run':''));
     else if(r==='prog'){
       const bar=el.parentElement;
-      if(s.running==='load'){bar.classList.add('indet');el.style.width='';}
+      if(s.running==='load'){
+        /* 载入阶段也走真刻度：后端把第三方库的文本条折算成了百分比，
+           只有第一帧还没数出来时暂时用不确定动画顶着 */
+        const lp=Number(s.load_pct)||0;
+        if(lp>0){bar.classList.remove('indet');el.style.width=lp+'%';}
+        else{bar.classList.add('indet');el.style.width='';}
+      }
       else{bar.classList.remove('indet');el.style.width=pct()+'%';}
     }
     else if(r==='pgtext')el.textContent=pgText();
@@ -91,7 +97,10 @@ function tick(){
       if(!s.last_image){el.innerHTML=`<div class="empty">尚无成图 · 生成完成后这里出预览，点图片可打开所在文件夹</div>`;return;}
       const T=MIC.s.lastThumb;
       if(T&&T.path===s.last_image)
-        el.innerHTML=`<img class="prev" src="${esc(T.url)}" alt="上一张" onclick="MIC.api.openPath(MIC.s.st.last_image)">`;
+        el.innerHTML=`<img class="prev" src="${esc(T.url)}" alt="上一张" onclick="MIC.api.openPath(MIC.s.st.last_image)">`+
+          `<div class="btnrow"><span class="mut fine">这一张还想再改？</span><span class="grow"></span>`+
+          `<button class="btn sm gho" onclick="MIC.runner.again('inpaint')">局部改这块</button>`+
+          `<button class="btn sm gho" onclick="MIC.runner.again('edit')">整张再编辑</button></div>`;
       else{el.innerHTML=`<div class="empty">正在载入预览…</div>`;fetchThumb(s.last_image);}
     }
   });

@@ -75,21 +75,21 @@ MIC.registerPage('edit',{
 });
 
 MIC.edit={
-  add(){
-    MIC.api.pick('file').then(function(p){
-      if(!p)return;
-      if(imgs.indexOf(p)<0){if(imgs.length>=10){MIC.toast('最多 10 张');return;}imgs.push(p);loadThumb(p);}
-      MIC.render();
-    }).catch(function(){});
+  addPath(p){
+    if(!p)return;
+    if(imgs.indexOf(p)<0){if(imgs.length>=10){MIC.toast('最多 10 张');return;}imgs.push(p);loadThumb(p);}
+    MIC.render();
   },
+  add(){MIC.api.pick('file').then(function(p){MIC.edit.addPath(p);}).catch(function(){});},
   onDrop(e){
     MIC.form.resolveDrop(e.dataTransfer,'file').then(function(r){
       if(!r||!r.ok){MIC.toast((r&&r.msg)||'没能识别这个文件');return;}
-      if(imgs.indexOf(r.path)<0){if(imgs.length>=10){MIC.toast('最多 10 张');return;}imgs.push(r.path);loadThumb(r.path);}
-      MIC.render();
+      MIC.edit.addPath(r.path);
     }).catch(function(){});
   },
   del(i){imgs.splice(i,1);MIC.render();},
+  /* 别页送图进来当参考图（成图接力）：整组换掉，不是追加 */
+  useImage(p){imgs=[];[].concat(p||[]).forEach(MIC.edit.addPath);},
   start(){
     if(!imgs.length){MIC.toast('先添加至少一张参考图');return;}
     /* 先把界面上的值写回 cfg：不 commit 读到的是上次落盘的旧值，刚打的指令会被丢掉 */

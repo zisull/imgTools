@@ -24,6 +24,7 @@ import re
 import sys
 import threading
 import time
+import traceback
 import urllib.parse
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -32,15 +33,85 @@ for _p in (_HERE, os.path.join(_HERE, "ui"), os.path.join(ROOT, "engine")):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
+LOG_DIR = os.path.join(ROOT, "logs")
+RUN_LOG = os.path.join(LOG_DIR, "run.log")
+
+
+class _Tee(io.TextIOBase):
+    """控制台 + 落盘双写，且任何一路写坏都不反手把主流程带崩。
+
+    用 pythonw 起（没有黑框）时 sys.stdout/stderr 直接是 None，第三方库的 traceback
+    会无处可去 —— 这份日志就是唯一的现场，所以它必须在 import webview/torch 之前接好。
+    """
+
+    def __init__(self, stream, fh):
+        self._s = stream
+        self._f = fh
+
+    def write(self, s):
+        txt = s if isinstance(s, str) else str(s)
+        for o in (self._f, self._s):
+            try:
+                if o is not None:
+                    o.write(txt)
+                    o.flush()
+            except Exception:
+                pass
+        return len(txt)
+
+    def flush(self):
+        for o in (self._f, self._s):
+            try:
+                if o is not None:
+                    o.flush()
+            except Exception:
+                pass
+
+    def isatty(self):
+        return False
+
+
+def _setup_streams():
+    fh = None
+    try:
+        os.makedirs(LOG_DIR, exist_ok=True)
+        if os.path.exists(RUN_LOG) and os.path.getsize(RUN_LOG) > 4 * 1024 * 1024:
+            os.replace(RUN_LOG, RUN_LOG + ".1")      # 只留一代，日志目录不无限长
+        fh = open(RUN_LOG, "a", encoding="utf-8", errors="replace", buffering=1)
+        fh.write("\n===== %s 启动（%s）=====\n"
+                 % (time.strftime("%Y-%m-%d %H:%M:%S"), " ".join(sys.argv[1:3]) or "桌面"))
+    except Exception:
+        fh = None
+    sys.stdout = _Tee(sys.__stdout__, fh)
+    sys.stderr = _Tee(sys.__stderr__, fh)
+
+
+_setup_streams()
+
 # 界面完全本地、外部请求全在 Python 后端：WebView2 一律直连，不碰系统代理。
 # 否则代理软件（Clash 等）一旦把 loopback 也劫持，内置服务会被超时拦掉、界面白屏。
 os.environ.setdefault("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", "--no-proxy-server")
 
-import webview  # noqa: E402
+try:
+    import webview  # noqa: E402
 
-import assemble  # noqa: E402  # ui/assemble.py：css/js 拼装顺序的唯一来源
-import single_instance  # noqa: E402
-from window_guard import WindowCtl, install_guard  # noqa: E402
+    import assemble  # noqa: E402  # ui/assemble.py：css/js 拼装顺序的唯一来源
+    import loadbar  # noqa: E402  # 把第三方库的文本进度条接成界面里的百分比
+    import single_instance  # noqa: E402
+    from window_guard import WindowCtl, install_guard  # noqa: E402
+except Exception:
+    # pythonw 起的时候这里断了连一行字都留不下：落盘 + 弹框，别让人对着「双击没反应」猜
+    sys.stderr.write("导入失败：\n" + traceback.format_exc())
+    if os.name == "nt":
+        try:
+            ctypes.windll.user32.MessageBoxW(
+                None,
+                "生图控制台起不来：依赖导入失败，请先跑 setup.bat。\n\n"
+                + traceback.format_exc()[-1200:] + "\n\n完整堆栈见 logs\\run.log",
+                "Qwen 生图控制台", 0x10)
+        except Exception:
+            pass
+    raise SystemExit(1)
 
 APP_NAME = "Qwen 生图控制台"
 APP_VERSION = "0.2.0-m2"
@@ -152,6 +223,8 @@ class App(WindowCtl):
             "vram_used": 0.0, "vram_total": 12.0,
             "img_count": 0, "last_sec": 0.0, "last_image": "",
             "api_on": False, "api_url": "", "t_start": 0, "elapsed": 0,
+            # 载入进度：黑框去掉后，权重加载这条唯一「看得见」的路就是这两个字段
+            "load_pct": 0, "load_stage": "",
         }
         self._refresh_gallery_count()
         self._log("就绪 · %s" % APP_NAME)
@@ -407,13 +480,23 @@ class App(WindowCtl):
             return {"ok": False, "msg": self._busy_msg()}
         return {"ok": True}
 
+    def _report_load(self, pct, stage):
+        self.st["load_pct"] = pct
+        self.st["load_stage"] = stage
+
     def _do_load(self, chain_gen=None):
         try:
             c = self.cfg["console"]
+            repo = _abs_path(c["model_dir"])
             self.st["status"] = "载入模型…"
-            self._get_mgr().load(_abs_path(c["model_dir"]),
-                                 offload=bool(c.get("offload", True)),
-                                 quant=c.get("quant", "fp8"))
+            self._report_load(0, "准备载入")
+            loadbar.silence_text_bars()   # 文本条一律关掉，进度改由界面进度条承担
+            with loadbar.watch(repo, self._report_load) as bar:
+                self._get_mgr().load(repo,
+                                     offload=bool(c.get("offload", True)),
+                                     quant=c.get("quant", "fp8"),
+                                     on_stage=bar.note)
+            self._report_load(100, "已就绪")
             self.st["model_loaded"] = True
             self.st["status"] = "模型已载入"
             self._log("✅ 模型已载入")
@@ -965,6 +1048,17 @@ def _say_already_running():
     box(None, "生图控制台已经在运行了，已为你切换到已打开的窗口", APP_NAME, 0x40)
 
 
+def _fatal(tb):
+    if os.name != "nt":
+        return
+    tail = str(tb)[-1500:]
+    box = ctypes.windll.user32.MessageBoxW
+    box.argtypes = [ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_wchar_p, ctypes.c_uint]
+    box.restype = ctypes.c_int
+    box(None, "程序没起来，最后一段错误：\n\n%s\n\n完整堆栈见 logs\\run.log" % tail,
+        APP_NAME, 0x10)
+
+
 def _lock_paths():
     base = os.path.join(os.environ.get("APPDATA") or ROOT, "QwenImgConsole")
     os.makedirs(base, exist_ok=True)
@@ -1010,4 +1104,12 @@ def _hwnd(window):
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception:
+        # pythonw 起的时候没有黑框：崩在半路也必须留现场 + 说句人话，
+        # 否则用户看到的只是「双击了没反应」
+        tb = traceback.format_exc()
+        sys.stderr.write(tb)
+        _fatal(tb)
+        raise SystemExit(1)

@@ -28,7 +28,8 @@ MIC.registerPage('overview',{
          <button class="btn sm ${s.model_loaded?'gho':'pri'}" onclick="MIC.runner.load()">${ic('down','s')}载入模型</button>
          <button class="btn sm gho" onclick="MIC.runner.unload()">${ic('power','s')}卸载（归还显存）</button>
          <span class="mut fine">${esc(s.model_name||'')} · fp8 + CPU offload 是 12G 卡上唯一跑得动的组合（实测 1024≈28s）</span>
-       </div>`),{note:s.quant==='fp8'?'量化 fp8':'未量化（会爆显存）'})}
+       </div>
+       <div class="strow"><span class="k">进度</span><div class="prog"><i data-role="prog"></i></div><span class="mut fine" data-role="pgtext"></span></div>`),{note:s.quant==='fp8'?'量化 fp8':'未量化（会爆显存）'})}
     ${C.card('快速开始','play',`<div class="tiles">
         ${tile('t2i','flower','文生图','提示词 → 1024/1536 成图，Turbo 8 步')}
         ${tile('gallery','image','画廊','浏览与删除输出目录里的成图')}

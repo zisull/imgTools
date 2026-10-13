@@ -41,7 +41,7 @@ MIC.registerPage('t2i',{
     const statusBody=
       '<div class="status">'+
         C.strow('任务状态','<span class="dot '+(run?'run':'')+'" data-role="dot"></span><span data-role="st"></span>')+
-        C.strow('去噪进度','<div class="prog"><i data-role="prog"></i></div><span class="mut fine" data-role="pgtext"></span>')+
+        C.strow('进度','<div class="prog"><i data-role="prog"></i></div><span class="mut fine" data-role="pgtext"></span>')+
         C.strow('本轮结果','<span class="mut" data-role="result">就绪后开始生成</span>')+'</div>'+
       '<div class="btnrow">'+
         '<button class="btn pri" onclick="MIC.runner.toggle(\'gen\')">'+
