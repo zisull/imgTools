@@ -57,7 +57,7 @@ class PipelineMgr:
             from diffusers.quantizers.pipe_quant_config import PipelineQuantizationConfig
 
             kwargs["quantization_config"] = PipelineQuantizationConfig(
-                quant_backend="bitsandbytes",
+                quant_backend="bitsandbytes_8bit",
                 quant_kwargs={"load_in_8bit": True},
                 components_to_quantize=["text_encoder", "transformer"],
             )
