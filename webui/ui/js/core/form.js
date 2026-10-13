@@ -242,8 +242,7 @@ document.addEventListener('drop',e=>{
 });
 
 MIC.form={field,card,foldcard,logcard,runstat,strow,txt,ta,num,sel,chk,sw,seg,pathrow,lock,read,commit,commitPath,commitMany,pickInto,
-  copyLog,clearLog,
-  applyCfg,
+  copyLog,clearLog,applyCfg,dropCands,
   fold(h){h.classList.toggle('closed');h.nextElementSibling.classList.toggle('hide');},
   /* 页面里非 data-k 的临时控件：取值不写配置 */
   raw(id){const el=MIC.$(id);return el?(el.value!=null?el.value.trim():el.textContent):'';},

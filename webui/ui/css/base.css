@@ -126,6 +126,9 @@ textarea.inp{height:auto;min-height:92px;padding:9px 11px;line-height:1.7;resize
 .prog{flex:1;height:7px;border-radius:99px;background:var(--track);border:1px solid var(--track-line);
   overflow:hidden;min-width:90px}
 .prog i{display:block;height:100%;width:0;background:var(--grad);border-radius:99px;transition:width .35s}
+/* 载入模型：没有步数可量，用一段来回扫动的光条表示「在忙、进度未知」 */
+.prog.indet i{width:38%;transition:none;animation:indet 1.15s ease-in-out infinite}
+@keyframes indet{0%{margin-left:-38%}100%{margin-left:100%}}
 
 /* 统计砖 */
 .stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(168px,1fr));gap:12px;margin-bottom:var(--gap)}

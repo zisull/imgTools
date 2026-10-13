@@ -91,31 +91,56 @@ class PipelineMgr:
         gc.collect()
         torch.cuda.empty_cache()
 
+    @staticmethod
+    def make_sigmas(steps: int) -> list:
+        """显式 sigma 网格，用于覆盖 checkpoint 内置的 8 步 schedule。
+        Turbo 只认 sigmas 参数——单传 num_inference_steps 会被 sample_sigmas 盖掉。
+        端点与 pipeline 默认口径一致：1.0 → 1/steps。"""
+        return [1.0 - i / steps for i in range(steps)]
+
     def generate(
         self,
         prompt: str,
         *,
         width: int = 1024,
         height: int = 1024,
-        image=None,  # PIL.Image 或 list[PIL.Image]：编辑模式
-        steps: Optional[int] = None,  # Turbo 留 None 走 checkpoint 内置 schedule
+        image=None,  # PIL.Image 或 list[PIL.Image]：编辑/局部编辑模式
+        steps: Optional[int] = None,  # Turbo 留 None 走 checkpoint 内置 8 步 schedule
         seed: int = 42,
         kv_cache: bool = True,
+        resolution: Optional[int] = None,  # 编辑类：只给画幅面积边长，比例跟随输入图
+        on_step: Optional[Callable[[int, int], None]] = None,  # (已完成步, 总步)
+        should_stop: Optional[Callable[[], bool]] = None,  # 返 True → 下一步前中断
     ):
         assert self.pipe is not None, "模型未加载"
         self.state.busy = True
         t0 = time.time()
         kwargs = dict(
             prompt=prompt,
-            width=width,
-            height=height,
             use_kv_cache=kv_cache,
             generator=torch.Generator("cpu").manual_seed(seed),
         )
+        if resolution is not None:
+            # 编辑/局部编辑：不给死宽高，让 pipeline 按输入图比例算画幅（output_resolution² 面积）
+            kwargs["output_resolution"] = resolution
+        else:
+            kwargs["width"] = width
+            kwargs["height"] = height
         if image is not None:
             kwargs["image"] = image
-        if steps is not None:
-            kwargs["num_inference_steps"] = steps
+        # 非 8 步档：checkpoint 内置 schedule 无法靠 num_inference_steps 覆盖，须显式传 sigmas。
+        if steps is not None and steps != 8:
+            kwargs["sigmas"] = self.make_sigmas(steps)
+        total = steps if steps is not None else 8
+        if on_step is not None or should_stop is not None:
+            def _cb(pipe_obj, i, t, callback_kwargs):
+                if should_stop is not None and should_stop():
+                    pipe_obj._interrupt = True
+                if on_step is not None:
+                    on_step(i + 1, total)
+                return callback_kwargs
+            kwargs["callback_on_step_end"] = _cb
+            kwargs["callback_on_step_end_tensor_inputs"] = ["latents"]
         try:
             img = self.pipe(**kwargs).images[0]
         except torch.cuda.OutOfMemoryError as exc:
@@ -127,7 +152,7 @@ class PipelineMgr:
         dt = time.time() - t0
         self.state.timings.append(round(dt, 1))
         del self.state.timings[:-20]
-        self.log(f"生成完成 {width}x{height} 用时 {dt:.1f}s")
+        self.log(f"生成完成 用时 {dt:.1f}s")
         return img
 
     def gpu_stats(self) -> dict:

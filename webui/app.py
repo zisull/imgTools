@@ -15,6 +15,7 @@ app.py —— pywebview 壳 + js_api（生图控制台）
 """
 import atexit
 import base64
+import copy
 import ctypes
 import io
 import json
@@ -56,10 +57,19 @@ DEFAULT_CFG = {
                 "quant": "fp8", "offload": True},
     "gen": {"prompt": "", "negative": "", "size": "1024x1024", "steps": "8",
             "seed": -1, "count": 1, "kv_cache": True},
+    "edit": {"prompt": "", "negative": "", "res": "512", "steps": "8",
+             "seed": -1, "count": 1, "kv_cache": True},
+    "inpaint": {"prompt": "", "negative": "", "res": "512", "steps": "8",
+                "seed": -1, "count": 1, "kv_cache": True, "brush": 48},
+    "rgba": {"prompt": "", "negative": "", "size": "1024x1024", "steps": "8",
+             "seed": -1, "count": 1, "kv_cache": True},
     "api": {"enabled": False, "host": "127.0.0.1", "port": 8765, "token": ""},
     "nav": [
         {"id": "t_ov", "type": "tab", "name": "概览", "icon": "home", "page": "overview"},
         {"id": "t_gen", "type": "tab", "name": "文生图", "icon": "flower", "page": "t2i"},
+        {"id": "t_edit", "type": "tab", "name": "图像编辑", "icon": "wand", "page": "edit"},
+        {"id": "t_inp", "type": "tab", "name": "局部编辑", "icon": "brush", "page": "inpaint"},
+        {"id": "t_rgba", "type": "tab", "name": "透明素材", "icon": "layers", "page": "rgba"},
         {"id": "t_gal", "type": "tab", "name": "画廊", "icon": "image", "page": "gallery"},
         {"id": "t_set", "type": "tab", "name": "设置", "icon": "cog", "page": "settings"},
     ],
@@ -88,6 +98,19 @@ def _fd(name):
     return getattr(fd, name) if fd is not None else getattr(webview, name + "_DIALOG")
 
 
+def _checkerboard(size, cell=16):
+    """给透明图铺的灰白棋盘底（PIL 无内置，手画一张 RGB）。"""
+    from PIL import Image
+    w, h = size
+    bg = Image.new("RGB", (w, h), (255, 255, 255))
+    px = bg.load()
+    for y in range(h):
+        for x in range(w):
+            if ((x // cell) + (y // cell)) % 2:
+                px[x, y] = (210, 210, 210)
+    return bg
+
+
 class App(WindowCtl):
     def __init__(self):
         self.cfg = json.loads(json.dumps(DEFAULT_CFG))
@@ -106,7 +129,7 @@ class App(WindowCtl):
             "quant": self.cfg["console"].get("quant", "fp8"),
             "vram_used": 0.0, "vram_total": 12.0,
             "img_count": 0, "last_sec": 0.0, "last_image": "",
-            "api_on": False, "api_url": "",
+            "api_on": False, "api_url": "", "t_start": 0, "elapsed": 0,
         }
         self._refresh_gallery_count()
         self._log("就绪 · %s" % APP_NAME)
@@ -132,7 +155,7 @@ class App(WindowCtl):
                     have.add(n.get("page"))
                 walk(n.get("children") or [])
         walk(self.cfg.get("nav") or [])
-        missing = [json.deepcopy(n) for p, n in known.items() if p not in have]
+        missing = [copy.deepcopy(n) for p, n in known.items() if p not in have]
         if missing:
             self.cfg.setdefault("nav", [])
             self.cfg["nav"] = missing + self.cfg["nav"]
@@ -171,7 +194,12 @@ class App(WindowCtl):
         return {"ok": True, "state": self._snap()}
 
     def _snap(self):
-        return json.loads(json.dumps(self.st))
+        s = json.loads(json.dumps(self.st))
+        if s.get("running") and s.get("t_start"):
+            s["elapsed"] = round(time.time() - s["t_start"], 1)
+        else:
+            s["elapsed"] = 0
+        return s
 
     def save_cfg(self, patch):
         _deep_merge(self.cfg, patch or {})
@@ -234,6 +262,7 @@ class App(WindowCtl):
 
     def _launch(self, key, fn):
         self.st["running"] = key
+        self.st["t_start"] = time.time()
         self._stop.clear()
         self._thread = threading.Thread(target=fn, daemon=True)
         self._thread.start()
@@ -261,7 +290,11 @@ class App(WindowCtl):
             self.st["status"] = "模型已载入"
             self._log("✅ 模型已载入")
             if chain_gen:
-                self._do_gen(chain_gen)
+                if self._stop.is_set():
+                    self.st["status"] = "已停止"
+                    self._log("⏹ 载入期间已请求停止：跳过本次生成")
+                else:
+                    self._do_gen(chain_gen)
                 return
         except Exception as e:
             self._log("❌ 模型载入失败：%s" % e)
@@ -291,6 +324,9 @@ class App(WindowCtl):
         g.update(payload or {})
         if not str(g.get("prompt", "")).strip():
             return {"ok": False, "msg": "提示词是空的，先写点想要什么"}
+        mode = str(g.get("mode") or "gen")
+        if mode in ("edit", "inpaint") and not (g.get("images") or []):
+            return {"ok": False, "msg": "编辑/局部编辑需要先选参考图"}
         steps = int(g.get("steps") or 8)
         self.st["total"] = steps
         if self.mgr is None or self.mgr.pipe is None:
@@ -300,23 +336,52 @@ class App(WindowCtl):
         self._launch("gen", lambda: self._do_gen(g))
         return {"ok": True, "total": steps}
 
+    # -------------------------------------------------------- 参考图 / 蒙版
+    @staticmethod
+    def _mask_datauri_to_alpha(mask_uri, size):
+        """把前端画布导出的涂抹蒙版（不透明处=要重绘）转成 alpha 数组。
+        返回 PIL 'L' 图：涂到的地方 0（透明→模型重绘），其余 255（保留原图）。"""
+        from PIL import Image
+        if not mask_uri:
+            return None
+        b64 = str(mask_uri).split(",", 1)[1] if "," in str(mask_uri) else str(mask_uri)
+        m = Image.open(io.BytesIO(base64.b64decode(b64))).convert("RGBA").resize(size)
+        painted = m.getchannel("A").point(lambda a: 0 if a > 8 else 255)
+        return painted
+
+    def _build_input_image(self, g):
+        """按 mode 组装 pipeline 的 image 参数：编辑=参考图列表，局部编辑=原图+涂抹区透明。
+        透明素材页不需要输入图（靠提示词触发），返回 None。"""
+        from PIL import Image
+        mode = str(g.get("mode") or "gen")
+        paths = [self._ref_path(p) for p in (g.get("images") or [])]
+        paths = [p for p in paths if p]
+        if mode == "gen" or not paths:
+            return None
+        if mode == "inpaint":
+            base = Image.open(paths[0]).convert("RGBA")
+            alpha = self._mask_datauri_to_alpha(g.get("mask"), base.size)
+            if alpha is not None:
+                base.putalpha(alpha)
+            return base
+        # edit：多参考图，逐张转 RGBA
+        return [Image.open(p).convert("RGBA") for p in paths]
+
+    def _ref_path(self, p):
+        c = _abs_path(str(p).replace("file:///", "").replace("file://", ""))
+        c = os.path.normpath(c)
+        return c if os.path.isfile(c) else ""
+
     def _do_gen(self, g):
         self.st["running"] = "gen"
         steps = int(g.get("steps") or 8)
+        mode = str(g.get("mode") or "gen")
         try:
             w, h = (int(x) for x in str(g.get("size", "1024x1024")).lower().split("x"))
         except ValueError:
             w = h = 1024
         count = max(1, int(g.get("count") or 1))
-        est = 4.0 if w * h <= 1024 * 1024 else 10.0   # 进度条的估时（M3 换成引擎回调）
-        ticker_stop = threading.Event()
-
-        def tick():
-            t0 = time.time()
-            while not ticker_stop.wait(0.5):
-                self.st["done"] = min(steps - 1, int((time.time() - t0) / (est / 1.0)))
-                self.st["status"] = "去噪 %d/%d" % (self.st["done"], steps)
-        threading.Thread(target=tick, daemon=True).start()
+        self.st["done"] = 0
         try:
             mgr = self._get_mgr()
             if mgr.pipe is None:
@@ -326,26 +391,49 @@ class App(WindowCtl):
                 self.st["model_loaded"] = True
             out_dir = _abs_path(self.cfg["console"]["output_dir"])
             os.makedirs(out_dir, exist_ok=True)
-            self._log("🚀 开始生成：%dx%d · %d 步 × %d 张" % (w, h, steps, count))
+            input_image = self._build_input_image(g)
+            label = {"edit": "图像编辑", "inpaint": "局部编辑", "rgba": "透明素材"}.get(mode, "文生图")
+            fit = mode in ("edit", "inpaint")
+            res = int(g.get("res") or 1024)
+            if fit:
+                self._log("🚀 开始%s：跟随原图比例 · %d 画幅 · %d 步 × %d 张" % (label, res, steps, count))
+            else:
+                self._log("🚀 开始%s：%dx%d · %d 步 × %d 张" % (label, w, h, steps, count))
+
+            def on_step(done_i, total_i):
+                if not self._stop.is_set():
+                    self.st["done"] = done_i
+                    self.st["total"] = total_i
+                    self.st["status"] = "去噪 %d/%d" % (done_i, total_i)
+
+            def should_stop():
+                return self._stop.is_set()
+
             for i in range(count):
                 if self._stop.is_set():
-                    self._log("⏹ 已停止（第 %d 张之后）" % (i + 1))
+                    self._log("⏹ 已停止（第 %d 张之前）" % (i + 1))
                     self.st["status"] = "已停止"
                     break
                 seed = int(g.get("seed") if g.get("seed") is not None else -1)
                 if seed < 0:
                     seed = int(time.time()) % 10 ** 8
+                self.st["done"] = 0
                 t0 = time.time()
-                img = mgr.generate(str(g.get("prompt", "")), width=w, height=h,
-                                   steps=None if steps == 8 else steps,
-                                   seed=seed, kv_cache=bool(g.get("kv_cache", True)))
+                common = dict(prompt=str(g.get("prompt", "")), image=input_image,
+                              steps=None if steps == 8 else steps,
+                              seed=seed, kv_cache=bool(g.get("kv_cache", True)),
+                              on_step=on_step, should_stop=should_stop)
+                if fit:
+                    img = mgr.generate(resolution=res, **common)
+                else:
+                    img = mgr.generate(width=w, height=h, **common)
                 dt = time.time() - t0
-                name = "gen_%s.png" % time.strftime("%Y%m%d_%H%M%S")
+                name = "%s_%s.png" % (mode if mode != "gen" else "gen",
+                                      time.strftime("%Y%m%d_%H%M%S"))
                 path = os.path.join(out_dir, name)
-                img.save(path)
+                img.save(path)  # RGBA 输出直接带 alpha 存进 PNG
                 self.st["last_sec"] = round(dt, 1)
                 self.st["last_image"] = path
-                self.st["done"] = steps
                 self._log("✅ (%d/%d) 已保存：%s · %.1f 秒" % (i + 1, count, name, dt))
                 self._refresh_gallery_count()
             else:
@@ -355,14 +443,17 @@ class App(WindowCtl):
             self._log("❌ 生成失败：%s" % e)
             self.st["status"] = "生成失败"
         finally:
-            ticker_stop.set()
             self.st["running"] = None
 
     def stop(self, key=None):
         if not self._busy():
             return {"ok": False, "msg": "没有运行中的任务"}
         self._stop.set()
-        self._log("⏹ 已请求停止：当前这张完成后中断")
+        self.st["status"] = "停止中…"
+        if self.st["running"] == "load":
+            self._log("⏹ 已请求停止：模型载入是一次性动作，完成后将不再开始生成")
+        else:
+            self._log("⏹ 已请求停止：等当前这一步去噪完成后中断")
         return {"ok": True}
 
     # ------------------------------------------------------------ js_api：画廊
@@ -396,7 +487,12 @@ class App(WindowCtl):
             from PIL import Image
             with Image.open(path) as im:
                 im.thumbnail((wide, wide))
-                if im.mode not in ("RGB", "L"):
+                if im.mode == "RGBA":
+                    # 透明素材：贴到棋盘底上预览，一眼看出哪里是透明
+                    bg = _checkerboard(im.size)
+                    bg.paste(im, (0, 0), im)
+                    im = bg.convert("RGB")
+                elif im.mode not in ("RGB", "L"):
                     im = im.convert("RGB")
                 buf = io.BytesIO()
                 im.save(buf, format="JPEG", quality=72)

@@ -39,11 +39,15 @@ function pct(){
   if(!s.total)return 0;
   return Math.max(0,Math.min(100,Math.round(s.done/s.total*100)));
 }
+function elText(){
+  const e=Number(MIC.s.st.elapsed)||0;
+  return e>=60?`已用 ${Math.floor(e/60)} 分 ${Math.round(e%60)} 秒`:`已用 ${e.toFixed(0)} 秒`;
+}
 function pgText(){
   const s=MIC.s.st;
-  if(!s.running)return '';
-  if(s.running==='gen')return `第 ${s.done||0} / ${s.total||0} 步`;
-  return s.status||'';
+  if(!s.running)return s.status||'';
+  if(s.running==='load')return `载入模型中… ${elText()}`;
+  return `去噪 ${s.done||0}/${s.total||0} · ${pct()}% · ${elText()}`;
 }
 /* 显存条：>90% 变警告色——12G 卡上这就是「要不要降档」的决策线 */
 function vramHTML(){
@@ -73,7 +77,11 @@ function tick(){
     else if(r==='st')el.textContent=s.status||'就绪';
     else if(r==='dot')el.className='dot '+(el.dataset.mode==='model'
         ?(s.model_loaded?'ok':''):(s.running?'run':''));
-    else if(r==='prog')el.style.width=pct()+'%';
+    else if(r==='prog'){
+      const bar=el.parentElement;
+      if(s.running==='load'){bar.classList.add('indet');el.style.width='';}
+      else{bar.classList.remove('indet');el.style.width=pct()+'%';}
+    }
     else if(r==='pgtext')el.textContent=pgText();
     else if(r==='vram')el.innerHTML=vramHTML();
     else if(r==='count')el.textContent=MIC.n(s[el.dataset.field||'img_count']);

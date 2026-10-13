@@ -19,9 +19,10 @@ function stop(key){
     if(!r||!r.ok)MIC.toast((r&&r.msg)||'没有运行中的任务');
   }).catch(()=>{});
 }
-/* 运行中再点同一个按钮 = 停止 */
+/* 运行中（load 或 gen 任一阶段）再点同一个按钮 = 停止；否则开始。
+   旧写法判 running===key，载入阶段 running='load' 会漏判成「开始」→ 停止点了没反应。 */
 function toggle(key){
-  if(MIC.s.st.running===key)stop(key);else start(key);
+  if(MIC.s.st.running)stop(key);else start(key);
 }
 /* 模型装卸：载入约需十几秒（fp8 权重整份进显存），卸载归还显存 */
 function load(){
@@ -42,4 +43,25 @@ function unload(){
 }
 
 MIC.runner={start,stop,toggle,load,unload,payload:{}};
+
+/* 运行卡 + 成图预览 + 日志卡：文生图/编辑/局部/透明四页同构，收成一个 helper。
+   startCall 是「空闲时点开始」要执行的表达式（如 "MIC.edit.start()"）；
+   运行中固定显示停止按钮（后端只有一种在跑的任务，一律 toggle 'gen'）。 */
+MIC.runner.runCard=function(runNote,startCall){
+  const s=MIC.s.st, run=!!s.running, C=MIC.form, ic=MIC.ic;
+  const btn=run
+    ? '<button class="btn pri" onclick="MIC.runner.stop(\'gen\')">'+ic('stop','s')+'停止</button>'
+    : '<button class="btn pri" onclick="'+(startCall||'MIC.runner.start(\'gen\')')+'">'+ic('play','s')+'开始</button>';
+  const statusBody=
+    '<div class="status">'+
+      C.strow('任务状态','<span class="dot '+(run?'run':'')+'" data-role="dot"></span><span data-role="st"></span>')+
+      C.strow('去噪进度','<div class="prog"><i data-role="prog"></i></div><span class="mut fine" data-role="pgtext"></span>')+
+      C.strow('本轮结果','<span class="mut" data-role="result">'+(runNote||'就绪后开始')+'</span>')+'</div>'+
+    '<div class="btnrow">'+btn+
+      '<button class="btn" onclick="MIC.gen.openDir()">'+ic('folder','s')+'打开输出目录</button>'+
+    '</div>';
+  return C.card('运行','play',statusBody)+
+    C.card('成图预览','image','<div data-role="imgprev" class="prevwrap"></div>',{tight:true})+
+    C.logcard('gen','生成日志');
+};
 })();

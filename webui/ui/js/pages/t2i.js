@@ -6,6 +6,7 @@ const MIC=window.MIC=window.MIC||{};
 const C=MIC.form, ic=MIC.ic;
 
 const SIZES=[
+  {code:'512x512',name:'512×512 草图 · 最快最省显存（约 12~15 秒）'},
   {code:'1024x1024',name:'1024×1024 方形 · 标准（约 28 秒）'},
   {code:'1024x1536',name:'1024×1536 竖版 2:3'},
   {code:'1536x1024',name:'1536×1024 横版 3:2'},
