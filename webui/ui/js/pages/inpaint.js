@@ -50,7 +50,8 @@ MIC.registerPage('inpaint',{
         'A pair of sunglasses resting on the dashboard.'))+
       C.field('原图',stage(),'涂抹层单独导出为蒙版，后端按原图尺寸对齐')+
       C.field('画笔粗细',C.num('inpaint.brush','px'))+
-      C.field('画幅（跟随原图比例）',resSel('inpaint.res'))+
+      C.field('画幅（跟随原图比例）',resSel('inpaint.res'),
+        '要手机竖屏图：原图用竖版（如 9:16）即可，画幅自动跟随')+
       '<div class="grid3">'+
         C.field('步数',C.seg('inpaint.steps',[['8','8 步 · Turbo'],['40','40 步 · 精细']]))+
         C.field('随机种子',C.num('inpaint.seed','-1 = 随机'))+

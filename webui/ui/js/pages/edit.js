@@ -55,7 +55,8 @@ MIC.registerPage('edit',{
       C.field('编辑指令（想要怎么改这组图，英文最稳）',C.ta('edit.prompt',4,
         'Turn the pencil sketch into a photorealistic image of the same object on a white background.'))+
       C.field('参考图（≤10 张，最后一张定画幅比例）',dropzone+grid(),'选好后每张会显示缩略图，右上角 × 移除')+
-      C.field('画幅（出图比例跟随最后一张参考图）',resSel('edit.res'))+
+      C.field('画幅（出图比例跟随最后一张参考图）',resSel('edit.res'),
+        '要手机竖屏图：上传竖版参考图（如 9:16）即可，画幅自动跟随')+
       '<div class="grid3">'+
         C.field('步数',C.seg('edit.steps',[['8','8 步 · Turbo'],['40','40 步 · 精细']]))+
         C.field('随机种子',C.num('edit.seed','-1 = 随机'))+
