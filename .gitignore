@@ -1,0 +1,9 @@
+# 整合包排除项：删目录即净；仓库只提交代码与文档
+.venv/
+models/
+outputs/
+logs/
+__pycache__/
+*.pyc
+*.tmp
+.cache/
