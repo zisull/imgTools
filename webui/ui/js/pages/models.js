@@ -30,8 +30,8 @@ MIC.registerPage('models',{
       list+
       (s.model_loaded?'<div class="hint" style="margin-top:10px">⚠️ 显存里已载入模型：切换激活后要「卸载模型」再载入才生效</div>':'');
     const dl=
-      C.field('仓库 ID（HuggingFace 上的 org/name）','<input class="inp" id="dl-repo" value="Qwen/Qwen-Image-2.1-Turbo" placeholder="org/name">')+
-      C.field('本地目录名（留空=用仓库名末段）','<input class="inp" id="dl-name" placeholder="例如 Qwen-Image-2.1-Turbo">')+
+      C.field('仓库 ID','<input class="inp" id="dl-repo" value="Qwen/Qwen-Image-2.1-Turbo" placeholder="org/name">','HuggingFace 上的 org/name')+
+      C.field('本地目录名','<input class="inp" id="dl-name" placeholder="例如 Qwen-Image-2.1-Turbo">','留空=用仓库名末段')+
       '<div class="btnrow"><button class="btn pri" onclick="MIC.models.start()">'+
         ic('down','s')+'开始下载（断点续传）</button>'+
       '<span class="mut fine">　走 hf-mirror，中断自动重连，进度看下面日志</span></div>';

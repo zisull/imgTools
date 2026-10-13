@@ -72,8 +72,10 @@ function seg(k,items){
     `<button class="${val===v?'on':''}" data-v="${esc(val)}">${label}</button>`).join('')}</div>`;
 }
 function pathrow(k,ph,pickKind){
+  /* 类名别叫 path：nav.css 里的 .path 是给侧栏面包屑的（max-width:88px;flex:none），
+     挂到输入框上会把目录路径压成「D:/AI/Qwe…」，也长不大 */
   return `<div class="inrow dropz" data-into="${k}" data-drop="${pickKind||'file'}"
-      title="可以直接把文件从资源管理器拖进来">${txt(k,ph,'path')}
+      title="可以直接把文件从资源管理器拖进来">${txt(k,ph,'fpath')}
     <button class="btn" onclick="MIC.form.pickInto('${k}','${pickKind}')">浏览</button></div>`;
 }
 /* 任务跑着的时候参数改不动（与桌面版禁用控件同义）：inert 挡键盘，dis 挡鼠标 */
@@ -201,20 +203,41 @@ document.addEventListener('click',e=>{
    只有 .dropz（文件路径格）接住，其余位置一律 preventDefault：
    浏览器默认「拖文件=打开文件」会把整页换掉，跑一半的状态当场就没。 */
 function dropCands(dt){
-  const out=[];
+  const full=[],names=[];
   const fl=dt.files||[];
   for(let i=0;i<fl.length;i++){
-    if(fl[i].path)out.push(fl[i].path);       // 有的内核给得出完整路径
-    if(fl[i].name)out.push(fl[i].name);       // 只给得出文件名时交给后端去找
+    if(fl[i].path)full.push(fl[i].path);       // 有的内核给得出完整路径
+    if(fl[i].name)names.push(fl[i].name);      // 只给得出文件名时交给后端去找
   }
   ['text/uri-list','DownloadURL','text/plain'].forEach(t=>{
     let v='';try{v=dt.getData(t);}catch(e){}
-    if(v)v.split(/\r?\n/).forEach(s=>out.push(s));
+    if(v)v.split(/\r?\n/).forEach(s=>full.push(s));
   });
-  return out.map(s=>String(s||'').trim()).filter(Boolean).slice(0,8);
+  const clean=a=>a.map(s=>String(s||'').trim()).filter(Boolean);
+  /* 完整路径排在前面：只剩文件名的兜底会在输出目录/桌面/下载里按名字找，
+     排前面可能撞上同名不同目录的另一张图 */
+  return clean(full).concat(clean(names)).slice(0,8);
 }
 function zones(keep){
   document.querySelectorAll('.dropz.over').forEach(x=>{if(x!==keep)x.classList.remove('over');});
+}
+/* 拖放统一出口：先按路径解析；WebView2 只给得出文件名时（拿不到完整路径），
+   把字节读成 dataURL 交后端代收落盘，别让「拖了没反应」变成死路。 */
+function resolveDrop(dt,kind){
+  const cands=dropCands(dt);
+  const f=(dt&&dt.files&&dt.files[0])||null;
+  if(kind==='dir'||!f)
+    return MIC.api.dropPath(cands,kind);
+  return MIC.api.dropPath(cands,kind).then(r=>{
+    if(r&&r.ok)return r;
+    if(f.size>40*1048576)return {ok:false,msg:'这张太大，请用「浏览」选'};
+    return new Promise(res=>{
+      const fr=new FileReader();
+      fr.onload=()=>res(MIC.api.saveDrop(f.name,String(fr.result||'')));
+      fr.onerror=()=>res({ok:false,msg:'读文件失败，请用「浏览」选'});
+      fr.readAsDataURL(f);
+    });
+  });
 }
 document.addEventListener('dragover',e=>{
   if(!e.dataTransfer)return;
@@ -230,10 +253,8 @@ document.addEventListener('drop',e=>{
   const z=e.target.closest?e.target.closest('.dropz'):null;
   zones();
   if(!z)return;
-  const cands=dropCands(e.dataTransfer);
-  if(!cands.length)return;
   const k=z.dataset.into;
-  MIC.api.dropPath(cands,z.dataset.drop||'file').then(r=>{
+  resolveDrop(e.dataTransfer,z.dataset.drop||'file').then(r=>{
     if(!r||!r.ok){MIC.toast((r&&r.msg)||'没能识别这个文件');return;}
     const el=document.querySelector(`#view [data-k="${k}"]`);if(el)el.value=r.path;
     commitPath(k,r.path);
@@ -242,7 +263,7 @@ document.addEventListener('drop',e=>{
 });
 
 MIC.form={field,card,foldcard,logcard,runstat,strow,txt,ta,num,sel,chk,sw,seg,pathrow,lock,read,commit,commitPath,commitMany,pickInto,
-  copyLog,clearLog,applyCfg,dropCands,
+  copyLog,clearLog,applyCfg,dropCands,resolveDrop,
   fold(h){h.classList.toggle('closed');h.nextElementSibling.classList.toggle('hide');},
   /* 页面里非 data-k 的临时控件：取值不写配置 */
   raw(id){const el=MIC.$(id);return el?(el.value!=null?el.value.trim():el.textContent):'';},

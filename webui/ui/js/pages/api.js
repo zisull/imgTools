@@ -40,7 +40,7 @@ MIC.registerPage('api',{
   render(){
     const a=MIC.s.cfg.api||{}, on=!!MIC.s.st.api_on;
     const svc=
-      C.strow('服务状态',`<span class="dot ${on?'ok':'run'}"></span>`+
+      C.strow('服务状态',`<span class="dot ${on?'ok':''}"></span>`+
         `<span>${on?'运行中 · '+esc(MIC.s.st.api_url):'已停止'}</span>`)+
       C.strow('服务开关',`<div class="sw ${a.enabled?'on':''}" onclick="MIC.apiSrv.setEnabled(${!a.enabled})"></div>`)+
       C.strow('局域网访问',`<div class="sw ${a.lan?'on':''}" onclick="MIC.apiSrv.setLan(${!a.lan})"></div>`+

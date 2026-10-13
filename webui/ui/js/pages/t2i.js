@@ -27,7 +27,8 @@ MIC.registerPage('t2i',{
     const s=MIC.s.st;
     const run=!!s.running;
     const params=
-      C.field('提示词（描述画面内容，英文效果最稳）',C.ta('gen.prompt',4,'A neon-lit alley in the rain, cinematic lighting…'))+
+      C.field('提示词',C.ta('gen.prompt',4,'A neon-lit alley in the rain, cinematic lighting…'),
+        '描述画面内容，英文效果最稳')+
       C.field('尺寸档位',sizeSel('gen.size'))+
       '<div class="grid3">'+
         C.field('步数',C.seg('gen.steps',[['8','8 步 · Turbo'],['40','40 步 · 精细']]))+
@@ -35,7 +36,7 @@ MIC.registerPage('t2i',{
         C.field('张数',C.num('gen.count','张'))+
       '</div>'+
       C.foldcard('反向提示词 / 高级','cog',
-        C.field('反向提示词（不想出现的内容）',C.ta('gen.negative',2,'lowres, bad anatomy, watermark…'))+
+        C.field('反向提示词',C.ta('gen.negative',2,'lowres, bad anatomy, watermark…'),'不想出现的内容')+
         C.field('KV 缓存',C.chk('gen.kv_cache','use_kv_cache（官方推荐开，长提示词更快）')),'可选，默认收起');
     const statusBody=
       '<div class="status">'+

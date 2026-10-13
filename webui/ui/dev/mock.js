@@ -152,6 +152,11 @@ window.MIC_MOCK={
     const n=String((items&&items[0])||'').split(/[\\/]/).pop()||'model';
     return Promise.resolve({ok:true,path:kind==='dir'?('D:/AI/Qwen-Image-2.1/models/'+n):('D:/AI/Qwen-Image-2.1/outputs/'+n)});
   },
+  save_drop(n){
+    const p='D:/AI/Qwen-Image-2.1/outputs/drop_refs/'+(String(n||'drop.png').split(/[\\/]/).pop());
+    L('📥 拖放的文件已代收（mock）：'+p);
+    return Promise.resolve({ok:true,path:p});
+  },
   set_title(t){cfg.app_title=t;return {ok:true,title:t};},
   refresh_stats(){st.img_count=GAL.length;return {ok:true,state:st};},
   load_model(){

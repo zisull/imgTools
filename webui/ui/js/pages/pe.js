@@ -46,8 +46,8 @@ MIC.registerPage('pe',{
   render(){
     const pv=preview();
     const body=
-      C.field('基础描述（想要什么画面，中英文都行）',
-        C.ta('pe.base',3,'一只在雪地里行走的白狐…'))+
+      C.field('基础描述',
+        C.ta('pe.base',3,'一只在雪地里行走的白狐…'),'想要什么画面，中英文都行')+
       GROUPS.map(groupHTML).join('')+
       C.field('拼装结果','<div class="codebox" id="pe-prev">'+esc(pv||'（先写基础描述，再点几枚标签）')+'</div>')+
       '<div class="btnrow">'+

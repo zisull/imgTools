@@ -26,8 +26,9 @@ MIC.registerPage('rgba',{
   render(){
     const s=MIC.s.st, run=!!s.running;
     const params=
-      C.field('提示词（务必点明“透明背景 / isolated on a transparent background”）',
-        C.ta('rgba.prompt',4,'A flat vector icon of a lightbulb, isolated on a fully transparent background, clean edges, sticker style.'))+
+      C.field('提示词',
+        C.ta('rgba.prompt',4,'A flat vector icon of a lightbulb, isolated on a fully transparent background, clean edges, sticker style.'),
+        '务必点明“透明背景 / isolated on a transparent background”')+
       C.field('尺寸档位',sizeSel('rgba.size'))+
       '<div class="grid3">'+
         C.field('步数',C.seg('rgba.steps',[['8','8 步 · Turbo'],['40','40 步 · 精细']]))+
@@ -45,6 +46,7 @@ MIC.registerPage('rgba',{
 
 MIC.rgba={
   start(){
+    MIC.form.commit();          // 先写回界面值，否则刚打的提示词会被旧配置顶掉
     const g=MIC.s.cfg.rgba||{};
     MIC.runner.start('gen',{mode:'rgba',
       prompt:g.prompt||'',size:g.size||'1024x1024',steps:g.steps||'8',

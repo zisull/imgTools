@@ -21,9 +21,8 @@ function resSel(k){
 }
 
 function grid(){
-  if(!imgs.length){
-    return '<div class="empty">还没选参考图：点「添加参考图」或直接拖图片进来（最多 10 张）</div>';
-  }
+  /* 一张没选时不占位：拖放区自己就写着「点我/拖进来」，再补一行空态只是重复 */
+  if(!imgs.length)return '';
   return '<div class="ggrid">'+imgs.map(function(p,i){
     const t=thumbs[p]||'';
     return '<div class="gcell">'+
@@ -35,7 +34,9 @@ function grid(){
 }
 
 function loadThumb(p){
-  if(thumbs[p])return;
+  /* 用 in 判重：写进去的可能是空串（后端出图失败），真值判断会把这张当成「没请求过」，
+     每次 render 都重发一次缩略图请求，坏文件就会没完没了地重做。 */
+  if(p in thumbs)return;
   thumbs[p]='';
   MIC.api.thumb(p).then(function(r){
     if(r&&r.ok){thumbs[p]=r.url;MIC.render();}
@@ -52,11 +53,12 @@ MIC.registerPage('edit',{
       'ondrop="event.preventDefault();this.classList.remove(\'over\');MIC.edit.onDrop(event)">'+
       ic('plus','s')+'点我添加参考图，或把图片拖到这里</div>';
     const params=
-      C.field('编辑指令（想要怎么改这组图，英文最稳）',C.ta('edit.prompt',4,
-        'Turn the pencil sketch into a photorealistic image of the same object on a white background.'))+
-      C.field('参考图（≤10 张，最后一张定画幅比例）',dropzone+grid(),'选好后每张会显示缩略图，右上角 × 移除')+
-      C.field('画幅（出图比例跟随最后一张参考图）',resSel('edit.res'),
-        '要手机竖屏图：上传竖版参考图（如 9:16）即可，画幅自动跟随')+
+      C.field('编辑指令',C.ta('edit.prompt',4,
+        'Turn the pencil sketch into a photorealistic image of the same object on a white background.'),
+        '想要怎么改这组图，英文最稳')+
+      C.field('参考图',dropzone+grid(),'最多 10 张，最后一张定画幅比例；选好后每张显示缩略图，右上角 × 移除')+
+      C.field('画幅',resSel('edit.res'),
+        '出图比例跟随最后一张参考图。要手机竖屏图：上传竖版参考图（如 9:16）即可，画幅自动跟随')+
       '<div class="grid3">'+
         C.field('步数',C.seg('edit.steps',[['8','8 步 · Turbo'],['40','40 步 · 精细']]))+
         C.field('随机种子',C.num('edit.seed','-1 = 随机'))+
@@ -81,9 +83,7 @@ MIC.edit={
     }).catch(function(){});
   },
   onDrop(e){
-    const cands=MIC.form.dropCands(e.dataTransfer);
-    if(!cands.length)return;
-    MIC.api.dropPath(cands,'file').then(function(r){
+    MIC.form.resolveDrop(e.dataTransfer,'file').then(function(r){
       if(!r||!r.ok){MIC.toast((r&&r.msg)||'没能识别这个文件');return;}
       if(imgs.indexOf(r.path)<0){if(imgs.length>=10){MIC.toast('最多 10 张');return;}imgs.push(r.path);loadThumb(r.path);}
       MIC.render();
@@ -92,6 +92,8 @@ MIC.edit={
   del(i){imgs.splice(i,1);MIC.render();},
   start(){
     if(!imgs.length){MIC.toast('先添加至少一张参考图');return;}
+    /* 先把界面上的值写回 cfg：不 commit 读到的是上次落盘的旧值，刚打的指令会被丢掉 */
+    MIC.form.commit();
     const g=MIC.s.cfg.edit||{};
     MIC.runner.start('gen',{mode:'edit',images:imgs.slice(),
       prompt:g.prompt||'',res:g.res||'1024',steps:g.steps||'8',

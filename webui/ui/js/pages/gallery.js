@@ -4,19 +4,26 @@
 const MIC=window.MIC=window.MIC||{};
 const C=MIC.form, ic=MIC.ic, esc=MIC.esc;
 
-let busy=false, favOnly=false;
+let busy=false, favOnly=false, view=[], err='';
+/* 单元格按索引引用：Windows 路径带反斜杠，不往 onclick 字符串里塞。
+   索引必须落在「界面上这一份」而不是原始数组上——只看收藏时两者会错位。 */
+function at(i){return view[i]||null;}
 function load(force){
   if(busy)return Promise.resolve();
   if(force)MIC.s.gal=null;
-  busy=true;
+  busy=true;err='';
   if(force)MIC.render();   // 先画出「正在扫描」占位
   return MIC.api.galleryList().then(r=>{
+    if(!r||!r.ok)err='扫描失败：'+((r&&r.msg)||'后台没给清单');
     MIC.s.gal=(r&&r.ok&&r.items)||[];
     busy=false;
     MIC.render();
-  }).catch(()=>{busy=false;MIC.render();});
+  }).catch(e=>{
+    err='扫描失败：'+(e&&e.message||e);
+    MIC.s.gal=[];          // 失败也要落一个空清单：留着 null 会让每次 render 都重扫一遍
+    busy=false;MIC.render();
+  });
 }
-/* 单元格按索引引用：Windows 路径带反斜杠，不往 onclick 字符串里塞 */
 function cellHTML(it,i){
   return `<div class="gcell" title="${esc(it.prompt||'没有参数记录')}">
     <img src="${esc(it.url||'')}" alt="" onclick="MIC.gal.open(${i})">
@@ -34,11 +41,12 @@ MIC.registerPage('gallery',{
     let items=MIC.s.gal;
     const scan=items===null;
     if(!scan&&favOnly)items=items.filter(x=>x.fav);
+    view=scan?[]:items;
     const grid=scan
       ?`<div class="empty">正在扫描输出目录…</div>`
       :(items.length
         ?`<div class="ggrid">${items.map(cellHTML).join('')}</div>`
-        :`<div class="empty">${favOnly?'还没有收藏的图 · 点缩略图左上角 ✦ 收藏':'输出目录还没有图 · 去「文生图」跑一张'}</div>`);
+        :`<div class="empty">${esc(err)||(favOnly?'还没有收藏的图 · 点缩略图左上角 ✦ 收藏':'输出目录还没有图 · 去「文生图」跑一张')}</div>`);
     const total=MIC.s.gal?MIC.s.gal.length:0;
     return C.card('成图','grid',
       `<div class="bar">
@@ -51,20 +59,20 @@ MIC.registerPage('gallery',{
        </div>${grid}`,{tight:true})+
       C.logcard('sys','系统日志');
   },
-  mount(){if(!MIC.s.gal)load();},
+  mount(){if(MIC.s.gal==null)load();},   // 空目录也是 []：用真值判断会把「扫过了、没图」当成没扫，每帧重扫
 });
 
 MIC.gal={
   load,
   invalidate(){MIC.s.gal=null;},
   toggleFav(){favOnly=!favOnly;MIC.render();},
-  open(i){const it=(MIC.s.gal||[])[i];if(it)MIC.api.openPath(it.file).catch(()=>{});},
+  open(i){const it=at(i);if(it)MIC.api.openPath(it.file).catch(()=>{});},
   openDir(){
     const d=(MIC.s.cfg.console||{}).output_dir||'';
     MIC.api.openPath(d).catch(()=>MIC.toast('还没配输出目录'));
   },
   fav(i){
-    const it=(MIC.s.gal||[])[i];if(!it)return;
+    const it=at(i);if(!it)return;
     if(!it.mode){MIC.toast('这张没有参数记录，收藏不了（老图）');return;}
     const on=!it.fav;
     MIC.api.galleryFav(it.file,on).then(r=>{
@@ -73,7 +81,7 @@ MIC.gal={
   },
   /* 回填：mode → 目标页 + 配置块；局部编辑的蒙版画不回，只带指令 */
   backfill(i){
-    const it=(MIC.s.gal||[])[i];
+    const it=at(i);
     if(!it||!it.mode){MIC.toast('这张没有参数记录，回填不了');return;}
     const map={gen:['gen','t2i'],edit:['edit','edit'],inpaint:['inpaint','inpaint'],rgba:['rgba','rgba']};
     const m=map[it.mode];
@@ -97,7 +105,7 @@ MIC.gal={
     }).catch(()=>MIC.toast('回填失败'));
   },
   del(i){
-    const it=(MIC.s.gal||[])[i];if(!it)return;
+    const it=at(i);if(!it)return;
     MIC.api.galleryDelete(it.file).then(r=>{
       if(!r||!r.ok){MIC.toast((r&&r.msg)||'删除失败');return;}
       MIC.s.gal=MIC.s.gal.filter(x=>x.file!==it.file);

@@ -39,6 +39,8 @@ MIC.api={
   pick:kind=>call('pick',kind),
   /* 拖进来的文件 → 完整路径（后端拿不到就回原因，前端只负责填框） */
   dropPath:(c,kind)=>call('drop_path',c,kind||'file'),
+  /* 拖放兜底：路径解析不出来时把字节交后端代收 */
+  saveDrop:(n,d)=>call('save_drop',n,d),
   setTitle:t=>call('set_title',t),
   /* 引擎：模型装卸与生成（都是后端起线程，调用即返回） */
   loadModel:()=>call('load_model'),

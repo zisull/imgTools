@@ -24,6 +24,7 @@ import re
 import sys
 import threading
 import time
+import urllib.parse
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(_HERE)
@@ -49,6 +50,8 @@ WIN_W, WIN_H = 1280, 800
 MIN_W, MIN_H = 980, 620
 
 IMG_EXT = (".png", ".jpg", ".jpeg", ".webp")
+# pywebview 的过滤串：描述 + 括号内分号分隔的扩展名（空格分隔会被 parse_file_type 拒）
+_IMG_FILTER = "图片 (*" + ";*".join(IMG_EXT) + ")"
 
 DEFAULT_CFG = {
     "app_title": APP_NAME, "theme": "tide", "mode": "dark",
@@ -64,7 +67,7 @@ DEFAULT_CFG = {
                 "seed": -1, "count": 1, "kv_cache": True, "brush": 48},
     "rgba": {"prompt": "", "negative": "", "size": "1024x1024", "steps": "8",
              "seed": -1, "count": 1, "kv_cache": True},
-    "api": {"enabled": False, "lan": False, "host": "127.0.0.1", "port": 8765,
+    "api": {"enabled": False, "lan": False, "port": 8765,
             "token": ""},
     "nav": [
         {"id": "t_ov", "type": "tab", "name": "概览", "icon": "home", "page": "overview"},
@@ -97,6 +100,14 @@ def _abs_path(p):
     return p if os.path.isabs(p) else os.path.join(ROOT, p)
 
 
+def _to_int(v, default, lo=1, hi=10 ** 6):
+    """前端传来的数字一律容错：坏值回落默认档，绝不能让 int() 把任务卡死在半路。"""
+    try:
+        return max(lo, min(hi, int(v)))
+    except (TypeError, ValueError):
+        return default
+
+
 def _fd(name):
     """pywebview 6 用 FileDialog 枚举，旧版是 webview.XXX_DIALOG 常量；兼容取。"""
     fd = getattr(webview, "FileDialog", None)
@@ -121,6 +132,7 @@ class App(WindowCtl):
         self.cfg = json.loads(json.dumps(DEFAULT_CFG))
         self._load_cfg()
         self._lock = threading.Lock()
+        self._task_lock = threading.Lock()   # 「查空闲 + 占位」必须一气呵成
         self._logs = []            # [seq, hh:mm:ss, text]
         self._seq = 0
         self._window = None
@@ -185,18 +197,17 @@ class App(WindowCtl):
             if len(self._logs) > 3000:
                 del self._logs[:len(self._logs) - 3000]
 
-    def _logs_since(self, cursor):
-        with self._lock:
-            return [x for x in self._logs if x[0] > (cursor or 0)]
-
     # ------------------------------------------------------------ js_api：取数
     def boot(self):
         return {"cfg": self.cfg, "state": self._snap(),
                 "version": APP_VERSION, "default_nav": DEFAULT_CFG["nav"]}
 
     def poll(self, cursor=0):
+        with self._lock:                 # seq 和 logs 一次取齐：分两次读，中间新进的一条会被跳过
+            seq = self._seq
+            logs = [x for x in self._logs if x[0] > (cursor or 0)]
         self._sample_vram()
-        return {"seq": self._seq, "logs": self._logs_since(cursor), "state": self._snap()}
+        return {"seq": seq, "logs": logs, "state": self._snap()}
 
     def refresh_stats(self):
         self._refresh_gallery_count()
@@ -228,36 +239,118 @@ class App(WindowCtl):
         return {"ok": True, "title": title}
 
     # ------------------------------------------------------------ js_api：对话框
+    def abs_path(self, p):
+        """给 api_server 这类同进程模块用的路径基准：相对路径按项目根解释，不跟着 CWD 漂。"""
+        return _abs_path(p)
+
     def pick(self, kind="file"):
         w = self._window
         if w is None:
             return ""
-        try:
-            if kind == "dir":
+        # 目录框的兜底绝不能是「打开文件对话框」：那样会把一个文件路径填进目录字段
+        if kind == "dir":
+            try:
                 r = w.create_file_dialog(_fd("FOLDER"))
-            else:
-                # 必须合成一条过滤：拆成多项时对话框默认项只放行一种扩展名，
-                # jpg 会被整个灰掉，看着就是「不支持 jpg」
+            except Exception as e:
+                self._log("⚠️ 目录对话框没打开：%s" % e)
+                return ""
+        else:
+            # 合成一条过滤：拆多项时对话框默认项只放行一种扩展名，jpg 会被整个灰掉。
+            # 多个扩展名必须用分号分隔——pywebview 的 parse_file_type 正则不认空格，
+            # 传空格形式会抛 ValueError（被下面 except 吞掉，症状就是「点了没反应」）
+            try:
                 r = w.create_file_dialog(_fd("OPEN"),
-                                         file_types=("图片 (*.png *.jpg *.jpeg *.webp)",))
-        except Exception as e:
-            self._log("⚠️ 文件对话框没打开：%s" % e)
-            return ""
+                                         file_types=(_IMG_FILTER,))
+            except Exception as e:
+                self._log("⚠️ 文件对话框没打开：%s" % e)
+                try:
+                    r = w.create_file_dialog(_fd("OPEN"))   # 过滤串坏掉也要让人能选文件
+                except Exception as e2:
+                    self._log("⚠️ 重试也没打开：%s" % e2)
+                    return ""
         if not r:
             return ""
         return r[0] if isinstance(r, (tuple, list)) else str(r)
 
+    @staticmethod
+    def _drop_variants(raw):
+        """拖放候选串 → 路径候选。浏览器给的形式不统一：原生绝对路径、
+        file:/// + 百分号编码（中文/空格名）、DownloadURL 带引号、或只有文件名。"""
+        s = str(raw or "").strip().strip('"').strip("'").strip()
+        if not s:
+            return
+        yield os.path.normpath(s)
+        t = s
+        if t.lower().startswith("file:"):
+            t = urllib.parse.unquote(urllib.parse.urlparse(t).path or t[5:])
+            if len(t) > 2 and t[0] == "/" and t[2] == ":":
+                t = t[1:]                       # /C:/x → C:/x
+        else:
+            t = urllib.parse.unquote(t)
+        t = os.path.normpath(t)
+        if t != os.path.normpath(s):
+            yield t
+
+    def _find_by_name(self, name):
+        """只剩文件名时（Chromium 系内核不给完整路径），去常见落点找一遍。"""
+        if not name or ("/" in name) or ("\\" in name):
+            return ""
+        home = os.path.expanduser("~")
+        for d in [_abs_path(self.cfg["console"].get("output_dir", ""))] + \
+                [os.path.join(home, x) for x in ("Desktop", "Downloads", "Pictures")]:
+            p = os.path.join(d or "", name)
+            if d and os.path.exists(p):
+                return os.path.normpath(p)
+        return ""
+
     def drop_path(self, candidates, kind="file"):
         """拖进来的路径列表 → 挑一个真实存在的绝对路径（相对路径按项目根找）。"""
         for c in candidates or []:
-            p = str(c).replace("file:///", "").replace("file://", "")
-            p = os.path.normpath(p)
-            if os.path.isabs(p) and os.path.exists(p):
-                return {"ok": True, "path": p}
-            q = _abs_path(p)
-            if os.path.exists(q):
-                return {"ok": True, "path": q}
+            for p in self._drop_variants(c):
+                if os.path.isabs(p) and os.path.exists(p):
+                    return {"ok": True, "path": p}
+                q = _abs_path(p)
+                if os.path.exists(q):
+                    return {"ok": True, "path": q}
+            hit = self._find_by_name(os.path.basename(self._drop_decode(c)))
+            if hit:
+                return {"ok": True, "path": hit}
         return {"ok": False, "msg": "没找到拖进来的文件，请用「浏览」选"}
+
+    @staticmethod
+    def _drop_decode(raw):
+        """取拖放串里最像路径的那个形态，只为拿文件名。"""
+        for p in App._drop_variants(raw):
+            if p.lower().startswith("file:") or "%" in p:
+                continue
+            return p
+        return str(raw or "")
+
+    def save_drop(self, name, data_url):
+        """内核只给得出文件名、路径解析全落空时的兜底：前端把字节读出来交回来落盘。"""
+        ext = os.path.splitext(str(name or ""))[1].lower()
+        if ext not in IMG_EXT:
+            return {"ok": False, "msg": "拖进来的不是图片（%s）" % (ext or "?")}
+        if not data_url or "," not in str(data_url):
+            return {"ok": False, "msg": "没读到文件内容，请用「浏览」选"}
+        try:
+            raw = base64.b64decode(str(data_url).split(",", 1)[1])
+        except Exception as e:
+            return {"ok": False, "msg": "解码失败：%s" % e}
+        if not raw or len(raw) > 40 * 1024 * 1024:
+            return {"ok": False, "msg": "文件为空或超过 40MB，请用「浏览」选"}
+        out = _abs_path(self.cfg["console"].get("output_dir", ""))
+        d = os.path.join(out, "drop_refs")
+        os.makedirs(d, exist_ok=True)
+        stem = re.sub(r"[^\w.\-]", "_", os.path.splitext(os.path.basename(str(name)))[0])[:60]
+        p = os.path.join(d, "%s_%d%s" % (stem or "drop", int(time.time()), ext))
+        try:
+            with open(p, "wb") as fh:
+                fh.write(raw)
+        except OSError as e:
+            return {"ok": False, "msg": "落盘失败：%s" % e}
+        self._log("📥 拖放的文件已代收：%s（%.1f KB）" % (p, len(raw) / 1024.0))
+        return {"ok": True, "path": p}
 
     # ------------------------------------------------------------ js_api：窗口
     def attach(self, window):
@@ -278,12 +371,30 @@ class App(WindowCtl):
     def _busy(self):
         return self.st["running"] is not None
 
+    def _claim(self, key):
+        """占位：pywebview 给每个 js_api 调用单起一个线程，「先查 _busy 再起线程」
+        中间能被另一个调用插进来，两个任务会同踩同一个 pipeline。查+占放一把锁里。"""
+        with self._task_lock:
+            if self.st["running"] is not None:
+                return False
+            self.st["running"] = key
+            self.st["t_start"] = time.time()
+            self._stop.clear()       # 上一个任务留下的停止位不能顺延到新任务
+            return True
+
+    def _release(self):
+        with self._task_lock:
+            self.st["running"] = None
+
     def _launch(self, key, fn):
-        self.st["running"] = key
-        self.st["t_start"] = time.time()
-        self._stop.clear()
+        if not self._claim(key):
+            return False
         self._thread = threading.Thread(target=fn, daemon=True)
         self._thread.start()
+        return True
+
+    def _busy_msg(self):
+        return "有任务在跑：" + str(self.st["running"])
 
     def _get_mgr(self):
         if self.mgr is None:
@@ -292,9 +403,8 @@ class App(WindowCtl):
         return self.mgr
 
     def load_model(self):
-        if self._busy():
-            return {"ok": False, "msg": "有任务在跑：" + str(self.st["running"])}
-        self._launch("load", self._do_load)
+        if not self._launch("load", self._do_load):
+            return {"ok": False, "msg": self._busy_msg()}
         return {"ok": True}
 
     def _do_load(self, chain_gen=None):
@@ -319,14 +429,15 @@ class App(WindowCtl):
             self.st["status"] = "模型载入失败"
         finally:
             if self.st["running"] == "load":
-                self.st["running"] = None
+                self._release()
 
     def unload_model(self):
-        if self._busy():
-            return {"ok": False, "msg": "有任务在跑：" + str(self.st["running"])}
-        if self.mgr is None or self.mgr.pipe is None:
-            return {"ok": False, "msg": "模型本来就没在显存里"}
+        # 卸载也要占位：查空闲和真正放显存之间若有窗口，生成任务能插进来踩空
+        if not self._claim("unload"):
+            return {"ok": False, "msg": self._busy_msg()}
         try:
+            if self.mgr is None or self.mgr.pipe is None:
+                return {"ok": False, "msg": "模型本来就没在显存里"}
             self.mgr.unload()
             self.st["model_loaded"] = False
             self.st["status"] = "模型已卸载"
@@ -334,10 +445,10 @@ class App(WindowCtl):
             return {"ok": True}
         except Exception as e:
             return {"ok": False, "msg": str(e)}
+        finally:
+            self._release()
 
     def start_gen(self, payload=None):
-        if self._busy():
-            return {"ok": False, "msg": "有任务在跑：" + str(self.st["running"])}
         g = dict(self.cfg.get("gen") or {})
         g.update(payload or {})
         if not str(g.get("prompt", "")).strip():
@@ -345,13 +456,18 @@ class App(WindowCtl):
         mode = str(g.get("mode") or "gen")
         if mode in ("edit", "inpaint") and not (g.get("images") or []):
             return {"ok": False, "msg": "编辑/局部编辑需要先选参考图"}
-        steps = int(g.get("steps") or 8)
+        # 参数一律容错解析：这里抛出去任务就没起跑、也没人把 running 归位，界面会永久卡在跑图中
+        steps = _to_int(g.get("steps"), 8, 1, 100)
         self.st["total"] = steps
-        if self.mgr is None or self.mgr.pipe is None:
+        need_load = self.mgr is None or self.mgr.pipe is None
+        if need_load:
+            launch = lambda: self._do_load(chain_gen=g)
+        else:
+            launch = lambda: self._do_gen(g)
+        if not self._launch("load" if need_load else "gen", launch):
+            return {"ok": False, "msg": self._busy_msg()}
+        if need_load:
             self._log("模型未载入：先载入，随后自动开始生成")
-            self._launch("load", lambda: self._do_load(chain_gen=g))
-            return {"ok": True, "total": steps}
-        self._launch("gen", lambda: self._do_gen(g))
         return {"ok": True, "total": steps}
 
     # -------------------------------------------------------- 参考图 / 蒙版
@@ -392,15 +508,14 @@ class App(WindowCtl):
 
     def _do_gen(self, g):
         self.st["running"] = "gen"
-        steps = int(g.get("steps") or 8)
-        mode = str(g.get("mode") or "gen")
-        try:
-            w, h = (int(x) for x in str(g.get("size", "1024x1024")).lower().split("x"))
-        except ValueError:
-            w = h = 1024
-        count = max(1, int(g.get("count") or 1))
         self.st["done"] = 0
         try:
+            # 全部参数解析放进 try：这里抛出去就永远到不了 finally，running 卡在 gen 再也点不动
+            steps = _to_int(g.get("steps"), 8, 1, 100)
+            mode = str(g.get("mode") or "gen")
+            wh = str(g.get("size", "1024x1024")).lower().split("x")
+            w, h = _to_int(wh[0], 1024, 64, 4096), _to_int(wh[1] if len(wh) > 1 else "", 1024, 64, 4096)
+            count = _to_int(g.get("count"), 1, 1, 8)
             mgr = self._get_mgr()
             if mgr.pipe is None:
                 mgr.load(_abs_path(self.cfg["console"]["model_dir"]),
@@ -412,7 +527,7 @@ class App(WindowCtl):
             input_image = self._build_input_image(g)
             label = {"edit": "图像编辑", "inpaint": "局部编辑", "rgba": "透明素材"}.get(mode, "文生图")
             fit = mode in ("edit", "inpaint")
-            res = int(g.get("res") or 1024)
+            res = _to_int(g.get("res"), 1024, 256, 2048)
             if fit:
                 self._log("🚀 开始%s：跟随原图比例 · %d 画幅 · %d 步 × %d 张" % (label, res, steps, count))
             else:
@@ -432,7 +547,7 @@ class App(WindowCtl):
                     self._log("⏹ 已停止（第 %d 张之前）" % (i + 1))
                     self.st["status"] = "已停止"
                     break
-                seed = int(g.get("seed") if g.get("seed") is not None else -1)
+                seed = _to_int(g.get("seed"), -1, -1, 10 ** 12)
                 if seed < 0:
                     seed = int(time.time()) % 10 ** 8
                 self.st["done"] = 0
@@ -446,9 +561,20 @@ class App(WindowCtl):
                 else:
                     img = mgr.generate(width=w, height=h, **common)
                 dt = time.time() - t0
-                name = "%s_%s.png" % (mode if mode != "gen" else "gen",
-                                      time.strftime("%Y%m%d_%H%M%S"))
-                path = os.path.join(out_dir, name)
+                # 中断时 pipeline 照样返回一张「半去噪」图：存进画廊就是张废图，别收
+                if self._stop.is_set():
+                    self._log("⏹ 已停止：第 %d 张是被中断的半成品，不落盘" % (i + 1))
+                    self.st["status"] = "已停止"
+                    break
+                # 名字带序号：同一批多张不能挤在同一秒的同一个名上（会互相覆盖成一张）
+                stem = "%s_%s" % ("gen" if mode == "gen" else mode,
+                                  time.strftime("%Y%m%d_%H%M%S"))
+                path = os.path.join(out_dir, "%s_%d.png" % (stem, i + 1))
+                bump = 0
+                while os.path.exists(path):      # 同一秒又点了一轮开始：加后缀顶开，别让新图盖掉旧图
+                    bump += 1
+                    path = os.path.join(out_dir, "%s_%d_x%d.png" % (stem, i + 1, bump))
+                name = os.path.basename(path)
                 img.save(path)  # RGBA 输出直接带 alpha 存进 PNG
                 g.setdefault("_saved", []).append(path)
                 self.store.add(path, mode=mode, prompt=str(g.get("prompt", "")),
@@ -466,7 +592,7 @@ class App(WindowCtl):
             self._log("❌ 生成失败：%s" % e)
             self.st["status"] = "生成失败"
         finally:
-            self.st["running"] = None
+            self._release()
 
     def stop(self, key=None):
         if not self._busy():
@@ -640,17 +766,27 @@ class App(WindowCtl):
 
     def gallery_clear(self):
         out_dir = _abs_path(self.cfg["console"]["output_dir"])
-        n = 0
-        for it in self._gallery_items(limit=10000):
+        try:
+            entries = os.listdir(out_dir)
+        except OSError as e:
+            return {"ok": False, "msg": "打不开输出目录：%s" % e}
+        gone, left = 0, set()
+        for name in entries:
+            p = os.path.join(out_dir, name)
+            if not name.lower().endswith(IMG_EXT) or not os.path.isfile(p):
+                continue
             try:
-                os.remove(it["file"])
-                n += 1
+                os.remove(p)     # 直接扫目录：走 _gallery_items 会给每张图现做缩略图，清空时白烧几十秒 CPU
+                gone += 1
             except OSError:
-                pass
-        self._log("已清空输出目录：%d 张" % n)
-        self.store.prune(set())
+                left.add(os.path.normpath(p))   # 删不掉的（正被占用）留在盘上，它的参数记录也得留着
+        msg = "已清空输出目录：%d 张" % gone
+        if left:
+            msg += "，%d 张正被占用没删掉" % len(left)
+        self._log(msg)
+        self.store.prune(left)
         self._refresh_gallery_count()
-        return {"ok": True, "removed": n}
+        return {"ok": True, "removed": gone}
 
     def _in_output(self, path):
         """删除类操作只认输出目录里的图片路径（防止被当成任意文件删除器）。"""

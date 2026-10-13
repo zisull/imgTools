@@ -9,7 +9,7 @@ api_server.py —— FastAPI 对外 REST（M4）
   GET  /v1/tasks/{id}            异步任务状态（queued/running/done/failed）
   GET  /v1/images/{id}           取结果 PNG
 
-任务单线程序执行（Turbo 一张 20~30s，UI 互斥）：worker 等 App 空闲后复用
+任务单线程序执行（Turbo 一张 20~30s，UI 互斥）：worker 先向 App 抢到任务位、再复用
 App._do_gen —— 进度、日志、画廊计数与 UI 发起的任务同一条流，界面上看得见。
 uvicorn 跑后台线程，Server.should_exit 可停，改端口/局域网开关即重启监听。
 """
@@ -76,9 +76,14 @@ class ApiServer:
                 job = self._q.get(timeout=0.5)
             except queue.Empty:
                 continue
-            while self.c._busy() and not self._stop.is_set():
+            # 占位再起跑：查空闲和真正开跑之间若有窗口，UI 任务会插进来同踩一个 pipeline
+            claimed = False
+            while not self._stop.is_set():
+                if self.c._claim("gen"):
+                    claimed = True
+                    break
                 time.sleep(0.8)
-            if self._stop.is_set():
+            if not claimed:
                 job["status"] = "failed"
                 job["error"] = "服务已关闭，任务没执行"
                 continue
@@ -162,7 +167,8 @@ class ApiServer:
             if len(files) > 10:
                 raise HTTPException(400, "参考图最多 10 张")
             jid = uuid.uuid4().hex[:12]
-            ref_dir = os.path.join(os.path.abspath(me.c.cfg["console"]["output_dir"]),
+            # 相对输出目录要按项目根展开：exe 的 CWD 可能是任意地方，abspath() 会把参考图写到别人目录下
+            ref_dir = os.path.join(me.c.abs_path(me.c.cfg["console"]["output_dir"]),
                                    "api_refs", jid)
             os.makedirs(ref_dir, exist_ok=True)
             paths = []

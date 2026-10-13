@@ -11,6 +11,31 @@ const RES=[
 ];
 let base='';          // 原图绝对路径
 let bgData='';        // 原图缩略 data-uri（当画布背景）
+let paint=null;       // 涂抹层的离屏副本：#view 每次 render 都会换掉 canvas 节点，不存这里就被抹平
+let painted=false;    // 涂过没有：没涂就别发任务（后端只会拿到一张全保留的蒙版）
+
+/* 改尺寸会清空 canvas，先把已有的涂抹层缩放搬过去 */
+function resizeKeep(cv,w,h){
+  if(cv.width===w&&cv.height===h)return;
+  const tmp=document.createElement('canvas');
+  tmp.width=cv.width;tmp.height=cv.height;
+  if(tmp.width&&tmp.height)tmp.getContext('2d').drawImage(cv,0,0);
+  cv.width=w;cv.height=h;
+  if(tmp.width&&tmp.height)
+    cv.getContext('2d').drawImage(tmp,0,0,tmp.width,tmp.height,0,0,w,h);
+}
+function remember(cv){
+  if(!cv.width)return;
+  if(!paint)paint=document.createElement('canvas');
+  if(paint.width!==cv.width||paint.height!==cv.height){paint.width=cv.width;paint.height=cv.height;}
+  const pc=paint.getContext('2d');
+  pc.clearRect(0,0,paint.width,paint.height);
+  pc.drawImage(cv,0,0);
+}
+function restore(cv){
+  if(!painted||!paint||!cv.width||!paint.width)return;
+  cv.getContext('2d').drawImage(paint,0,0,paint.width,paint.height,0,0,cv.width,cv.height);
+}
 
 function resSel(k){
   const v=String(MIC.mget(MIC.s.cfg,k));
@@ -46,12 +71,12 @@ MIC.registerPage('inpaint',{
   render(){
     const s=MIC.s.st, run=!!s.running;
     const params=
-      C.field('重绘指令（想在这个区域改成什么）',C.ta('inpaint.prompt',3,
-        'A pair of sunglasses resting on the dashboard.'))+
+      C.field('重绘指令',C.ta('inpaint.prompt',3,
+        'A pair of sunglasses resting on the dashboard.'),'想在这个区域改成什么')+
       C.field('原图',stage(),'涂抹层单独导出为蒙版，后端按原图尺寸对齐')+
       C.field('画笔粗细',C.num('inpaint.brush','px'))+
-      C.field('画幅（跟随原图比例）',resSel('inpaint.res'),
-        '要手机竖屏图：原图用竖版（如 9:16）即可，画幅自动跟随')+
+      C.field('画幅',resSel('inpaint.res'),
+        '跟随原图比例。要手机竖屏图：原图用竖版（如 9:16）即可，画幅自动跟随')+
       '<div class="grid3">'+
         C.field('步数',C.seg('inpaint.steps',[['8','8 步 · Turbo'],['40','40 步 · 精细']]))+
         C.field('随机种子',C.num('inpaint.seed','-1 = 随机'))+
@@ -71,16 +96,14 @@ MIC.inp={
   pickBase(){
     MIC.api.pick('file').then(function(p){
       if(!p)return;
-      base=p;bgData='';
+      base=p;bgData='';painted=false;paint=null;   // 换图：旧涂抹层对新图毫无意义
       MIC.api.thumb(p).then(function(r){if(r&&r.ok){bgData=r.url;}MIC.render();}).catch(function(){MIC.render();});
     }).catch(function(){});
   },
   onDrop(e){
-    const cands=MIC.form.dropCands(e.dataTransfer);
-    if(!cands.length)return;
-    MIC.api.dropPath(cands,'file').then(function(r){
+    MIC.form.resolveDrop(e.dataTransfer,'file').then(function(r){
       if(!r||!r.ok){MIC.toast((r&&r.msg)||'没能识别这个文件');return;}
-      base=r.path;bgData='';
+      base=r.path;bgData='';painted=false;paint=null;
       MIC.api.thumb(r.path).then(function(t){if(t&&t.ok)bgData=t.url;MIC.render();}).catch(function(){MIC.render();});
     }).catch(function(){});
   },
@@ -90,12 +113,13 @@ MIC.inp={
     if(!cv||!bg)return;
     const ctx=cv.getContext('2d');
     const size=()=>{
-      const w=bg.clientWidth||bg.naturalWidth||640;
-      const h=bg.clientHeight||w*(bg.naturalHeight/(bg.naturalWidth||1));
-      // 保留已涂内容：先存快照，缩放后不重绘（蒙版只按尺寸对齐，缩放无所谓）
-      cv.width=Math.round(w);cv.height=Math.round(h);
+      const w=Math.round(bg.clientWidth||bg.naturalWidth||640);
+      const h=Math.round(bg.clientHeight||w*(bg.naturalHeight/(bg.naturalWidth||1)));
+      resizeKeep(cv,w,h);
       ctx.lineWidth=40;ctx.lineCap='round';ctx.lineJoin='round';
       ctx.strokeStyle='rgba(255,72,72,0.85)';
+      restore(cv);            // 每次 render 都是一张新节点：把离屏涂抹层贴回来，否则画两笔就没了
+      remember(cv);
     };
     if(bg.complete)size();else bg.addEventListener('load',size);
     let drawing=false,lx=0,ly=0;
@@ -103,11 +127,13 @@ MIC.inp={
     cv.addEventListener('pointerdown',e=>{
       drawing=true;const[x,y]=pos(e);lx=x;ly=y;
       ctx.beginPath();ctx.arc(x,y,ctx.lineWidth/2,0,6.283);ctx.fillStyle='rgba(255,72,72,0.85)';ctx.fill();
-      cv.setPointerCapture(e.pointerId);
+      try{cv.setPointerCapture(e.pointerId);}catch(err){}   // 合成事件/失效指针会让它抛，别把这一笔的记账一起吞了
+      painted=true;remember(cv);
     });
     cv.addEventListener('pointermove',e=>{
       if(!drawing)return;
       const[x,y]=pos(e);ctx.beginPath();ctx.moveTo(lx,ly);ctx.lineTo(x,y);ctx.stroke();lx=x;ly=y;
+      remember(cv);
     });
     const up=()=>{drawing=false;};
     cv.addEventListener('pointerup',up);cv.addEventListener('pointerleave',up);
@@ -117,14 +143,18 @@ MIC.inp={
     if(bw){const apply=()=>{ctx.lineWidth=Math.max(4,parseFloat(bw.value)||40);};bw.addEventListener('input',apply);apply();}
   },
   clearPaint(){
+    painted=false;
+    if(paint)paint.getContext('2d').clearRect(0,0,paint.width,paint.height);
     const cv=MIC.inp._cv;if(cv){cv.getContext('2d').clearRect(0,0,cv.width,cv.height);}
   },
   start(){
     if(!base){MIC.toast('先选一张原图');return;}
     const cv=MIC.inp._cv;
     if(!cv||!cv.width){MIC.toast('画布还没就绪');return;}
+    if(!painted){MIC.toast('还没涂抹：在图上涂出要重绘的区域');return;}
     // 只导出涂抹层（透明底上的红痕）→ alpha>0 处即重绘区
     const mask=cv.toDataURL('image/png');
+    MIC.form.commit();          // 先写回界面值，否则刚打的指令会被旧配置顶掉
     const g=MIC.s.cfg.inpaint||{};
     MIC.runner.start('gen',{mode:'inpaint',images:[base],mask:mask,
       prompt:g.prompt||'',res:g.res||'1024',steps:g.steps||'8',
