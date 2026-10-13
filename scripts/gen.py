@@ -8,7 +8,6 @@
 --bench 模式依次各出 1 张，打印耗时/显存峰值/内存可用量，用于分档决策。
 """
 import argparse
-import ctypes
 import os
 import sys
 import threading
@@ -19,42 +18,27 @@ sys.path.insert(0, ROOT)
 
 os.environ.setdefault("HF_HUB_OFFLINE", "1")  # 权重已在本地，禁止偷偷联网
 os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
 
+import psutil  # noqa: E402
 import torch  # noqa: E402
 
 from engine.pipeline_mgr import PipelineMgr  # noqa: E402
 
 
 class MemSampler(threading.Thread):
-    """后台采样系统可用内存最低值（Win32 GlobalMemoryStatusEx）。"""
-
-    class MEMORYSTATUSEX(ctypes.Structure):
-        _fields_ = [
-            ("dwLength", ctypes.c_ulong),
-            ("dwMemoryLoad", ctypes.c_ulong),
-            ("ullTotalPhys", ctypes.c_ulonglong),
-            ("ullAvailPhys", ctypes.c_ulonglong),
-            ("ullTotalPageFile", ctypes.c_ulonglong),
-            ("ullAvailPageFile", ctypes.c_ulonglong),
-            ("ullTotalVirtual", ctypes.c_ulonglong),
-            ("ullAvailVirtual", ctypes.c_ulonglong),
-            ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
-        ]
+    """后台采样系统可用内存最低值。"""
 
     def __init__(self):
         super().__init__(daemon=True)
         self.min_avail_gb = float("inf")
         self._stop = threading.Event()
-        self.total_gb = 0.0
+        self.total_gb = psutil.virtual_memory().total / 2**30
 
     def run(self):
-        st = self.MEMSTATUSEX()
-        st.dwLength = ctypes.sizeof(self.MEMSTATUSEX)
-        fn = ctypes.windll.kernel32.GlobalMemoryStatusEx
         while not self._stop.is_set():
-            if fn(ctypes.byref(st)):
-                self.total_gb = st.ullTotalPhys / 2**30
-                self.min_avail_gb = min(self.min_avail_gb, st.ullAvailPhys / 2**30)
+            avail = psutil.virtual_memory().available / 2**30
+            self.min_avail_gb = min(self.min_avail_gb, avail)
             self._stop.wait(0.5)
 
     def stop(self):
@@ -70,10 +54,11 @@ def main() -> int:
     ap.add_argument("--repo", default=os.path.join(ROOT, "models", "Qwen-Image-2.1-Turbo"))
     ap.add_argument("--out", default=None)
     ap.add_argument("--bench", default=None, help="逗号分隔的尺寸列表，逐个出图测速")
+    ap.add_argument("--quant", default="bnb8", choices=["bnb8", "none"], help="bnb8=int8量化transformer+编码器(12G卡推荐)")
     args = ap.parse_args()
 
     mgr = PipelineMgr()
-    mgr.load(args.repo)
+    mgr.load(args.repo, quant=args.quant if args.quant != "none" else None)
 
     sampler = MemSampler()
     sampler.start()

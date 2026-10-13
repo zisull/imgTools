@@ -41,7 +41,9 @@ class PipelineMgr:
         self.state = EngineState()
         self.pipe = None
 
-    def load(self, repo_path: str, offload: bool = True) -> None:
+    def load(self, repo_path: str, offload: bool = True, quant: Optional[str] = None) -> None:
+        """quant=None 全BF16(需大内存); quant="bnb8" 用 bitsandbytes int8 量化
+        transformer+text_encoder，权重从 ~31GB 降到 ~17GB，避开 12G 显存/32G 内存双重 paging。"""
         if self.pipe is not None and self.state.loaded_repo == repo_path:
             return
         self.unload()
@@ -49,9 +51,16 @@ class PipelineMgr:
 
         self.state.loading = True
         t0 = time.time()
-        self.log(f"加载模型: {repo_path} (bf16)")
+        self.log(f"加载模型: {repo_path} (bf16{', bnb-int8' if quant == 'bnb8' else ''})")
+        kwargs = {}
+        if quant == "bnb8":
+            from diffusers import BitsAndBytesConfig
+
+            kwargs["quantization_config"] = BitsAndBytesConfig(load_in_8bit=True)
         try:
-            pipe = QwenImage21Pipeline.from_pretrained(repo_path, dtype=torch.bfloat16)
+            pipe = QwenImage21Pipeline.from_pretrained(
+                repo_path, dtype=torch.bfloat16, **kwargs
+            )
             if offload:
                 pipe.enable_model_cpu_offload()
             else:
