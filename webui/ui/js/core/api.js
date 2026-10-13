@@ -49,7 +49,12 @@ MIC.api={
   thumb:p=>call('thumb',p),
   galleryList:()=>call('gallery_list'),
   galleryDelete:f=>call('gallery_delete',f||''),
+  galleryFav:(f,on)=>call('gallery_fav',f,!!on),
   galleryClear:()=>call('gallery_clear'),
+  /* 模型管理：列表/切换激活/hf-mirror 断点续传下载 */
+  modelsList:()=>call('models_list'),
+  modelsSetActive:n=>call('models_set_active',n),
+  modelsDownload:(r,n)=>call('models_download',r,n||''),
   openPath:p=>call('open_path',p),
   openUrl:u=>call('open_url',u),
   /* API 服务：状态/开关/令牌（后端即时重启监听，都返回最新 state） */

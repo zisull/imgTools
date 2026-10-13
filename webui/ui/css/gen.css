@@ -28,6 +28,17 @@
   background:rgba(0,0,0,.45);color:#fff;border:0}
 .gcell:hover .gdel{opacity:1}
 .gdel:hover{background:var(--danger)}
+.gstar{position:absolute;top:6px;left:6px;width:26px;height:26px;padding:0;display:flex;
+  align-items:center;justify-content:center;border-radius:8px;opacity:0;transition:opacity .12s;
+  background:rgba(0,0,0,.45);color:#fff;border:0}
+.gcell:hover .gstar{opacity:1}
+.gstar.on{opacity:1;color:#ffd166}
+.gstar.on:hover{opacity:1}
+.gfill{position:absolute;top:6px;right:38px;width:26px;height:26px;padding:0;display:flex;
+  align-items:center;justify-content:center;border-radius:8px;opacity:0;transition:opacity .12s;
+  background:rgba(0,0,0,.45);color:#fff;border:0}
+.gcell:hover .gfill{opacity:1}
+.gfill:hover{background:var(--ac)}
 
 /* 参考图/原图选择：虚线可点可拖的落区 */
 .refdrop{display:flex;align-items:center;justify-content:center;gap:8px;min-height:64px;
@@ -51,3 +62,21 @@
   white-space:pre-wrap;word-break:break-all;color:var(--fg2);max-height:340px;overflow:auto}
 .kcode{font:12.5px ui-monospace,Consolas,monospace;color:var(--fg2);
   word-break:break-all;padding:0 6px}
+
+/* 模型管理页：目录清单行 */
+.mrow{display:flex;align-items:center;gap:10px;padding:10px 12px;
+  border:1px solid var(--line);border-radius:12px;background:var(--panel);margin-top:8px}
+.mrow:first-of-type{margin-top:0}
+.minfo{min-width:0;flex:1}
+.minfo b{font-size:13px;word-break:break-all}
+
+/* 提示词工坊：中文选项 chips */
+.chiprow{display:flex;align-items:center;flex-wrap:wrap;gap:7px;margin:8px 0}
+.chipname{font-size:12px;color:var(--fg3);width:34px;flex:none}
+.chip{padding:5px 12px;border-radius:999px;border:1px solid var(--line2);
+  background:var(--panel);color:var(--fg2);font-size:12.5px;cursor:pointer;transition:.12s}
+.chip:hover{border-color:var(--ac-line)}
+.chip.on{border-color:var(--ac-line);color:var(--ac);background:var(--ac-soft)}
+
+/* 卡片里的裸提示行（.f 之外也生效） */
+.hint{font-size:12px;color:var(--fg3);line-height:1.6}

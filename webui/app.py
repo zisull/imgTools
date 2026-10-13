@@ -20,6 +20,7 @@ import ctypes
 import io
 import json
 import os
+import re
 import sys
 import threading
 import time
@@ -72,6 +73,8 @@ DEFAULT_CFG = {
         {"id": "t_inp", "type": "tab", "name": "局部编辑", "icon": "brush", "page": "inpaint"},
         {"id": "t_rgba", "type": "tab", "name": "透明素材", "icon": "layers", "page": "rgba"},
         {"id": "t_gal", "type": "tab", "name": "画廊", "icon": "image", "page": "gallery"},
+        {"id": "t_pe", "type": "tab", "name": "提示词工坊", "icon": "book", "page": "pe"},
+        {"id": "t_mod", "type": "tab", "name": "模型管理", "icon": "db", "page": "models"},
         {"id": "t_api", "type": "tab", "name": "API 服务", "icon": "globe", "page": "api"},
         {"id": "t_set", "type": "tab", "name": "设置", "icon": "cog", "page": "settings"},
     ],
@@ -125,7 +128,11 @@ class App(WindowCtl):
         self._stop = threading.Event()
         self.mgr = None            # PipelineMgr：第一次载入时才 import（拉 torch）
         self._api = None           # ApiServer：API 页开启时才 import（拉 fastapi）
+        self._dl = None            # 模型下载线程（同一时间只允许一个）
         self._thumbs = {}          # (path, mtime) -> data url，缩略缓存
+        from store import Store
+        self.store = Store(os.path.join(ROOT, "data", "history.db"))
+        self.store.init()
         self.st = {
             "running": None, "status": "就绪", "done": 0, "total": 0,
             "model_loaded": False, "model_name": "Qwen-Image-2.1-Turbo",
@@ -229,7 +236,10 @@ class App(WindowCtl):
             if kind == "dir":
                 r = w.create_file_dialog(_fd("FOLDER"))
             else:
-                r = w.create_file_dialog(_fd("OPEN"), file_types=tuple("图片 (*%s)" % e for e in IMG_EXT))
+                # 必须合成一条过滤：拆成多项时对话框默认项只放行一种扩展名，
+                # jpg 会被整个灰掉，看着就是「不支持 jpg」
+                r = w.create_file_dialog(_fd("OPEN"),
+                                         file_types=("图片 (*.png *.jpg *.jpeg *.webp)",))
         except Exception as e:
             self._log("⚠️ 文件对话框没打开：%s" % e)
             return ""
@@ -441,6 +451,10 @@ class App(WindowCtl):
                 path = os.path.join(out_dir, name)
                 img.save(path)  # RGBA 输出直接带 alpha 存进 PNG
                 g.setdefault("_saved", []).append(path)
+                self.store.add(path, mode=mode, prompt=str(g.get("prompt", "")),
+                               negative=str(g.get("negative", "")),
+                               size=("跟随输入图 · %d²" % res) if fit else ("%dx%d" % (w, h)),
+                               steps=steps, seed=seed, sec=round(dt, 1))
                 self.st["last_sec"] = round(dt, 1)
                 self.st["last_image"] = path
                 self._log("✅ (%d/%d) 已保存：%s · %.1f 秒" % (i + 1, count, name, dt))
@@ -597,8 +611,19 @@ class App(WindowCtl):
 
     def gallery_list(self):
         items = self._gallery_items()
+        metas = self.store.meta_map([it["file"] for it in items])
+        for it in items:
+            m = metas.get(it["file"])
+            if m:
+                it.update({k: m[k] for k in
+                           ("mode", "prompt", "negative", "size", "steps", "seed", "sec", "fav")})
         self.st["img_count"] = len(items)
-        return {"ok": True, "items": items}
+        return {"ok": True, "items": items, "stats": self.store.stats()}
+
+    def gallery_fav(self, path, fav):
+        p = os.path.normpath(str(path or ""))
+        self.store.set_fav(p, bool(fav))
+        return {"ok": True}
 
     def gallery_delete(self, path):
         p = self._in_output(path)
@@ -606,6 +631,7 @@ class App(WindowCtl):
             return {"ok": False, "msg": "这个文件不在输出目录里，不动它"}
         try:
             os.remove(p)
+            self.store.remove(p)
             self._log("已删除：" + os.path.basename(p))
             self._refresh_gallery_count()
             return {"ok": True}
@@ -622,6 +648,7 @@ class App(WindowCtl):
             except OSError:
                 pass
         self._log("已清空输出目录：%d 张" % n)
+        self.store.prune(set())
         self._refresh_gallery_count()
         return {"ok": True, "removed": n}
 
@@ -638,6 +665,108 @@ class App(WindowCtl):
         if not (p.lower().endswith(IMG_EXT) and os.path.isfile(p)):
             return {"ok": False, "msg": "图还没落盘"}
         return {"ok": True, "url": self._thumb(p, os.path.getmtime(p), 768)}
+
+    # ------------------------------------------------------------ js_api：模型管理
+    @staticmethod
+    def _safe_name(name):
+        return bool(re.fullmatch(r"[A-Za-z0-9._-]+", str(name or "")))
+
+    def models_list(self):
+        root = _abs_path("models")
+        active = os.path.normpath(_abs_path(
+            str((self.cfg["console"] or {}).get("model_dir", ""))))
+        items = []
+        try:
+            names = sorted(os.listdir(root))
+        except OSError:
+            names = []
+        for name in names:
+            d = os.path.join(root, name)
+            if not os.path.isdir(d):
+                continue
+            total, shards = 0, 0
+            for base, _dirs, fs in os.walk(d):
+                for f in fs:
+                    try:
+                        total += os.path.getsize(os.path.join(base, f))
+                    except OSError:
+                        pass
+                    if f.endswith(".safetensors"):
+                        shards += 1
+            items.append({"name": name, "gb": round(total / 2**30, 1),
+                          "shards": shards,
+                          "index": os.path.isfile(os.path.join(d, "model_index.json")),
+                          "active": os.path.normpath(d) == active})
+        return {"ok": True, "items": items, "dir": root}
+
+    def models_set_active(self, name):
+        if not self._safe_name(name):
+            return {"ok": False, "msg": "模型目录名只能是字母数字点横线下划线"}
+        d = _abs_path(os.path.join("models", name))
+        if not os.path.isdir(d):
+            return {"ok": False, "msg": "这个目录不存在"}
+        self.cfg["console"]["model_dir"] = "models/" + name
+        self._save_cfg()
+        self._log("已切换激活模型：%s%s" % (name,
+                  "（显存里还是旧模型：重新载入才生效）" if self.st["model_loaded"] else ""))
+        return {"ok": True, "cfg": self.cfg}
+
+    def models_download(self, repo, name=""):
+        """hf-mirror 断点续传下载：后台线程 + 每分钟进度日志，瞬断自动重连 20 次。"""
+        if self._dl is not None and self._dl.is_alive():
+            return {"ok": False, "msg": "已经有一个下载在跑，等它结束"}
+        repo = str(repo or "").strip()
+        name = str(name or "").strip() or repo.split("/")[-1]
+        if not re.fullmatch(r"[\w.-]+/[\w.-]+", repo) or not self._safe_name(name):
+            return {"ok": False, "msg": "repo 格式要 org/name；目录名只允许字母数字点横线下划线"}
+        target = _abs_path(os.path.join("models", name))
+        os.makedirs(target, exist_ok=True)
+
+        def dir_gb(p):
+            t = 0
+            for base, _dirs, fs in os.walk(p):
+                for f in fs:
+                    try:
+                        t += os.path.getsize(os.path.join(base, f))
+                    except OSError:
+                        pass
+            return t / 2**30
+
+        def run():
+            os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
+            import huggingface_hub
+            self._log("📥 开始下载 %s → models/%s（hf-mirror，断点续传）" % (repo, name))
+            t0 = time.time()
+            stop_watch = threading.Event()
+
+            def watch():
+                while not stop_watch.wait(60):
+                    self._log("…下载中：models/%s 当前 %.1f GB" % (name, dir_gb(target)))
+            wt = threading.Thread(target=watch, daemon=True)
+            wt.start()
+            done = False
+            try:
+                for attempt in range(1, 21):
+                    try:
+                        huggingface_hub.snapshot_download(
+                            repo_id=repo, local_dir=target, max_workers=4,
+                            etag_timeout=60)
+                        done = True
+                        break
+                    except Exception as e:
+                        wait = min(5 * attempt, 30)
+                        self._log("⚠️ 第 %d 次中断：%s · %d 秒后从断点续传" % (attempt, e, wait))
+                        time.sleep(wait)
+                if done:
+                    self._log("✅ 下载完成 models/%s · 共 %.1f GB · 用时 %.1f 分钟"
+                              % (name, dir_gb(target), (time.time() - t0) / 60))
+                else:
+                    self._log("❌ 下载失败：重试 20 次仍不通，检查网络或代理")
+            finally:
+                stop_watch.set()
+        self._dl = threading.Thread(target=run, daemon=True)
+        self._dl.start()
+        return {"ok": True, "target": target}
 
     # ------------------------------------------------------------ js_api：杂项
     def open_path(self, path):

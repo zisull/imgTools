@@ -3,6 +3,7 @@
 models/
 outputs/
 logs/
+data/
 __pycache__/
 *.pyc
 *.tmp

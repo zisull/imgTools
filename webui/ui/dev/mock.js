@@ -22,6 +22,8 @@ const cfg={
     {id:'t_inp',type:'tab',name:'局部编辑',icon:'brush',page:'inpaint'},
     {id:'t_rgba',type:'tab',name:'透明素材',icon:'layers',page:'rgba'},
     {id:'t_gal',type:'tab',name:'画廊',icon:'image',page:'gallery'},
+    {id:'t_pe',type:'tab',name:'提示词工坊',icon:'book',page:'pe'},
+    {id:'t_mod',type:'tab',name:'模型管理',icon:'db',page:'models'},
     {id:'t_api',type:'tab',name:'API 服务',icon:'globe',page:'api'},
     {id:'t_set',type:'tab',name:'设置',icon:'cog',page:'settings'},
   ],
@@ -54,22 +56,33 @@ function thumbFor(p){
     `<path d="M40 420 L200 260 L300 360 L380 280 L480 400 Z" fill="hsla(${h},60%,20%,.6)"/></svg>`);
 }
 
-/* 画廊种子：形状与 App.gallery_list 一致（file/name/t/size/seed/prompt/url） */
+/* 画廊种子：形状与 App.gallery_list 一致（file/name/t/size/seed/prompt/url + 历史库字段） */
 const GAL=[
   {file:'D:/AI/Qwen-Image-2.1/outputs/gen_20261013_094107.png',name:'gen_20261013_094107.png',
-   t:'2026-10-13 09:41',size:'1024×1024',seed:42,prompt:'A neon-lit alley in the rain…'},
+   t:'2026-10-13 09:41',size:'1024×1024',seed:42,prompt:'A neon-lit alley in the rain…',
+   mode:'gen',negative:'',steps:8,sec:28.4,fav:1},
   {file:'D:/AI/Qwen-Image-2.1/outputs/gen_20261013_091852.png',name:'gen_20261013_091852.png',
-   t:'2026-10-13 09:18',size:'1536×1024',seed:7,prompt:'Chinese ink painting of misty mountains'},
+   t:'2026-10-13 09:18',size:'1536×1024',seed:7,prompt:'Chinese ink painting of misty mountains',
+   mode:'gen',negative:'blurry',steps:8,sec:77.2,fav:0},
   {file:'D:/AI/Qwen-Image-2.1/outputs/gen_20261012_223341.png',name:'gen_20261012_223341.png',
-   t:'2026-10-12 22:33',size:'1024×1536',seed:-1,prompt:'Portrait of an elderly lighthouse keeper'},
+   t:'2026-10-12 22:33',size:'跟随输入图 · 512²',seed:-1,prompt:'Portrait of an elderly lighthouse keeper',
+   mode:'edit',negative:'',steps:8,sec:19.5,fav:0},
   {file:'D:/AI/Qwen-Image-2.1/outputs/gen_20261012_215503.png',name:'gen_20261012_215503.png',
-   t:'2026-10-12 21:55',size:'1024×1024',seed:2026,prompt:'Isometric smart warehouse, cutaway view'},
+   t:'2026-10-12 21:55',size:'1024×1024',seed:2026,prompt:'Isometric smart warehouse, cutaway view',
+   mode:'rgba',negative:'',steps:8,sec:26.1,fav:1},
   {file:'D:/AI/Qwen-Image-2.1/outputs/gen_20261012_201144.png',name:'gen_20261012_201144.png',
-   t:'2026-10-12 20:11',size:'1024×1024',seed:100,prompt:'产品白底图：磨砂黑保温杯，柔光'},
+   t:'2026-10-12 20:11',size:'512x512',seed:100,prompt:'产品白底图：磨砂黑保温杯，柔光',
+   mode:'gen',negative:'',steps:40,sec:96.3,fav:0},
   {file:'D:/AI/Qwen-Image-2.1/outputs/gen_20261011_180209.png',name:'gen_20261011_180209.png',
    t:'2026-10-11 18:02',size:'1024×1024',seed:9,prompt:'Steampunk owl clockwork, macro detail'},
 ];
 GAL.forEach(g=>g.url=thumbFor(g.file));
+
+/* 模型清单种子：形状与 App.models_list 一致 */
+const MDL=[
+  {name:'Qwen-Image-2.1-Turbo',gb:31.2,shards:32,index:true,active:true},
+  {name:'Qwen-Image-2.1',gb:0,shards:0,index:false,active:false},
+];
 
 /* 假任务推进：载入 3 轮 → 生成按步走 → 收尾出图 */
 let loadTick=0,genTok=0,wantGen=false;
@@ -77,7 +90,9 @@ function finishGen(){
   const name='gen_'+stamp().replace(/[-: ]/g,'').slice(0,14)+'.png';
   const file=(cfg.console.output_dir+'/'+name).replace(/\\/g,'/');
   const it={file:file,name:name,t:stamp(),size:cfg.gen.size,seed:cfg.gen.seed,
-            prompt:cfg.gen.prompt,url:thumbFor(file)};
+            prompt:cfg.gen.prompt,url:thumbFor(file),
+            mode:'gen',negative:cfg.gen.negative||'',steps:parseInt(cfg.gen.steps,10)||8,
+            sec:+(8+Math.random()*6).toFixed(1),fav:0};
   GAL.unshift(it);
   if(GAL.length>60)GAL.length=60;
   st.img_count=GAL.length;
@@ -165,7 +180,13 @@ window.MIC_MOCK={
     L('⏹ 已请求停止'+(key==='gen'?'：本步完成后中断':''));
     return {ok:true};},
   thumb(p){return Promise.resolve({ok:true,url:thumbFor(p)});},
-  gallery_list(){st.img_count=GAL.length;return Promise.resolve({ok:true,items:GAL});},
+  gallery_list(){st.img_count=GAL.length;return Promise.resolve({ok:true,items:GAL,stats:{total:GAL.length,fav:GAL.filter(g=>g.fav).length}});},
+  gallery_fav(f,on){
+    const it=GAL.find(x=>x.file===f);
+    if(!it)return {ok:false,msg:'这张已经不在了'};
+    if(!it.mode)return {ok:false,msg:'老图没有参数记录，收藏不了'};
+    it.fav=on?1:0;L((on?'已收藏：':'已取消收藏：')+it.name);
+    return {ok:true};},
   gallery_delete(f){
     const i=GAL.map(x=>x.file).indexOf(f);
     if(i<0)return {ok:false,msg:'这张已经不在了'};
@@ -193,5 +214,25 @@ window.MIC_MOCK={
     cfg.api.token='qic_'+Math.random().toString(16).slice(2,18);
     L('🔑 API 令牌已重新生成');
     return {ok:true,state:{cfg:cfg.api,on:st.api_on,url:st.api_url}};},
+  models_list(){
+    return Promise.resolve({ok:true,dir:'D:/AI/Qwen-Image-2.1/models',
+      items:MDL.map(m=>Object.assign({},m))});},
+  models_set_active(n){
+    if(!MDL.some(m=>m.name===n))return {ok:false,msg:'目录不存在：'+n};
+    MDL.forEach(m=>m.active=(m.name===n));
+    cfg.console.model_dir='D:/AI/Qwen-Image-2.1/models/'+n;
+    L('已设为激活：'+n+(st.model_loaded?'（显存里还是旧模型，卸载重载入才生效）':''));
+    return {ok:true,cfg:cfg};},
+  models_download(repo,name){
+    if(!/^[\w.-]+\/[\w.-]+$/.test(String(repo||'')))return {ok:false,msg:'仓库 ID 形状不对：应为 org/name'};
+    const nm=String(name||'').trim()||String(repo).split('/').pop();
+    if(!MDL.some(m=>m.name===nm))MDL.push({name:nm,gb:0,shards:0,index:false,active:false});
+    L('⬇ 开始下载 '+repo+' → models/'+nm+'（hf-mirror 断点续传 · mock）');
+    setTimeout(function(){
+      const m=MDL.find(x=>x.name===nm);
+      if(m){m.gb=31.2;m.shards=32;m.index=true;}
+      L('✅ 下载完成：'+nm+'（32/32 个分片校验通过）');
+    },4000);
+    return {ok:true};},
 };
 })();
