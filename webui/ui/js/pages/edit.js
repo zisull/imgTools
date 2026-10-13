@@ -6,9 +6,8 @@ const MIC=window.MIC=window.MIC||{};
 const C=MIC.form, ic=MIC.ic, esc=MIC.esc;
 
 const RES=[
-  {code:'512',name:'草图画幅 512² · 最快（试构图用）'},
-  {code:'768',name:'中画幅 768² · 折中'},
-  {code:'1024',name:'标准画幅 1024² · 明显慢于文生图（编码+长序列）'},
+  {code:'512',name:'草图画幅 512² · 最快最稳（约 22 秒）'},
+  {code:'768',name:'中画幅 768² · 更清晰（约 27 秒，显存已接近上限）'},
 ];
 
 let imgs=[];          // 已选参考图绝对路径
@@ -18,7 +17,7 @@ function resSel(k){
   const v=String(MIC.mget(MIC.s.cfg,k));
   return '<select class="inp" data-k="'+k+'">'+RES.map(function(o){
     return '<option value="'+o.code+'"'+(o.code===v?' selected':'')+'>'+esc(o.name)+'</option>';
-  }).join('')+'</select>';
+  }).join('')+'<option value="" disabled>1024² —— 12G 显存会溢出到共享内存，实测慢几十倍，暂不可用</option></select>';
 }
 
 function grid(){

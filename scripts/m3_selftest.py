@@ -70,13 +70,13 @@ def main():
         w, h = Image.open(BOAT).size
         mask = make_mask(BOAT, (w // 3, h // 3, 2 * w // 3, 2 * h // 3))
         run(app, "inpaint", {
-            "mode": "inpaint", "images": [BOAT], "mask": mask, "res": "1024", "steps": "8",
+            "mode": "inpaint", "images": [BOAT], "mask": mask, "res": "512", "steps": "8",
             "seed": 7, "count": 1, "kv_cache": True,
             "prompt": "Replace the middle of the sketch with a bright red sail.",
         })
     if which in ("rgba", "all"):
         run(app, "rgba", {
-            "mode": "rgba", "size": "1024x1024", "steps": "8", "seed": 42,
+            "mode": "rgba", "size": "512x512", "steps": "8", "seed": 42,
             "count": 1, "kv_cache": True,
             "prompt": "A flat vector icon of a lightbulb with a friendly face, isolated on a "
                       "fully transparent background, clean crisp edges, sticker style, no shadow.",
