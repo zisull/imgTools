@@ -63,7 +63,8 @@ DEFAULT_CFG = {
                 "seed": -1, "count": 1, "kv_cache": True, "brush": 48},
     "rgba": {"prompt": "", "negative": "", "size": "1024x1024", "steps": "8",
              "seed": -1, "count": 1, "kv_cache": True},
-    "api": {"enabled": False, "host": "127.0.0.1", "port": 8765, "token": ""},
+    "api": {"enabled": False, "lan": False, "host": "127.0.0.1", "port": 8765,
+            "token": ""},
     "nav": [
         {"id": "t_ov", "type": "tab", "name": "概览", "icon": "home", "page": "overview"},
         {"id": "t_gen", "type": "tab", "name": "文生图", "icon": "flower", "page": "t2i"},
@@ -71,6 +72,7 @@ DEFAULT_CFG = {
         {"id": "t_inp", "type": "tab", "name": "局部编辑", "icon": "brush", "page": "inpaint"},
         {"id": "t_rgba", "type": "tab", "name": "透明素材", "icon": "layers", "page": "rgba"},
         {"id": "t_gal", "type": "tab", "name": "画廊", "icon": "image", "page": "gallery"},
+        {"id": "t_api", "type": "tab", "name": "API 服务", "icon": "globe", "page": "api"},
         {"id": "t_set", "type": "tab", "name": "设置", "icon": "cog", "page": "settings"},
     ],
 }
@@ -122,6 +124,7 @@ class App(WindowCtl):
         self._thread = None
         self._stop = threading.Event()
         self.mgr = None            # PipelineMgr：第一次载入时才 import（拉 torch）
+        self._api = None           # ApiServer：API 页开启时才 import（拉 fastapi）
         self._thumbs = {}          # (path, mtime) -> data url，缩略缓存
         self.st = {
             "running": None, "status": "就绪", "done": 0, "total": 0,
@@ -251,8 +254,13 @@ class App(WindowCtl):
         self._window = window
 
     def on_closing(self):
-        """关闭收尾：叫停后台线程 → 存配置。绝不能 return False（=取消关闭）。"""
+        """关闭收尾：叫停后台线程 → 停 API 监听 → 存配置。绝不能 return False（=取消关闭）。"""
         self._stop.set()
+        if self._api is not None:
+            try:
+                self._api.stop()
+            except Exception:
+                pass
         self._save_cfg()
         return None
 
@@ -432,6 +440,7 @@ class App(WindowCtl):
                                       time.strftime("%Y%m%d_%H%M%S"))
                 path = os.path.join(out_dir, name)
                 img.save(path)  # RGBA 输出直接带 alpha 存进 PNG
+                g.setdefault("_saved", []).append(path)
                 self.st["last_sec"] = round(dt, 1)
                 self.st["last_image"] = path
                 self._log("✅ (%d/%d) 已保存：%s · %.1f 秒" % (i + 1, count, name, dt))
@@ -455,6 +464,88 @@ class App(WindowCtl):
         else:
             self._log("⏹ 已请求停止：等当前这一步去噪完成后中断")
         return {"ok": True}
+
+    # ------------------------------------------------------------ js_api：API 服务
+    def api_state(self):
+        return {"ok": True, "cfg": self.cfg["api"],
+                "on": bool(self.st["api_on"]), "url": self.st["api_url"]}
+
+    def api_set(self, patch=None):
+        """改 API 配置并即时生效（开关/局域网/端口）。返回 api_state。"""
+        p = patch or {}
+        a = self.cfg["api"]
+        if "enabled" in p:
+            a["enabled"] = bool(p["enabled"])
+        if "lan" in p:
+            a["lan"] = bool(p["lan"])
+        if "port" in p:
+            try:
+                a["port"] = max(1, min(65535, int(p["port"])))
+            except (TypeError, ValueError):
+                return {"ok": False, "msg": "端口要给数字", "state": self.api_state()}
+        if a["enabled"] and not a.get("token"):
+            import secrets
+            a["token"] = secrets.token_hex(16)
+            self._log("🔑 已生成 API 令牌")
+        self._save_cfg()
+        err = self._apply_api()
+        return {"ok": err is None, "msg": err or "", "state": self.api_state()}
+
+    def api_token_reset(self):
+        import secrets
+        self.cfg["api"]["token"] = secrets.token_hex(16)
+        self._save_cfg()
+        self._log("🔑 API 令牌已重新生成")
+        return {"ok": True, "state": self.api_state()}
+
+    def _lan_ip(self):
+        import socket
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect(("8.8.8.8", 80))
+            ip = s.getsockname()[0]
+            s.close()
+            return ip
+        except OSError:
+            return "127.0.0.1"
+
+    def _apply_api(self):
+        """按 cfg 重建监听：任何改动都先停旧再起新，端口/局域网不会漂移不生效。"""
+        a = self.cfg["api"]
+        if self._api is not None:
+            self._api.stop()
+            self._api = None
+            self.st["api_on"] = False
+            self.st["api_url"] = ""
+        if not a.get("enabled"):
+            return None
+        try:
+            from api_server import ApiServer
+            host = "0.0.0.0" if a.get("lan") else "127.0.0.1"
+            port = int(a.get("port") or 8765)
+            self._api = ApiServer(self)
+            disp = self._lan_ip() if a.get("lan") else "127.0.0.1"
+            if self._api.start(host, port):
+                self.st["api_on"] = True
+                self.st["api_url"] = "http://%s:%d" % (disp, port)
+                self._log("🌐 API 服务已启动：%s（Bearer 令牌鉴权）" % self.st["api_url"])
+                if a.get("lan"):
+                    self._log("⚠️ 局域网模式：若被 Windows 防火墙拦，管理员执行一次："
+                              "netsh advfirewall firewall add rule name=QwenImgAPI "
+                              "dir=in action=allow protocol=TCP localport=%d" % port)
+                return None
+            self._api.stop()
+            self._api = None
+            return "端口 %d 起不来（可能被别的程序占用），换个端口再试" % port
+        except Exception as e:
+            if self._api is not None:
+                try:
+                    self._api.stop()
+                except Exception:
+                    pass
+            self._api = None
+            self._log("❌ API 服务启动失败：%s" % e)
+            return str(e)
 
     # ------------------------------------------------------------ js_api：画廊
     def _gallery_items(self, limit=120):
@@ -623,6 +714,8 @@ def main():
         _say_already_running()
         return
     app = App()
+    if app.cfg["api"].get("enabled"):
+        app.api_set({})          # 上次开着 API：这次启动自动恢复监听
     window = webview.create_window(
         app.cfg.get("app_title", APP_NAME),
         html=build_html(),

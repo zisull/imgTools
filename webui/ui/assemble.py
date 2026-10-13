@@ -40,6 +40,7 @@ JS_ORDER = [
     "js/pages/inpaint.js",
     "js/pages/rgba.js",
     "js/pages/gallery.js",
+    "js/pages/api.js",
     "js/pages/settings.js",
     "js/pages/blank.js",
     "js/boot.js",

@@ -9,12 +9,12 @@ const cfg={
   gen:{prompt:'A neon-lit alley in the rain, reflections on wet pavement, cinematic lighting, 8k',
       negative:'',size:'1024x1024',steps:'8',seed:-1,count:1,kv_cache:true},
   edit:{prompt:'Turn the sketch into a photorealistic image on a white background.',
-        negative:'',res:'1024',steps:'8',seed:-1,count:1,kv_cache:true},
+        negative:'',res:'512',steps:'8',seed:-1,count:1,kv_cache:true},
   inpaint:{prompt:'A pair of sunglasses resting on the dashboard.',
-        negative:'',res:'1024',steps:'8',seed:-1,count:1,kv_cache:true,brush:48},
+        negative:'',res:'512',steps:'8',seed:-1,count:1,kv_cache:true,brush:48},
   rgba:{prompt:'A flat vector icon of a lightbulb, isolated on a fully transparent background, sticker style.',
         negative:'',size:'1024x1024',steps:'8',seed:-1,count:1,kv_cache:true},
-  api:{enabled:false,host:'127.0.0.1',port:8765,token:''},
+  api:{enabled:false,lan:false,host:'127.0.0.1',port:8765,token:''},
   nav:[
     {id:'t_ov',type:'tab',name:'概览',icon:'home',page:'overview'},
     {id:'t_gen',type:'tab',name:'文生图',icon:'flower',page:'t2i'},
@@ -22,6 +22,7 @@ const cfg={
     {id:'t_inp',type:'tab',name:'局部编辑',icon:'brush',page:'inpaint'},
     {id:'t_rgba',type:'tab',name:'透明素材',icon:'layers',page:'rgba'},
     {id:'t_gal',type:'tab',name:'画廊',icon:'image',page:'gallery'},
+    {id:'t_api',type:'tab',name:'API 服务',icon:'globe',page:'api'},
     {id:'t_set',type:'tab',name:'设置',icon:'cog',page:'settings'},
   ],
 };
@@ -173,5 +174,24 @@ window.MIC_MOCK={
   gallery_clear(){GAL.length=0;st.img_count=0;L('已清空输出目录（mock）');return {ok:true};},
   open_path(p){L('已打开：'+p);return {ok:true};},
   open_url(u){L('已在浏览器打开：'+u);return {ok:true};},
+  api_state(){return {ok:true,cfg:cfg.api,on:st.api_on,url:st.api_url};},
+  api_set(p){
+    if('enabled' in p)cfg.api.enabled=!!p.enabled;
+    if('lan' in p)cfg.api.lan=!!p.lan;
+    if('port' in p)cfg.api.port=parseInt(p.port,10)||cfg.api.port;
+    if(cfg.api.enabled&&!cfg.api.token){
+      cfg.api.token='qic_'+Math.random().toString(16).slice(2,18);
+      L('🔑 已生成 API 令牌');}
+    st.api_on=cfg.api.enabled;
+    st.api_url=cfg.api.enabled
+      ?('http://'+(cfg.api.lan?'192.168.1.66':'127.0.0.1')+':'+cfg.api.port):'';
+    L(cfg.api.enabled?('🌐 API 服务已启动：'+st.api_url+'（Bearer 令牌鉴权）')
+      :'API 服务已停止');
+    if(cfg.api.lan&&cfg.api.enabled)L('⚠️ 局域网模式：注意防火墙放行端口 '+cfg.api.port);
+    return {ok:true,state:{cfg:cfg.api,on:st.api_on,url:st.api_url}};},
+  api_token_reset(){
+    cfg.api.token='qic_'+Math.random().toString(16).slice(2,18);
+    L('🔑 API 令牌已重新生成');
+    return {ok:true,state:{cfg:cfg.api,on:st.api_on,url:st.api_url}};},
 };
 })();

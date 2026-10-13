@@ -9,5 +9,6 @@ rem torch MUST come from pytorch cu128 index, PyPI default wheel on Windows is C
 rem diffusers needs git build; if clone fails retry with HTTPS_PROXY=127.0.0.1:7897
 .venv\Scripts\python.exe -m pip install "git+https://github.com/huggingface/diffusers.git"
 .venv\Scripts\python.exe -m pip install pywebview -i https://mirrors.aliyun.com/pypi/simple/
+.venv\Scripts\python.exe -m pip install fastapi uvicorn python-multipart -i https://mirrors.aliyun.com/pypi/simple/
 echo SETUP DONE
 pause

@@ -52,6 +52,10 @@ MIC.api={
   galleryClear:()=>call('gallery_clear'),
   openPath:p=>call('open_path',p),
   openUrl:u=>call('open_url',u),
+  /* API 服务：状态/开关/令牌（后端即时重启监听，都返回最新 state） */
+  apiState:()=>call('api_state'),
+  apiSet:p=>call('api_set',p),
+  apiTokenReset:()=>call('api_token_reset'),
   /* 无框窗口：几何与拖动/缩放/窗控（逻辑像素，见 core/win.js） */
   winGeo:()=>call('win_geo'),
   winMove:(x,y)=>call('win_move',Math.round(x),Math.round(y)),
