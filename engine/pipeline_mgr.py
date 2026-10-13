@@ -41,9 +41,10 @@ class PipelineMgr:
         self.state = EngineState()
         self.pipe = None
 
-    def load(self, repo_path: str, offload: bool = True, quant: Optional[str] = None) -> None:
-        """quant=None 全BF16(需大内存); quant="bnb8" 用 bitsandbytes int8 量化
-        transformer+text_encoder，权重从 ~31GB 降到 ~17GB，避开 12G 显存/32G 内存双重 paging。"""
+    def load(self, repo_path: str, offload: bool = True, quant: Optional[str] = "fp8") -> None:
+        """quant="fp8": torchao Float8WeightOnly 量化 transformer+text_encoder。
+        12G 卡实测唯一通路：bf16 单组件 13.3GB 溢出 WDDM 共享显存(每步~20s)；
+        bnb8 更慢；fp8 后 512/8步 24.5s、显存 9.8GB 不溢出。"""
         if self.pipe is not None and self.state.loaded_repo == repo_path:
             return
         self.unload()
@@ -51,16 +52,18 @@ class PipelineMgr:
 
         self.state.loading = True
         t0 = time.time()
-        self.log(f"加载模型: {repo_path} (bf16{', bnb-int8' if quant == 'bnb8' else ''})")
+        self.log(f"加载模型: {repo_path} ({quant})")
         kwargs = {}
-        if quant == "bnb8":
+        if quant == "fp8":
+            from torchao.quantization import Float8WeightOnlyConfig
+            from transformers import TorchAoConfig as AoTf
+            from diffusers.quantizers.quantization_config import TorchAoConfig as AoDiff
             from diffusers.quantizers.pipe_quant_config import PipelineQuantizationConfig
 
-            kwargs["quantization_config"] = PipelineQuantizationConfig(
-                quant_backend="bitsandbytes_8bit",
-                quant_kwargs={"load_in_8bit": True},
-                components_to_quantize=["text_encoder", "transformer"],
-            )
+            kwargs["quantization_config"] = PipelineQuantizationConfig(quant_mapping={
+                "transformer": AoDiff(quant_type=Float8WeightOnlyConfig()),
+                "text_encoder": AoTf(quant_type=Float8WeightOnlyConfig()),
+            })
         try:
             pipe = QwenImage21Pipeline.from_pretrained(
                 repo_path, dtype=torch.bfloat16, **kwargs

@@ -54,11 +54,11 @@ def main() -> int:
     ap.add_argument("--repo", default=os.path.join(ROOT, "models", "Qwen-Image-2.1-Turbo"))
     ap.add_argument("--out", default=None)
     ap.add_argument("--bench", default=None, help="逗号分隔的尺寸列表，逐个出图测速")
-    ap.add_argument("--quant", default="bnb8", choices=["bnb8", "none"], help="bnb8=int8量化transformer+编码器(12G卡推荐)")
+    ap.add_argument("--quant", default="fp8", choices=["fp8", "none"], help="fp8=torchao Float8WeightOnly(12G卡推荐)")
     args = ap.parse_args()
 
     mgr = PipelineMgr()
-    mgr.load(args.repo, quant=args.quant if args.quant != "none" else None)
+    mgr.load(args.repo, quant=args.quant)
 
     sampler = MemSampler()
     sampler.start()
