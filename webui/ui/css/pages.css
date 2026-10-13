@@ -1,0 +1,21 @@
+
+/* ---------- 翻译页 ---------- */
+.inp.tall{min-height:236px;line-height:1.8}
+.tres{max-height:430px;overflow:auto;border:1px solid var(--line);border-radius:10px;
+  background:var(--well)}
+.tres.flat{border:0;background:none;border-radius:0;max-height:none;padding:0}
+.tl{display:flex;gap:10px;padding:7px 12px;border-bottom:1px dashed var(--line)}
+.tres>.tl:last-child{border-bottom:0}
+.tl .n{flex:none;width:20px;text-align:right;color:var(--fg3);font-size:11.5px;
+  padding-top:2px;font-variant-numeric:tabular-nums}
+.tl .x{flex:1;min-width:0;white-space:pre-wrap;word-break:break-word}
+.tl.gap{padding:4px 12px;min-height:10px}
+.tl.miss .x{color:var(--warn)}
+.tl.miss .n{color:var(--warn)}
+.errline{color:var(--danger);font-size:12px;margin-bottom:8px}
+
+/* 页头 */
+.phead{display:flex;align-items:flex-end;gap:14px;margin-bottom:16px}
+.ptitle{font-size:20px;font-weight:700;letter-spacing:.2px;line-height:1.3}
+.psub{font-size:12.5px;color:var(--fg3);margin-top:2px}
+.phead .acts{display:flex;gap:8px;align-items:center}

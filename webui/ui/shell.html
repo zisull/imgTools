@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Qwen 生图控制台</title>
+<style>/*__CSS__*/</style>
+</head>
+<body class="tide dark">
+
+<svg class="svg-defs"><defs>
+<symbol id="i-home" viewBox="0 0 24 24"><path d="M3 11l9-7 9 7v9a1 1 0 0 1-1 1h-5v-6h-6v6H4a1 1 0 0 1-1-1z"/></symbol>
+<symbol id="i-globe" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.5 2.6 2.5 15.4 0 18M12 3c-2.5 2.6-2.5 15.4 0 18"/></symbol>
+<symbol id="i-site" viewBox="0 0 24 24"><path d="M4 10l8-6 8 6v9a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1z"/><path d="M9 20v-6h6v6"/></symbol>
+<symbol id="i-down" viewBox="0 0 24 24"><path d="M12 3v12M7 11l5 5 5-5M4 20h16"/></symbol>
+<symbol id="i-mail" viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3 7l9 6 9-6"/></symbol>
+<symbol id="i-export" viewBox="0 0 24 24"><path d="M12 20V8M7 12l5-5 5 5M4 4h16"/></symbol>
+<symbol id="i-link" viewBox="0 0 24 24"><path d="M10 13a5 5 0 0 0 7 0l2-2a5 5 0 0 0-7-7l-1 1"/><path d="M14 11a5 5 0 0 0-7 0l-2 2a5 5 0 0 0 7 7l1-1"/></symbol>
+<symbol id="i-tool" viewBox="0 0 24 24"><path d="M4 8h8M18 8h2M4 16h3M13 16h7"/><circle cx="15" cy="8" r="2.2"/><circle cx="10" cy="16" r="2.2"/></symbol>
+<symbol id="i-cog" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M5 5l2 2M17 17l2 2M19 5l-2 2M7 17l-2 2"/></symbol>
+<symbol id="i-book" viewBox="0 0 24 24"><path d="M4 5a2 2 0 0 1 2-2h13v16H6a2 2 0 0 0-2 2z"/><path d="M4 19a2 2 0 0 1 2-2h13"/></symbol>
+<symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+<symbol id="i-chev" viewBox="0 0 24 24"><path d="M9 6l6 6-6 6"/></symbol>
+<symbol id="i-check" viewBox="0 0 24 24"><path d="M4 12l5 5L20 6"/></symbol>
+<symbol id="i-dots" viewBox="0 0 24 24"><circle cx="5" cy="12" r="1.6" fill="currentColor" stroke="none"/><circle cx="12" cy="12" r="1.6" fill="currentColor" stroke="none"/><circle cx="19" cy="12" r="1.6" fill="currentColor" stroke="none"/></symbol>
+<symbol id="i-play" viewBox="0 0 24 24"><path d="M7 4l13 8-13 8z" fill="currentColor" stroke="none"/></symbol>
+<symbol id="i-stop" viewBox="0 0 24 24"><rect x="6" y="6" width="12" height="12" rx="2" fill="currentColor" stroke="none"/></symbol>
+<symbol id="i-pause" viewBox="0 0 24 24"><rect x="7" y="5" width="3.6" height="14" rx="1.2" fill="currentColor" stroke="none"/><rect x="13.4" y="5" width="3.6" height="14" rx="1.2" fill="currentColor" stroke="none"/></symbol>
+<symbol id="i-folder" viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></symbol>
+<symbol id="i-refresh" viewBox="0 0 24 24"><path d="M20 11a8 8 0 1 0-2.3 5.7"/><path d="M20 5v6h-6"/></symbol>
+<symbol id="i-hist" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7.5V12l3.2 2"/></symbol>
+<symbol id="i-image" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="2"/><circle cx="9" cy="10" r="1.8"/><path d="M3 18l6-6 4 4 3-3 5 5"/></symbol>
+<symbol id="i-power" viewBox="0 0 24 24"><path d="M12 3v8"/><path d="M6.5 6.5a8 8 0 1 0 11 0"/></symbol>
+<symbol id="i-grid" viewBox="0 0 24 24"><rect x="3" y="3" width="8" height="8" rx="1.5"/><rect x="13" y="3" width="8" height="8" rx="1.5"/><rect x="3" y="13" width="8" height="8" rx="1.5"/><rect x="13" y="13" width="8" height="8" rx="1.5"/></symbol>
+<symbol id="i-flower" viewBox="0 0 24 24"><circle cx="12" cy="12" r="2.4"/><path d="M12 9.6V4M12 14.4V20M14.4 12H20M9.6 12H4M13.7 10.3l4-4M10.3 13.7l-4 4M13.7 13.7l4 4M10.3 10.3l-4-4"/></symbol>
+<symbol id="i-wave" viewBox="0 0 24 24"><path d="M2 9c2.5-2.5 5-2.5 7.5 0S15 11.5 17.5 9 22 6.5 22 6.5"/><path d="M2 15c2.5-2.5 5-2.5 7.5 0S15 17.5 17.5 15 22 12.5 22 12.5"/></symbol>
+<symbol id="i-palette" viewBox="0 0 24 24"><path d="M12 3a9 9 0 1 0 0 18c1.7 0 2-1.3 1.2-2.2-.9-1.1-.2-2.3 1-2.3H17a4 4 0 0 0 4-4.3C20.6 6.7 16.8 3 12 3z"/><circle cx="8" cy="9" r="1.2" fill="currentColor" stroke="none"/><circle cx="12" cy="7" r="1.2" fill="currentColor" stroke="none"/><circle cx="16" cy="9" r="1.2" fill="currentColor" stroke="none"/></symbol>
+<symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="6.5"/><path d="M16 16l5 5"/></symbol>
+<symbol id="i-db" viewBox="0 0 24 24"><ellipse cx="12" cy="6" rx="8" ry="3"/><path d="M4 6v12c0 1.7 3.6 3 8 3s8-1.3 8-3V6M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/></symbol>
+<symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M5 5l1.5 1.5M17.5 17.5L19 19M19 5l-1.5 1.5M6.5 17.5L5 19"/></symbol>
+<symbol id="i-moon" viewBox="0 0 24 24"><path d="M20 14.5A8.5 8.5 0 0 1 9.5 4a8.5 8.5 0 1 0 10.5 10.5z"/></symbol>
+<symbol id="i-close" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></symbol>
+<symbol id="i-copy" viewBox="0 0 24 24"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M15 5H6a2 2 0 0 0-2 2v9"/></symbol>
+<symbol id="i-trash" viewBox="0 0 24 24"><path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13"/></symbol>
+<symbol id="i-move" viewBox="0 0 24 24"><path d="M12 3v18M3 12h18M9 6l3-3 3 3M9 18l3 3 3-3M6 9l-3 3 3 3M18 9l3 3-3 3"/></symbol>
+<symbol id="i-tree" viewBox="0 0 24 24"><rect x="3" y="4" width="7" height="4" rx="1"/><rect x="14" y="10" width="7" height="4" rx="1"/><rect x="14" y="17" width="7" height="4" rx="1"/><path d="M6.5 8v9.5a1 1 0 0 0 1 1H14M6.5 12.5H14"/></symbol>
+<symbol id="i-rows" viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16"/></symbol>
+<symbol id="i-collapse" viewBox="0 0 24 24"><path d="M4 9l8-5 8 5M4 15l8 5 8-5"/></symbol>
+<symbol id="i-expand" viewBox="0 0 24 24"><path d="M12 4v16M8 8l4-4 4 4M8 16l4 4 4-4"/></symbol>
+<symbol id="i-ungroup" viewBox="0 0 24 24"><path d="M3 8h18M3 16h18M9 4v4M15 16v4"/></symbol>
+<symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 3l8 3v6c0 4.5-3.4 7.6-8 9-4.6-1.4-8-4.5-8-9V6z"/><path d="M9 12l2 2 4-4"/></symbol>
+<symbol id="i-key" viewBox="0 0 24 24"><circle cx="8" cy="14" r="4"/><path d="M11 11l7-7 2 2-2 2 2 2-3 3-2-2-1 1"/></symbol>
+<symbol id="i-lang" viewBox="0 0 24 24"><path d="M2.5 7.5h8M6.5 4v3.5M4 12.5c.9-2.9 3-5.2 5.4-6.2M3 9c1.5 3 3.9 4.9 6.4 5.4"/><path d="M12.5 20l4.3-9.5 4.3 9.5M14.1 17.1h5.4"/></symbol>
+<symbol id="i-wmin" viewBox="0 0 24 24"><path d="M5 18h14"/></symbol>
+<symbol id="i-wmax" viewBox="0 0 24 24"><rect x="5" y="5" width="14" height="14" rx="2"/></symbol>
+<symbol id="i-wrestore" viewBox="0 0 24 24"><rect x="4" y="8" width="12" height="12" rx="2"/><path d="M8 8V6a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v8h-2"/></symbol>
+</defs></svg>
+
+<div class="bgfx">
+  <div class="waves">
+    <svg class="w3" viewBox="0 0 2400 300" preserveAspectRatio="none"><path d="M0 160 C 200 100,400 220,600 160 S 1000 100,1200 160 S 1600 220,1800 160 S 2200 100,2400 160 V300 H0 Z"/></svg>
+    <svg class="w2" viewBox="0 0 2400 300" preserveAspectRatio="none"><path d="M0 190 C 240 130,480 250,720 190 S 1200 130,1440 190 S 1920 250,2160 190 S 2400 150,2400 190 V300 H0 Z"/></svg>
+    <svg class="w1" viewBox="0 0 2400 300" preserveAspectRatio="none"><path d="M0 230 C 300 180,600 280,900 230 S 1500 180,1800 230 S 2250 280,2400 235 V300 H0 Z"/></svg>
+  </div>
+  <svg class="branch" viewBox="0 0 600 420" aria-hidden="true">
+    <path d="M596 410 C 470 350,392 300,300 210 C 236 148,168 120,84 108"/>
+    <path d="M300 210 C 268 150,236 128,188 116"/>
+    <path d="M420 314 C 396 258,376 232,342 206"/>
+    <circle cx="84" cy="108" r="9"/><circle cx="188" cy="116" r="11"/><circle cx="243" cy="150" r="7"/>
+    <circle cx="342" cy="206" r="12"/><circle cx="386" cy="252" r="8"/><circle cx="452" cy="330" r="10"/>
+    <circle cx="120" cy="112" r="6"/><circle cx="300" cy="212" r="6"/><circle cx="520" cy="372" r="7"/>
+  </svg>
+</div>
+
+<div class="app">
+  <aside class="side">
+    <div class="brand" id="brand" title="双击可改软件名">
+      <div class="logo" id="brandLogo">Q</div>
+      <div class="btxt" style="min-width:0">
+        <div class="bname" id="brandName">Qwen 生图控制台</div>
+        <div class="bsub">本地生图 · API 服务</div>
+      </div>
+    </div>
+
+    <div class="nav-tools">
+      <div class="seg" style="flex:1">
+        <button id="btnFlat" onclick="MIC.nav.setLayout('flat')"><svg class="ic s"><use href="#i-rows"/></svg><span>平铺</span></button>
+        <button id="btnTree" onclick="MIC.nav.setLayout('tree')"><svg class="ic s"><use href="#i-tree"/></svg><span>分组</span></button>
+      </div>
+      <button class="iconbtn" id="navOpt" onclick="MIC.nav.menu(event)" title="导航选项"><svg class="ic"><use href="#i-dots"/></svg></button>
+    </div>
+
+    <nav class="tree" id="tree"></nav>
+
+    <div class="sidefoot">
+      <span id="verTag" title="版本">v-</span>
+    </div>
+  </aside>
+
+  <div class="main">
+    <header class="topbar">
+      <div class="crumb" id="crumb"></div>
+      <div class="grow"></div>
+      <div class="pills" id="pills"></div>
+      <button class="btn sm gho" onclick="MIC.theme.pop(event)" title="外观"><svg class="ic s"><use href="#i-palette"/></svg>外观</button>
+      <button class="iconbtn" onclick="MIC.nav.toggleMin()" title="收起侧栏"><svg class="ic"><use href="#i-collapse"/></svg></button>
+      <span class="wctl">
+        <button class="wbtn" onclick="MIC.win.min()" title="最小化"><svg class="ic"><use href="#i-wmin"/></svg></button>
+        <button class="wbtn" id="winMax" onclick="MIC.win.max()" title="最大化"><svg class="ic"><use href="#i-wmax"/></svg></button>
+        <button class="wbtn wc-close" onclick="MIC.win.close()" title="关闭"><svg class="ic"><use href="#i-close"/></svg></button>
+      </span>
+    </header>
+    <div class="content"><div class="inner" id="view"></div></div>
+  </div>
+</div>
+
+<div class="layer hide" id="menu"></div>
+<div class="layer hide" id="pop"></div>
+<div class="toast hide" id="toast"></div>
+
+<div id="rzg">
+  <div class="rz" data-edge="n"></div><div class="rz" data-edge="s"></div>
+  <div class="rz" data-edge="e"></div><div class="rz" data-edge="w"></div>
+  <div class="rz" data-edge="ne"></div><div class="rz" data-edge="nw"></div>
+  <div class="rz" data-edge="se"></div><div class="rz" data-edge="sw"></div>
+</div>
+
+<script>/*__JS__*/</script>
+</body>
+</html>

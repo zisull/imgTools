@@ -1,0 +1,48 @@
+/* ════════════════════════════════════════════════
+   1. 主题配色
+   ════════════════════════════════════════════════ */
+/* ── 潮汐 · 深海 ── */
+body.tide.dark{
+  --bg:#04161f;--panel:rgba(11,45,63,.74);--panel-solid:#0b2f42;--panel2:#103c53;--panel-deep:#071d29;
+  --side:rgba(11,45,63,.74);--input:#0b2c3d;
+  --line:rgba(125,211,225,.15);--line2:rgba(125,211,225,.34);
+  --fg:#eaf7fb;--fg2:#9dc0cd;--fg3:#6b93a4;
+  --ac:#57d8e6;--ac2:#82e8d4;--ac-rgb:87,216,230;--ac2-rgb:130,232,212;
+  --ac-soft:rgba(87,216,230,.13);--ac-line:rgba(87,216,230,.34);--on-ac:#04222e;
+  --ok:#82e8d4;--warn:#ffd190;--danger:#ff9d7d;
+  --track:#0b2c3d;--track-line:#16495f;--well:#0b2c3d;
+  --shadow:0 12px 30px rgba(2,12,20,.45);
+}
+/* ── 潮汐 · 浅海 ── */
+body.tide.light{
+  --bg:#eef6fa;--panel:rgba(255,255,255,.86);--panel-solid:#fff;--panel2:#e3f0f6;--panel-deep:#f5fafc;
+  --side:rgba(255,255,255,.86);--input:#fff;
+  --line:rgba(23,116,140,.16);--line2:rgba(23,116,140,.32);
+  --fg:#0c394c;--fg2:#41707f;--fg3:#5f8794;
+  --ac:#0f8fab;--ac2:#22a288;--ac-rgb:15,143,171;--ac2-rgb:34,162,136;
+  --ac-soft:rgba(15,143,171,.10);--ac-line:rgba(15,143,171,.30);--on-ac:#fff;
+  --ok:#2c8f77;--warn:#bd8324;--danger:#dd6a48;
+  --track:#d8eaf1;--track-line:#c0dce8;--well:#eaf4f8;
+  --shadow:0 8px 22px rgba(30,90,115,.12);
+}
+
+body.tide .bgfx{background:linear-gradient(180deg,#08283a 0%,var(--bg) 46%,#0c3448 100%);transition:background .6s}
+body.tide.light .bgfx{background:linear-gradient(180deg,#f8fcfe 0%,var(--bg) 55%,#dcedf4 100%)}
+
+.waves{position:absolute;left:0;right:0;bottom:0;height:30vh}
+.waves svg{position:absolute;bottom:0;left:0;width:200%;height:100%}
+.w1{animation:roll 22s linear infinite;opacity:.85}
+.w2{animation:roll 16s linear infinite reverse;opacity:.5}
+.w3{animation:roll 30s linear infinite;opacity:.35}
+@keyframes roll{from{transform:translateX(0)}to{transform:translateX(-50%)}}
+body.tide .w1 path{fill:#0a2f43}body.tide .w2 path{fill:rgba(38,160,138,.5)}body.tide .w3 path{fill:rgba(87,216,230,.28)}
+body.tide.light .w1 path{fill:#dbeef6}body.tide.light .w2 path{fill:rgba(34,162,136,.22)}body.tide.light .w3 path{fill:rgba(15,143,171,.14)}
+
+body.tide .branch{display:none}
+
+.bubble{position:fixed;bottom:-4vh;border-radius:50%;pointer-events:none;z-index:0;
+  background:radial-gradient(circle at 32% 30%,rgba(238,249,252,.4),rgba(130,232,212,.08) 60%,transparent);
+  animation:rib linear infinite}
+body.plum .bubble{display:none}
+@keyframes rib{0%{opacity:0;transform:translateY(0)}10%{opacity:.6}60%{transform:translate(2vw,-56vh)}
+  90%{opacity:.3}100%{opacity:0;transform:translate(-1vw,-100vh)}}

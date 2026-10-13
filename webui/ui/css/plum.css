@@ -1,0 +1,44 @@
+/* ── 花间 · 暮色 ── */
+body.plum.dark{
+  --bg:#180f16;--panel:rgba(41,26,39,.78);--panel-solid:#291a27;--panel2:#33202f;--panel-deep:#1d121b;
+  --side:rgba(41,26,39,.78);--input:#241722;
+  --line:rgba(240,183,206,.16);--line2:rgba(240,183,206,.34);
+  --fg:#f8eef3;--fg2:#cdaab9;--fg3:#9c7889;
+  --ac:#e78fb3;--ac2:#f3c17f;--ac-rgb:231,143,179;--ac2-rgb:243,193,127;
+  --ac-soft:rgba(231,143,179,.14);--ac-line:rgba(231,143,179,.34);--on-ac:#2b1220;
+  --ok:#8fd6a8;--warn:#f3c17f;--danger:#f0918d;
+  --track:#2a1a28;--track-line:#412c3d;--well:#241722;
+  --shadow:0 12px 30px rgba(12,5,10,.45);
+}
+/* ── 花间 · 晨露 ── */
+body.plum.light{
+  --bg:#fbf3f5;--panel:rgba(255,255,255,.88);--panel-solid:#fff;--panel2:#f6e7ed;--panel-deep:#fdf7f9;
+  --side:rgba(255,251,252,.88);--input:#fff;
+  --line:rgba(178,94,125,.15);--line2:rgba(178,94,125,.30);
+  --fg:#3d2130;--fg2:#6f4858;--fg3:#8d6675;
+  --ac:#c2597b;--ac2:#d98f4a;--ac-rgb:194,89,123;--ac2-rgb:217,143,74;
+  --ac-soft:rgba(194,89,123,.10);--ac-line:rgba(194,89,123,.30);--on-ac:#fff;
+  --ok:#3f8f68;--warn:#b9822a;--danger:#d0574f;
+  --track:#f1dfe6;--track-line:#e6ccd7;--well:#f9eff3;
+  --shadow:0 8px 22px rgba(150,80,110,.13);
+}
+
+body.plum .bgfx{background:linear-gradient(180deg,#221320 0%,var(--bg) 48%,#1c1019 100%);transition:background .6s}
+body.plum.light .bgfx{background:linear-gradient(180deg,#fdf7f9 0%,var(--bg) 52%,#f4e2ea 100%)}
+
+body.plum .waves{display:none}
+
+.branch{position:absolute;right:-2vw;bottom:-3vh;width:52vw;opacity:.5}
+.branch path{stroke:rgba(240,183,206,.28);fill:none;stroke-width:1.4}
+.branch circle{fill:rgba(231,143,179,.30)}
+body.plum.light .branch{opacity:.75}
+body.plum.light .branch path{stroke:rgba(178,94,125,.22)}
+body.plum.light .branch circle{fill:rgba(194,89,123,.16)}
+
+.petal{position:fixed;top:-4vh;pointer-events:none;z-index:0;border-radius:65% 20% 60% 20%;
+  background:linear-gradient(140deg,rgba(231,143,179,.85),rgba(243,193,127,.6));
+  animation:fall linear infinite;opacity:0}
+body.tide .petal{display:none}
+@keyframes fall{0%{opacity:0;transform:translateY(0) rotate(0)}
+  12%{opacity:.75}70%{transform:translate(-6vw,72vh) rotate(220deg)}
+  100%{opacity:0;transform:translate(2vw,108vh) rotate(400deg)}}

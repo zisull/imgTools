@@ -1,0 +1,27 @@
+/* 无框窗口：自绘窗控按钮 + 八向缩放手柄 + 拖动态
+   窗口本身由 create_window(frameless=True) 画的，这里只补界面层。 */
+.wctl{display:flex;align-items:center;gap:2px;margin-left:2px}
+.wbtn{width:30px;height:26px;border-radius:7px;display:grid;place-items:center;
+  color:var(--fg3);border:1px solid transparent;transition:.15s}
+.wbtn:hover{background:var(--ac-soft);color:var(--ac)}
+.wbtn .ic{width:14px;height:14px;stroke-width:1.6}
+.wc-close:hover{background:rgba(255,120,100,.14);color:var(--danger);border-color:transparent}
+
+/* 一圈透明手柄：frameless 之后系统边框没了，鼠标到这 6px 带上就能拉尺寸。
+   #rzg 整层不吃事件（pointer-events:none），只有手柄自己收。 */
+#rzg{position:fixed;inset:0;z-index:210;pointer-events:none}
+.rz{position:absolute;pointer-events:auto}
+.rz[data-edge="n"]{left:10px;right:10px;top:0;height:6px;cursor:ns-resize}
+.rz[data-edge="s"]{left:10px;right:10px;bottom:0;height:6px;cursor:ns-resize}
+.rz[data-edge="w"]{top:10px;bottom:10px;left:0;width:6px;cursor:ew-resize}
+.rz[data-edge="e"]{top:10px;bottom:10px;right:0;width:6px;cursor:ew-resize}
+.rz[data-edge="nw"]{left:0;top:0;width:14px;height:14px;cursor:nwse-resize}
+.rz[data-edge="ne"]{right:0;top:0;width:14px;height:14px;cursor:nesw-resize}
+.rz[data-edge="sw"]{left:0;bottom:0;width:14px;height:14px;cursor:nesw-resize}
+.rz[data-edge="se"]{right:0;bottom:0;width:14px;height:14px;cursor:nwse-resize}
+
+/* 拖动中：整页禁选字（否则一边拖一边划出蓝色选区），并且手柄让位 */
+body.win-drag{user-select:none;cursor:grabbing}
+body.win-drag #rzg{display:none}
+/* 最大化时没有可缩的边 */
+body.win-max #rzg{display:none}
