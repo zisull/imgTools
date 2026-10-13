@@ -54,9 +54,13 @@ class PipelineMgr:
         self.log(f"加载模型: {repo_path} (bf16{', bnb-int8' if quant == 'bnb8' else ''})")
         kwargs = {}
         if quant == "bnb8":
-            from diffusers import BitsAndBytesConfig
+            from diffusers.quantizers.pipe_quant_config import PipelineQuantizationConfig
 
-            kwargs["quantization_config"] = BitsAndBytesConfig(load_in_8bit=True)
+            kwargs["quantization_config"] = PipelineQuantizationConfig(
+                quant_backend="bitsandbytes",
+                quant_kwargs={"load_in_8bit": True},
+                components_to_quantize=["text_encoder", "transformer"],
+            )
         try:
             pipe = QwenImage21Pipeline.from_pretrained(
                 repo_path, dtype=torch.bfloat16, **kwargs
