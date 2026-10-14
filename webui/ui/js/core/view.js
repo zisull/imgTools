@@ -67,6 +67,11 @@ function pillsHTML(){
     <span class="pill ${s.running?'on':''}"><span class="dot ${s.running?'run':''}"></span>${s.running?'运行中':'空闲'}</span>`;
 }
 
+/* 收起的只是预览：记住收起时那张的路径，下一张（路径变了）自然又显示出来 */
+let prevHidden='';
+function hidePrev(){prevHidden=MIC.s.st.last_image||'';MIC.render();}
+function showPrev(){prevHidden='';MIC.render();}
+
 /* 每次轮询后调用：只刷新页面上存在的插槽 */
 function tick(){
   const s=MIC.s.st;
@@ -95,9 +100,14 @@ function tick(){
       `用时目标 ≤60 秒 · `+(s.last_image?`输出 <b>${esc(String(s.last_image).split(/[\\/]/).pop())}</b>`:'尚无输出');
     else if(r==='imgprev'){
       if(!s.last_image){el.innerHTML=`<div class="empty">尚无成图 · 生成完成后这里出预览，点图片可打开所在文件夹</div>`;return;}
+      if(prevHidden===s.last_image){
+        el.innerHTML=`<div class="empty">预览已收起（文件还在，删图去画廊） · `+
+          `<button class="btn sm gho" onclick="MIC.view.showPrev()">重新显示</button></div>`;return;
+      }
       const T=MIC.s.lastThumb;
       if(T&&T.path===s.last_image)
-        el.innerHTML=`<img class="prev" src="${esc(T.url)}" alt="上一张" onclick="MIC.api.openPath(MIC.s.st.last_image)">`+
+        el.innerHTML=`<div class="prevbox"><img class="prev" src="${esc(T.url)}" alt="上一张" onclick="MIC.api.openPath(MIC.s.st.last_image)">`+
+          `<button class="px" onclick="MIC.view.hidePrev()" title="收起这张预览（不删文件）">${ic('close','s')}</button></div>`+
           `<div class="btnrow"><span class="mut fine">这一张还想再改？</span><span class="grow"></span>`+
           `<button class="btn sm gho" onclick="MIC.runner.again('inpaint')">局部改这块</button>`+
           `<button class="btn sm gho" onclick="MIC.runner.again('edit')">整张再编辑</button></div>`;
@@ -174,5 +184,5 @@ function refreshStats(){
 }
 
 MIC.view={tick,watchFinish,logHTML,logText,fillLog,copy:copyText,
-  pct,refreshStats,vramHTML};
+  pct,refreshStats,vramHTML,hidePrev,showPrev};
 })();

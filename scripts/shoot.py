@@ -105,6 +105,18 @@ PROBE = {
     const btns=[].slice.call(document.querySelectorAll('#view button')).map(b=>b.textContent.trim());
     ok('预览下有接力按钮', btns.some(t=>/局部改/.test(t))&&btns.some(t=>/整张再编辑/.test(t)),
        btns.slice(-3).join('|'));
+    /* 成图预览的 ×：收的是预览，不是磁盘上的文件 */
+    const box=()=>document.querySelector('#view .prevbox');
+    const slot=()=>document.querySelector('#view [data-role=imgprev]');
+    ok('预览图上有 ×', !!box() && box().querySelectorAll('.px').length===1
+        && !!box().querySelector('img.prev'));
+    MIC.view.hidePrev();
+    await wait(400);
+    ok('点 × 后预览收起', !box() && /预览已收起/.test(slot().textContent),
+        slot().textContent.trim().slice(0,24));
+    MIC.view.showPrev();
+    await wait(400);
+    ok('重新显示又回来', !!box() && !!box().querySelector('img.prev'));
     MIC.runner.again('edit');
     await wait(900);
     ok('送进图像编辑=一张参考图', cells()===1, 'cells='+cells());

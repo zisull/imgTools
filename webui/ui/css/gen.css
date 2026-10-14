@@ -10,10 +10,17 @@
   border:1px solid var(--track-line);overflow:hidden}
 .vbar i{display:block;height:100%;width:0;background:var(--grad);border-radius:99px;transition:width .35s}
 
-/* 文生图结果预览 */
-.prevwrap{min-height:120px;display:flex;align-items:center;justify-content:center;padding:8px}
+/* 文生图结果预览：竖排（图在上、接力按钮在下），× 常显在图右上角 */
+.prevwrap{min-height:120px;display:flex;flex-direction:column;align-items:center;
+  justify-content:center;gap:10px;padding:8px}
+.prevwrap .btnrow{width:100%}
+.prevbox{position:relative;max-width:100%}
 .prevwrap .prev{max-width:100%;max-height:420px;border-radius:12px;border:1px solid var(--line2);
-  cursor:zoom-in;object-fit:contain}
+  cursor:zoom-in;object-fit:contain;display:block}
+.prevbox .px{position:absolute;top:8px;right:8px;width:26px;height:26px;padding:0;display:flex;
+  align-items:center;justify-content:center;border-radius:8px;opacity:.72;transition:opacity .12s;
+  background:rgba(0,0,0,.45);color:#fff;border:0}
+.prevbox .px:hover{opacity:1;background:var(--danger)}
 
 /* 画廊网格 */
 .ggrid{flex:1 1 100%;display:grid;grid-template-columns:repeat(auto-fill,minmax(196px,1fr));gap:12px;padding:14px}
