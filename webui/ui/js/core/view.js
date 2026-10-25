@@ -72,6 +72,17 @@ let prevHidden='';
 function hidePrev(){prevHidden=MIC.s.st.last_image||'';MIC.render();}
 function showPrev(){prevHidden='';MIC.render();}
 
+/* 环境补全收尾：后端把 env_busy 落下来的那一刻重新体检一次，
+   否则卡片会一直停在「补全中…」，得人手点「重新体检」才更新 */
+let lastEnv=false;
+function watchEnv(){
+  const b=!!MIC.s.st.env_busy;
+  if(lastEnv&&!b){
+    if(MIC.env&&MIC.env.check)MIC.env.check();else MIC.render();
+  }
+  lastEnv=b;
+}
+
 /* 每次轮询后调用：只刷新页面上存在的插槽 */
 function tick(){
   const s=MIC.s.st;
@@ -114,6 +125,7 @@ function tick(){
       else{el.innerHTML=`<div class="empty">正在载入预览…</div>`;fetchThumb(s.last_image);}
     }
   });
+  watchEnv();
 }
 
 /* 预览图走后端按需给 data:（html= 内联页里 file:// 图片显示不出来，也省得每轮询重传） */

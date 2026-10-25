@@ -163,10 +163,40 @@ PROBE = {
 })();
 </script>
 """,
+    # 环境体检卡：待补项、一键补齐、补完自动重新体检（都跑在 mock 的假补全上）
+    "env": """
+<script>
+(async function(){
+  const R=[],ok=(n,c,x)=>R.push((c?'PASS ':'FAIL ')+n+(x!=null?' '+x:''));
+  const wait=ms=>new Promise(r=>setTimeout(r,ms));
+  const btns=()=>[].slice.call(document.querySelectorAll('#view button')).map(b=>b.textContent.trim());
+  const pills=()=>[].slice.call(document.querySelectorAll('#view .mrow .pill'))
+      .map(p=>p.textContent.trim()).filter(t=>/^(就绪|没装|待补|提醒)$/.test(t));
+  try{
+    await wait(1800);
+    const v=document.getElementById('view').textContent;
+    ok('四个分组都在', ['运行环境','依赖包','模型权重','目录'].every(g=>v.indexOf(g)>=0));
+    ok('待补三项各有「补这项」', btns().filter(t=>t==='补这项').length===3, btns().join('|'));
+    ok('顶栏写着还差几项', btns().some(t=>/一键补齐 3 项/.test(t)), btns().slice(0,4).join('|'));
+    ok('明细另起一行没被挤掉', document.querySelectorAll('#view .minfo .fine').length>=10,
+       document.querySelectorAll('#view .minfo .fine').length);
+    MIC.env.fixAll();
+    await wait(400);
+    ok('点补齐后按钮进「补全中」', btns().some(t=>/补全中/.test(t)), btns().slice(0,4).join('|'));
+    await wait(9000);
+    ok('补完自动重新体检：没有待补项', btns().indexOf('补这项')<0&&pills().length>=9,
+       'rows='+pills().length);
+    ok('顶栏改成「环境已就绪」', btns().some(t=>/环境已就绪/.test(t)), btns().slice(0,4).join('|'));
+    ok('状态药丸全绿', pills().length>0&&pills().every(t=>/就绪/.test(t)), pills().join('|'));
+  }catch(e){ok('探针跑完',false,String(e));}
+  document.body.insertAdjacentHTML('beforeend','<pre id="probe">'+R.join('\\n')+'</pre>');
+})();
+</script>
+""",
 }
 
 # 探针跑在哪一页上（键是探针名，值是 shoot 的页名）
-PROBE_PAGE = {"inpaint": "inpaint", "again": "t2i", "loadbar": "overview"}
+PROBE_PAGE = {"inpaint": "inpaint", "again": "t2i", "loadbar": "overview", "env": "models"}
 
 
 def main():
@@ -192,6 +222,7 @@ def main():
         pages = args.pages or ["settings"]
     base = assemble(mock=True)
     made = []
+    rc = 0
     for name in pages:
         tid = TAB.get(name)
         if not tid:
@@ -214,7 +245,8 @@ def main():
         if args.probe:
             cmd = [edge, "--headless=new", "--no-sandbox", "--disable-gpu",
                    "--user-data-dir=" + os.path.join(out, "profile"),
-                   "--window-size=1420,1100", "--virtual-time-budget=9000",
+                   "--window-size=1420,1100",
+                   "--virtual-time-budget=%d" % (args.budget or 9000),
                    "--dump-dom", url]
             p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
                                timeout=180, encoding="utf-8", errors="replace")
@@ -228,8 +260,16 @@ def main():
             j = dom.find("</pre>", i)
             body = dom[i:j].replace("&gt;", ">").replace("&lt;", "<").replace("&amp;", "&")
             print(body)
-            bad = [x for x in body.splitlines() if x.startswith("FAIL")]
-            print("\nPROBE %s: %s" % (args.probe, "PASS" if not bad else "FAIL " + str(len(bad))))
+            lines = [x for x in body.splitlines() if x.startswith(("PASS", "FAIL"))]
+            bad = [x for x in lines if x.startswith("FAIL")]
+            # 一行结论都没有＝探针根本没跑完，不能当成通过
+            if not lines:
+                verdict = "FAIL 无输出（预算不够或页面没起来）"
+                rc = 1
+            else:
+                verdict = "PASS" if not bad else "FAIL " + str(len(bad))
+                rc = rc or (1 if bad else 0)
+            print("\nPROBE %s: %s" % (args.probe, verdict))
             made.append("(probe)")
             continue
         png = os.path.join(out, "%s.png" % name)
@@ -246,7 +286,7 @@ def main():
         made.append(png if os.path.exists(png) else "没出图:" + name)
     for m in made:
         print(m)
-    return 0
+    return rc
 
 
 if __name__ == "__main__":

@@ -148,7 +148,7 @@ DEFAULT_CFG = {
         {"id": "t_rgba", "type": "tab", "name": "透明素材", "icon": "layers", "page": "rgba"},
         {"id": "t_gal", "type": "tab", "name": "画廊", "icon": "image", "page": "gallery"},
         {"id": "t_pe", "type": "tab", "name": "提示词工坊", "icon": "book", "page": "pe"},
-        {"id": "t_mod", "type": "tab", "name": "模型管理", "icon": "db", "page": "models"},
+        {"id": "t_mod", "type": "tab", "name": "环境与模型", "icon": "db", "page": "models"},
         {"id": "t_api", "type": "tab", "name": "API 服务", "icon": "globe", "page": "api"},
         {"id": "t_set", "type": "tab", "name": "设置", "icon": "cog", "page": "settings"},
     ],
@@ -225,6 +225,8 @@ class App(WindowCtl):
             "api_on": False, "api_url": "", "t_start": 0, "elapsed": 0,
             # 载入进度：黑框去掉后，权重加载这条唯一「看得见」的路就是这两个字段
             "load_pct": 0, "load_stage": "",
+            # 环境补全：换电脑 clone 后缺包缺权重，靠这一项在界面上补齐
+            "env_busy": False, "env_todo": None,
         }
         self._refresh_gallery_count()
         self._log("就绪 · %s" % APP_NAME)
@@ -254,6 +256,16 @@ class App(WindowCtl):
         if missing:
             self.cfg.setdefault("nav", [])
             self.cfg["nav"] = missing + self.cfg["nav"]
+        # 功能改名了：只替换「还是旧默认名」的项，用户自己改过的名不动
+        RENAMED = {"models": ("模型管理", "环境与模型")}
+
+        def rename(nodes):
+            for n in nodes:
+                old_new = RENAMED.get(n.get("page"))
+                if n.get("type") == "tab" and old_new and n.get("name") == old_new[0]:
+                    n["name"] = old_new[1]
+                rename(n.get("children") or [])
+        rename(self.cfg.get("nav") or [])
 
     def _save_cfg(self):
         try:
@@ -930,14 +942,8 @@ class App(WindowCtl):
                   "（显存里还是旧模型：重新载入才生效）" if self.st["model_loaded"] else ""))
         return {"ok": True, "cfg": self.cfg}
 
-    def models_download(self, repo, name=""):
-        """hf-mirror 断点续传下载：后台线程 + 每分钟进度日志，瞬断自动重连 20 次。"""
-        if self._dl is not None and self._dl.is_alive():
-            return {"ok": False, "msg": "已经有一个下载在跑，等它结束"}
-        repo = str(repo or "").strip()
-        name = str(name or "").strip() or repo.split("/")[-1]
-        if not re.fullmatch(r"[\w.-]+/[\w.-]+", repo) or not self._safe_name(name):
-            return {"ok": False, "msg": "repo 格式要 org/name；目录名只允许字母数字点横线下划线"}
+    def _model_dl(self, repo, name):
+        """同步下载（hf-mirror 断点续传，瞬断自动重连 20 次）；起不起线程由调用方决定。"""
         target = _abs_path(os.path.join("models", name))
         os.makedirs(target, exist_ok=True)
 
@@ -951,41 +957,147 @@ class App(WindowCtl):
                         pass
             return t / 2**30
 
-        def run():
-            os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
-            import huggingface_hub
-            self._log("📥 开始下载 %s → models/%s（hf-mirror，断点续传）" % (repo, name))
-            t0 = time.time()
-            stop_watch = threading.Event()
+        os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
+        import huggingface_hub
+        self._log("📥 开始下载 %s → models/%s（hf-mirror，断点续传）" % (repo, name))
+        t0 = time.time()
+        stop_watch = threading.Event()
 
-            def watch():
-                while not stop_watch.wait(60):
-                    self._log("…下载中：models/%s 当前 %.1f GB" % (name, dir_gb(target)))
-            wt = threading.Thread(target=watch, daemon=True)
-            wt.start()
-            done = False
-            try:
-                for attempt in range(1, 21):
-                    try:
-                        huggingface_hub.snapshot_download(
-                            repo_id=repo, local_dir=target, max_workers=4,
-                            etag_timeout=60)
-                        done = True
-                        break
-                    except Exception as e:
-                        wait = min(5 * attempt, 30)
-                        self._log("⚠️ 第 %d 次中断：%s · %d 秒后从断点续传" % (attempt, e, wait))
-                        time.sleep(wait)
-                if done:
-                    self._log("✅ 下载完成 models/%s · 共 %.1f GB · 用时 %.1f 分钟"
-                              % (name, dir_gb(target), (time.time() - t0) / 60))
-                else:
-                    self._log("❌ 下载失败：重试 20 次仍不通，检查网络或代理")
-            finally:
-                stop_watch.set()
-        self._dl = threading.Thread(target=run, daemon=True)
+        def watch():
+            while not stop_watch.wait(60):
+                self._log("…下载中：models/%s 当前 %.1f GB" % (name, dir_gb(target)))
+        threading.Thread(target=watch, daemon=True).start()
+        done = False
+        try:
+            for attempt in range(1, 21):
+                try:
+                    huggingface_hub.snapshot_download(
+                        repo_id=repo, local_dir=target, max_workers=4,
+                        etag_timeout=60)
+                    done = True
+                    break
+                except Exception as e:
+                    wait = min(5 * attempt, 30)
+                    self._log("⚠️ 第 %d 次中断：%s · %d 秒后从断点续传" % (attempt, e, wait))
+                    time.sleep(wait)
+        finally:
+            stop_watch.set()
+        if done:
+            self._log("✅ 下载完成 models/%s · 共 %.1f GB · 用时 %.1f 分钟"
+                      % (name, dir_gb(target), (time.time() - t0) / 60))
+        else:
+            self._log("❌ 下载失败：重试 20 次仍不通，检查网络或代理")
+        return done
+
+    def models_download(self, repo, name=""):
+        """模型管理页的下载器：后台线程跑 _model_dl，调用即返回。"""
+        if self._dl is not None and self._dl.is_alive():
+            return {"ok": False, "msg": "已经有一个下载在跑，等它结束"}
+        repo = str(repo or "").strip()
+        name = str(name or "").strip() or repo.split("/")[-1]
+        if not re.fullmatch(r"[\w.-]+/[\w.-]+", repo) or not self._safe_name(name):
+            return {"ok": False, "msg": "repo 格式要 org/name；目录名只允许字母数字点横线下划线"}
+        target = _abs_path(os.path.join("models", name))
+        os.makedirs(target, exist_ok=True)
+        self._dl = threading.Thread(target=lambda: self._model_dl(repo, name), daemon=True)
         self._dl.start()
         return {"ok": True, "target": target}
+
+    # ------------------------------------------------------------ js_api：环境体检与补全
+    def env_check(self):
+        """按 ROOT/env.json 逐项体检：换电脑 clone 代码后，缺哪些包、缺哪份权重一眼看全。"""
+        try:
+            import env_check as ec
+            r = ec.check(ROOT)
+        except Exception as e:
+            return {"ok": False, "msg": "体检没跑成：%s" % e}
+        self.st["env_todo"] = len(r["todo"])
+        return r
+
+    def env_fix(self, keys=None):
+        """一键补齐：pip 装包 / hf-mirror 续传权重 / 建目录，全在后台线程，逐行推进日志。
+
+        keys=None 补全部可修项；否则只补点名的那几项。
+        """
+        if self.st["env_busy"]:
+            return {"ok": False, "msg": "补全还在跑，看下面的日志"}
+        if getattr(sys, "frozen", False):
+            return {"ok": False, "msg": "打包版改不了自己的环境（pip 会装到 exe 外面）· "
+                                        "请 clone 源码用 setup.bat 那条路"}
+        try:
+            import env_check as ec
+            items = ec.check(ROOT)["items"]
+        except Exception as e:
+            return {"ok": False, "msg": "体检没跑成：%s" % e}
+        todo = ec.fix_plan(items, keys)
+        if not todo:
+            return {"ok": True, "msg": "没有需要补的", "count": 0}
+
+        def run():
+            ok_n, bad_n = 0, 0
+            self._log("🔧 开始补全 %d 项：%s"
+                      % (len(todo), "、".join(x["label"] for x in todo)))
+            for it in todo:
+                kind = it["fix"]["kind"]
+                try:
+                    if kind == "pip":
+                        ok = self._pip_fix(it)
+                    elif kind == "model":
+                        ok = self._model_dl(it["fix"]["repo"], it["fix"]["name"])
+                    elif kind == "dir":
+                        os.makedirs(_abs_path(it["fix"]["path"]), exist_ok=True)
+                        self._log("✅ 建好目录 %s" % it["fix"]["path"])
+                        ok = True
+                    else:
+                        ok = False
+                    if ok:
+                        ok_n += 1
+                    else:
+                        bad_n += 1
+                except Exception as e:
+                    self._log("❌ %s 补全出错：%s" % (it["label"], e))
+                    bad_n += 1
+            try:
+                left = len(ec.fix_plan(ec.check(ROOT)["items"]))
+            except Exception:
+                left = -1
+            self._log("%s 补全结束：成功 %d · 失败 %d · 还差 %d 项"
+                      % ("✅" if not bad_n and not left else "⚠️", ok_n, bad_n, left))
+            self.st["env_todo"] = left if left >= 0 else None
+            self.st["env_busy"] = False
+
+        self.st["env_busy"] = True
+        t = threading.Thread(target=run, daemon=True)
+        t.start()
+        return {"ok": True, "count": len(todo),
+                "labels": [x["label"] for x in todo]}
+
+    def _pip_fix(self, item):
+        """pip 子进程装一个包，输出只留关键行进日志（全量刷进来人反而看不见）。"""
+        import env_check as ec
+        import subprocess
+
+        argv = ec.pip_argv(item, python=sys.executable)
+        self._log("$ %s" % " ".join(argv[3:]))
+        keep = re.compile(r"Collecting|Downloading|Download|Installing|Successfully|"
+                          r"Requirement already|Building|Uninstalling|ERROR|"
+                          r"note:|error:|Getting requirements", re.I)
+        try:
+            p = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                 text=True, encoding="utf-8", errors="replace",
+                                 cwd=ROOT, env=dict(os.environ, PYTHONIOENCODING="utf-8"))
+        except OSError as e:
+            self._log("❌ 起不了 pip：%s" % e)
+            return False
+        for line in p.stdout:
+            line = line.strip()
+            if line and keep.search(line):
+                self._log(line)
+        rc = p.wait()
+        if rc:
+            self._log("❌ %s 装失败（退出码 %s）：git 源要能连 github，"
+                      "直连不稳就先开代理再点一次" % (item["label"], rc))
+        return rc == 0
 
     # ------------------------------------------------------------ js_api：杂项
     def open_path(self, path):

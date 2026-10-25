@@ -57,6 +57,9 @@ MIC.api={
   modelsList:()=>call('models_list'),
   modelsSetActive:n=>call('models_set_active',n),
   modelsDownload:(r,n)=>call('models_download',r,n||''),
+  /* 环境体检与一键补全：清单在 ROOT/env.json，缺的包与权重由后端后台补齐 */
+  envCheck:()=>call('env_check'),
+  envFix:k=>call('env_fix',k||null),
   openPath:p=>call('open_path',p),
   openUrl:u=>call('open_url',u),
   /* API 服务：状态/开关/令牌（后端即时重启监听，都返回最新 state） */

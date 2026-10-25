@@ -77,6 +77,11 @@
 .mrow:first-of-type{margin-top:0}
 .minfo{min-width:0;flex:1}
 .minfo b{font-size:13px;word-break:break-all}
+/* 明细另起一行：一长串文件名挤在同一行会把右侧按钮顶出卡片 */
+.minfo .fine{display:block;margin-top:2px;word-break:break-all}
+/* 环境体检：分组小标题 */
+.egroup{font-size:11px;color:var(--fg3);letter-spacing:.08em;margin:14px 2px 0}
+.egroup:first-of-type{margin-top:0}
 
 /* 提示词工坊：中文选项 chips */
 .chiprow{display:flex;align-items:center;flex-wrap:wrap;gap:7px;margin:8px 0}

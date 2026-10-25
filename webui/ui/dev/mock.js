@@ -34,7 +34,7 @@ const st={running:null,status:'就绪',done:0,total:0,
   model_loaded:false,model_name:'Qwen-Image-2.1-Turbo',quant:'fp8',
   vram_used:0.6,vram_total:12,img_count:6,last_sec:28.4,
   last_image:'D:/AI/Qwen-Image-2.1/outputs/gen_20261013_094107.png',
-  api_on:false,api_url:'',load_pct:0,load_stage:''};
+  api_on:false,api_url:'',load_pct:0,load_stage:'',env_busy:false,env_todo:null};
 
 let seq=0;
 const logs=[];
@@ -83,6 +83,24 @@ const MDL=[
   {name:'Qwen-Image-2.1-Turbo',gb:31.2,shards:32,index:true,active:true},
   {name:'Qwen-Image-2.1',gb:0,shards:0,index:false,active:false},
 ];
+
+/* 体检种子：形状与 webui/env_check.check() 一致。
+   故意留三项「没装/待补」，方便在浏览器里核对补全那条 UI 路径长什么样。 */
+const ENV=[
+  {key:'python',group:'运行环境',label:'Python 解释器',state:'ok',detail:'当前 3.12.10（要求 3.11~3.13）',fix:{kind:'none'}},
+  {key:'venv',group:'运行环境',label:'虚拟环境',state:'ok',detail:'用的就是本目录 .venv',fix:{kind:'none'}},
+  {key:'disk',group:'运行环境',label:'磁盘空间',state:'ok',detail:'本盘剩余 273.5 GB（权重共约 30.3 GB）',fix:{kind:'none'}},
+  {key:'pkg:torch',group:'依赖包',label:'torch 2.11.0',state:'ok',detail:'已装 2.11.0+cu128',fix:{kind:'pip'}},
+  {key:'pkg:torchao',group:'依赖包',label:'torchao 0.18.0',state:'miss',detail:'没装',fix:{kind:'pip'}},
+  {key:'pkg:diffusers',group:'依赖包',label:'diffusers 916a5791',state:'part',
+   detail:'已装 0.41.0.dev0，但 commit 是 b1a2c3d4，清单钉的是 916a5791',fix:{kind:'pip'}},
+  {key:'pkg:pywebview',group:'依赖包',label:'pywebview 6.2.1',state:'ok',detail:'已装 6.2.1',fix:{kind:'pip'}},
+  {key:'model:turbo',group:'模型权重',label:'主力模型 Turbo（Qwen/Qwen-Image-2.1-Turbo）',state:'part',
+   detail:'权重不完整：1 个文件字节数不对（transformer/diffusion_pytorch_model-00002-of-00002.safetensors） · 续传补齐即可',
+   gb:30.3,fix:{kind:'model'}},
+  {key:'dir:outputs',group:'目录',label:'outputs/',state:'ok',detail:'可写',fix:{kind:'dir'}},
+];
+function envTodo(){return ENV.filter(x=>x.state==='miss'||x.state==='part').map(x=>x.key);}
 
 /* 假任务推进：载入 3 轮 → 生成按步走 → 收尾出图 */
 let loadTick=0,genTok=0,wantGen=false;
@@ -243,5 +261,27 @@ window.MIC_MOCK={
       L('✅ 下载完成：'+nm+'（32/32 个分片校验通过）');
     },4000);
     return {ok:true};},
+  env_check(){
+    return Promise.resolve({ok:true,spec:'env.json',gb:30.3,
+      items:ENV.map(x=>Object.assign({},x,{fix:Object.assign({},x.fix)})),todo:envTodo()});},
+  env_fix(keys){
+    const want=Array.isArray(keys)?keys:envTodo();
+    const hit=ENV.filter(x=>want.indexOf(x.key)>=0&&(x.state==='miss'||x.state==='part'));
+    if(!hit.length)return {ok:true,count:0,msg:'没有需要补的'};
+    st.env_busy=true;st.env_todo=hit.length;
+    L('🔧 开始补全 '+hit.length+' 项：'+hit.map(x=>x.label).join('、'));
+    setTimeout(function(){
+      hit.forEach(function(x){
+        const k=x.fix.kind;
+        if(k==='pip')L('Successfully installed '+x.label);
+        else if(k==='model')L('…下载中：models/ 当前 30.3 GB');
+        else L('✅ 建好目录 '+x.label);
+        x.state='ok';
+        x.detail=k==='pip'?'已装（刚补）':k==='model'?'文件齐全（15 项校验过）':'可写';
+      });
+      L('✅ 补全结束：成功 '+hit.length+' · 失败 0 · 还差 0 项');
+      st.env_busy=false;st.env_todo=0;
+    },5000);
+    return {ok:true,count:hit.length,labels:hit.map(x=>x.label)};},
 };
 })();
