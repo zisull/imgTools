@@ -11,3 +11,6 @@ __pycache__/
 config.json
 
 .idea/
+
+# 本机硬件检测报告（个人机器信息，不进仓库）
+*zisull*
