@@ -1004,6 +1004,20 @@ class App(WindowCtl):
         return {"ok": True, "target": target}
 
     # ------------------------------------------------------------ js_api：环境体检与补全
+    def env_probe_bg(self):
+        """开机后台体检一次：概览页那条「还差 N 项」不用先进环境页才看得见。
+
+        体检要 import torch 问一句 cuda，十几秒，所以只允许它悄悄跑，不挡启动。
+        """
+        def run():
+            r = self.env_check()
+            if not r.get("ok"):
+                self._log("⚠️ 环境体检没跑成：%s" % r.get("msg"))
+                return
+            n = len(r["todo"])
+            self._log("🩺 环境体检：%s" % ("就绪" if not n else "还差 %d 项（概览页一键补齐）" % n))
+        threading.Thread(target=run, daemon=True).start()
+
     def env_check(self):
         """按 ROOT/env.json 逐项体检：换电脑 clone 代码后，缺哪些包、缺哪份权重一眼看全。"""
         try:
@@ -1185,6 +1199,7 @@ def main():
         _say_already_running()
         return
     app = App()
+    app.env_probe_bg()          # 后台体检：概览页那条环境横幅的数据来源
     if app.cfg["api"].get("enabled"):
         app.api_set({})          # 上次开着 API：这次启动自动恢复监听
     window = webview.create_window(

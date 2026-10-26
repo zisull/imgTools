@@ -84,14 +84,15 @@ MIC.env={
     MIC.env._go([it.key]);
   },
   fixAll(){
-    if(!(env&&env.todo.length)){MIC.toast('没有要补的项');return;}
-    MIC.env._go(env.todo);
+    /* 概览页那条横幅也调这里：那时环境页还没进过、本地没缓存，
+       补哪些项让后端现算（keys=null），别拿「没有要补的」把人挡回去 */
+    MIC.env._go(env&&env.todo&&env.todo.length?env.todo:null);
   },
   _go(keys){
     MIC.api.envFix(keys).then(r=>{
       if(!r||!r.ok){MIC.toast((r&&r.msg)||'补全没起来');return;}
       if(!r.count){MIC.toast('没有需要补的');return;}
-      MIC.s.st.env_busy=true;MIC.s.st.env_todo=keys.length;
+      MIC.s.st.env_busy=true;MIC.s.st.env_todo=r.count;
       MIC.toast('补全已在后台开始（'+r.count+' 项），进度看日志');
       MIC.render();
     }).catch(()=>MIC.toast('补全没起来'));

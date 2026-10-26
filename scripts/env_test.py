@@ -5,6 +5,7 @@
 """
 import os
 import sys
+import time
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "webui"))
@@ -195,6 +196,17 @@ def main():
     r = a.env_fix(["no-such-key"])
     ok("没有可补项就返回 0，不动 pip", r["ok"] and r["count"] == 0, r)
     ok("上面这道门没把 env_busy 挂上", a.st["env_busy"] is False)
+
+    # 开机后台体检：概览页那条横幅的数就是它写的（真 import torch，慢十几秒）
+    a.st["env_todo"] = None
+    a.env_probe_bg()
+    t0 = time.time()
+    while a.st["env_todo"] is None and time.time() - t0 < 180:
+        time.sleep(1)
+    ok("后台体检把待补数写进状态", isinstance(a.st["env_todo"], int),
+       "%s 项 · 等了 %.0fs" % (a.st["env_todo"], time.time() - t0))
+    tail = " ".join(x[2] for x in a._logs[-6:])
+    ok("体检结论进了日志（人不用点进环境页也知道差什么）", "环境体检" in tail, tail[-60:])
 
     import shutil
 

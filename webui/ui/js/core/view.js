@@ -83,6 +83,22 @@ function watchEnv(){
   lastEnv=b;
 }
 
+/* 环境横幅：只有缺东西才出内容（齐了空着不占地方）。
+   挂在 data-role 上而不是整页重画：体检数是从轮询并进来的，八秒内自己就变了。 */
+function envBarHTML(){
+  const s=MIC.s.st;
+  if(s.env_busy)
+    return `<div class="envbar busy"><span class="tic">${ic('refresh','s')}</span>
+      <b>环境补全中…</b><span class="mut fine">装包 / 下载权重的进度在下面日志里逐行滚</span></div>`;
+  const n=Number(s.env_todo)||0;
+  if(!n)return '';
+  return `<div class="envbar warn"><span class="tic">${ic('tool','s')}</span>
+    <b>环境还差 ${n} 项</b>
+    <span class="mut fine">不用自己查该装什么，也不用开终端</span><span class="grow"></span>
+    <button class="btn sm pri" onclick="MIC.env.fixAll()">${ic('down','s')}一键补齐</button>
+    <button class="btn sm gho" onclick="MIC.nav.goto('models')">看明细</button></div>`;
+}
+
 /* 每次轮询后调用：只刷新页面上存在的插槽 */
 function tick(){
   const s=MIC.s.st;
@@ -107,6 +123,7 @@ function tick(){
     else if(r==='pgtext')el.textContent=pgText();
     else if(r==='vram')el.innerHTML=vramHTML();
     else if(r==='count')el.textContent=MIC.n(s[el.dataset.field||'img_count']);
+    else if(r==='envbar')el.innerHTML=envBarHTML();
     else if(r==='result')el.innerHTML=`上一张 <b>${(Number(s.last_sec)||0).toFixed(1)}</b> 秒 · `+
       `用时目标 ≤60 秒 · `+(s.last_image?`输出 <b>${esc(String(s.last_image).split(/[\\/]/).pop())}</b>`:'尚无输出');
     else if(r==='imgprev'){
@@ -196,5 +213,5 @@ function refreshStats(){
 }
 
 MIC.view={tick,watchFinish,logHTML,logText,fillLog,copy:copyText,
-  pct,refreshStats,vramHTML,hidePrev,showPrev};
+  pct,refreshStats,vramHTML,hidePrev,showPrev,envBarHTML};
 })();

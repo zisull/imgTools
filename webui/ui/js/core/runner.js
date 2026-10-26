@@ -51,6 +51,17 @@ function again(target){
   else{MIC.toast('不认识的接力目标：'+target);return;}
   MIC.nav.goto(target);
 }
+/* Ctrl+Enter = 按下本页那个「开始」：写完提示词手不用离开键盘去找按钮。
+   运行中不接管——快捷键去按「停止」太容易误伤，那一下留给人明确点。 */
+document.addEventListener('keydown',e=>{
+  if((e.ctrlKey||e.metaKey)&&e.key==='Enter'){
+    if(MIC.s&&MIC.s.st&&MIC.s.st.running)return;
+    const b=document.querySelector('#view [data-start]');
+    if(!b)return;
+    e.preventDefault();b.click();
+  }
+});
+
 MIC.runner={start,stop,toggle,load,unload,again,payload:{}};
 
 /* 运行卡 + 成图预览 + 日志卡：文生图/编辑/局部/透明四页同构，收成一个 helper。
@@ -60,7 +71,8 @@ MIC.runner.runCard=function(runNote,startCall){
   const s=MIC.s.st, run=!!s.running, C=MIC.form, ic=MIC.ic;
   const btn=run
     ? '<button class="btn pri" onclick="MIC.runner.stop(\'gen\')">'+ic('stop','s')+'停止</button>'
-    : '<button class="btn pri" onclick="'+(startCall||'MIC.runner.start(\'gen\')')+'">'+ic('play','s')+'开始</button>';
+    : '<button class="btn pri" data-start title="Ctrl+Enter 也能开始" onclick="'
+      +(startCall||'MIC.runner.start(\'gen\')')+'">'+ic('play','s')+'开始</button>';
   const statusBody=
     '<div class="status">'+
       C.strow('任务状态','<span class="dot '+(run?'run':'')+'" data-role="dot"></span><span data-role="st"></span>')+

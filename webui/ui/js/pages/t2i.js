@@ -44,7 +44,8 @@ MIC.registerPage('t2i',{
         C.strow('进度','<div class="prog"><i data-role="prog"></i></div><span class="mut fine" data-role="pgtext"></span>')+
         C.strow('本轮结果','<span class="mut" data-role="result">就绪后开始生成</span>')+'</div>'+
       '<div class="btnrow">'+
-        '<button class="btn pri" onclick="MIC.runner.toggle(\'gen\')">'+
+        '<button class="btn pri"'+(run?'':' data-start title="Ctrl+Enter 也能开始"')+
+        ' onclick="MIC.runner.toggle(\'gen\')">'+
           ic(run?'stop':'play','s')+(run?'停止生成':'开始生成')+'</button>'+
         '<button class="btn" onclick="MIC.gen.openDir()">'+ic('folder','s')+'打开输出目录</button>'+
       '</div>';

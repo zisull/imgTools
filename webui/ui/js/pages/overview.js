@@ -16,7 +16,8 @@ MIC.registerPage('overview',{
   title:'概览',sub:'模型、显存与图库一览',icon:'home',
   render(){
     const s=MIC.s.st;
-    return `<div class="stats">
+    return `<div data-role="envbar"></div>
+    <div class="stats">
       ${stat(s.model_loaded?'ok':'warn','模型状态',s.model_loaded?'已载入':'未载入','')}
       ${stat('ac','图库',MIC.n(s.img_count),'张','count','img_count')}
       ${stat('','上一张用时',(Number(s.last_sec)||0).toFixed(1),'秒')}
@@ -32,9 +33,10 @@ MIC.registerPage('overview',{
        <div class="strow"><span class="k">进度</span><div class="prog"><i data-role="prog"></i></div><span class="mut fine" data-role="pgtext"></span></div>`),{note:s.quant==='fp8'?'量化 fp8':'未量化（会爆显存）'})}
     ${C.card('快速开始','play',`<div class="tiles">
         ${tile('t2i','flower','文生图','提示词 → 1024/1536 成图，Turbo 8 步')}
+        ${tile('edit','wand','图像编辑','拖一张图 + 一句话，改图不改背景')}
         ${tile('gallery','image','画廊','浏览与删除输出目录里的成图')}
-        ${tile('settings','cog','设置','模型目录 / 输出目录 / API 服务')}
-      </div>`,{note:'3 个功能页'})}
+        ${tile('models','db','环境与模型','缺包缺权重一键补齐')}
+      </div>`,{note:'常用 4 页 · 任意生图页 Ctrl+Enter 直接开始'})}
     ${C.logcard('','最近日志',
       `<button class="btn sm gho" onclick="MIC.view.refreshStats()">${ic('refresh','s')}刷新状态</button>`)}`;
   },

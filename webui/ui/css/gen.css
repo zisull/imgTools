@@ -82,6 +82,14 @@
 /* 环境体检：分组小标题 */
 .egroup{font-size:11px;color:var(--fg3);letter-spacing:.08em;margin:14px 2px 0}
 .egroup:first-of-type{margin-top:0}
+/* 概览页环境横幅：缺东西才出现，齐了整条不渲染 */
+.envbar{display:flex;align-items:center;gap:10px;margin-bottom:12px;
+  padding:11px 14px;border:1px solid var(--line2);border-left:3px solid var(--warn);
+  border-radius:12px;background:var(--well);font-size:13px}
+.envbar.warn{border-left-color:var(--warn)}
+.envbar.busy{border-left-color:var(--ac)}
+.envbar b{font-size:13.5px}
+.envbar .grow{flex:1}
 
 /* 提示词工坊：中文选项 chips */
 .chiprow{display:flex;align-items:center;flex-wrap:wrap;gap:7px;margin:8px 0}

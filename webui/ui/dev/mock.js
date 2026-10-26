@@ -23,7 +23,7 @@ const cfg={
     {id:'t_rgba',type:'tab',name:'透明素材',icon:'layers',page:'rgba'},
     {id:'t_gal',type:'tab',name:'画廊',icon:'image',page:'gallery'},
     {id:'t_pe',type:'tab',name:'提示词工坊',icon:'book',page:'pe'},
-    {id:'t_mod',type:'tab',name:'模型管理',icon:'db',page:'models'},
+    {id:'t_mod',type:'tab',name:'环境与模型',icon:'db',page:'models'},
     {id:'t_api',type:'tab',name:'API 服务',icon:'globe',page:'api'},
     {id:'t_set',type:'tab',name:'设置',icon:'cog',page:'settings'},
   ],
@@ -262,6 +262,8 @@ window.MIC_MOCK={
     },4000);
     return {ok:true};},
   env_check(){
+    /* 后端 env_check 顺手把待补数写进状态：概览页那条横幅靠它，不用先进环境页 */
+    st.env_todo=envTodo().length;
     return Promise.resolve({ok:true,spec:'env.json',gb:30.3,
       items:ENV.map(x=>Object.assign({},x,{fix:Object.assign({},x.fix)})),todo:envTodo()});},
   env_fix(keys){

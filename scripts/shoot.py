@@ -193,10 +193,58 @@ PROBE = {
 })();
 </script>
 """,
+    # 懒人路径：开机就在概览页看到「还差几项」→ 点一下补齐；生图页 Ctrl+Enter 直接开始
+    "lazy": """
+<script>
+(async function(){
+  const R=[],ok=(n,c,x)=>R.push((c?'PASS ':'FAIL ')+n+(x!=null?' '+x:''));
+  const wait=ms=>new Promise(r=>setTimeout(r,ms));
+  const bar=()=>document.querySelector('#view [data-role=envbar] .envbar');
+  const btns=()=>[].slice.call(document.querySelectorAll('#view button')).map(b=>b.textContent.trim());
+  const barBtns=()=>{const b=bar();return b?[].slice.call(b.querySelectorAll('button')).map(x=>x.textContent.trim()):[]};
+  try{
+    await wait(1800);
+    /* 体检回来前（env_todo 还是 null）不该有任何横幅 */
+    ok('没数据时横幅不占位', !bar() && MIC.s.st.env_todo===null, String(MIC.s.st.env_todo));
+    MIC.env.check();                 // 概览页也做一次体检：mock 里 3 项待补
+    await wait(1200);
+    ok('体检后横幅出现', !!bar() && /还差 3 项/.test(bar().textContent),
+       bar()&&bar().textContent.trim().slice(0,20));
+    ok('横幅上就两个按钮', barBtns().filter(t=>/一键补齐|看明细/.test(t)).length===2, barBtns().join('|'));
+    MIC.env.fixAll();
+    await wait(1200);
+    ok('一键补齐把横幅换成补全中', !!bar() && /补全中/.test(bar().textContent),
+       bar()&&bar().textContent.trim().slice(0,16));
+    ok('补全中不重复给按钮', barBtns().filter(t=>/一键补齐/.test(t)).length===0, barBtns().join('|'));
+    await wait(9000);
+    ok('补完横幅整条消失（齐了不占地方）', !bar(),
+       bar()?bar().textContent.trim().slice(0,20):'空');
+    /* Ctrl+Enter：写完提示词手不离开键盘 */
+    MIC.nav.goto('t2i');
+    await wait(700);
+    const b=document.querySelector('#view [data-start]');
+    ok('生图页有可快捷键的开始按钮', !!b, b&&b.getAttribute('title'));
+    MIC.s.st.running=null;
+    document.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',ctrlKey:true,bubbles:true}));
+    await wait(500);
+    ok('Ctrl+Enter 真的开始了', MIC.s.st.running==='gen'||/运行中/.test(MIC.s.st.status),
+       MIC.s.st.status);
+    /* 运行中再按同一路径不能被当成「停止」——快捷键不许误伤
+       （mock 的任务推进器会把 running 从 gen 换成 load，所以判「还在跑」而不是「没变」）*/
+    document.dispatchEvent(new KeyboardEvent('keydown',{key:'Enter',ctrlKey:true,bubbles:true}));
+    await wait(300);
+    ok('运行中不接管快捷键', !!MIC.s.st.running, String(MIC.s.st.running));
+    MIC.s.st.running=null;MIC.render();
+  }catch(e){ok('探针跑完',false,String(e));}
+  document.body.insertAdjacentHTML('beforeend','<pre id="probe">'+R.join('\\n')+'</pre>');
+})();
+</script>
+""",
 }
 
 # 探针跑在哪一页上（键是探针名，值是 shoot 的页名）
-PROBE_PAGE = {"inpaint": "inpaint", "again": "t2i", "loadbar": "overview", "env": "models"}
+PROBE_PAGE = {"inpaint": "inpaint", "again": "t2i", "loadbar": "overview", "env": "models",
+              "lazy": "overview"}
 
 
 def main():
