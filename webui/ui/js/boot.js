@@ -72,6 +72,7 @@ function poll(){
     MIC.pushLogs(r.logs);
     MIC.s.cursor=r.seq;
     MIC.view.tick();
+    MIC.view.watchStruct();
     MIC.view.watchFinish();
   }).catch(()=>{
     if(++fails===5)MIC.toast('界面与后台的连接中断');

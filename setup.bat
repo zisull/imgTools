@@ -1,8 +1,11 @@
 @echo off
 rem Qwen-Image console one-click bootstrap (portable: everything stays in this folder).
 rem What gets installed is driven by env.json - the same list the desktop app reads.
+rem 这是「命令行一把装齐千问依赖」的老路，可选；日常不需要跑它。
+rem 双击 启动.bat 只会备好界面壳（几秒）就开界面，剩下的依赖与权重
+rem 在「环境与模型」页按分区点「一键补齐」下（看得见进度、断点续传）。
 rem Usage: setup.bat        interactive, pauses at the end
-rem        setup.bat /auto   no pause (called by the launcher on a fresh clone)
+rem        setup.bat /auto   no pause (kept for scripting)
 setlocal
 cd /d %~dp0
 set RC=0

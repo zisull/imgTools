@@ -82,7 +82,7 @@
       <div class="logo" id="brandLogo">Q</div>
       <div class="btxt" style="min-width:0">
         <div class="bname" id="brandName">Qwen 生图控制台</div>
-        <div class="bsub">本地生图 · API 服务</div>
+        <div class="bsub" id="brandSub">本地生图 · API 服务</div>
       </div>
     </div>
 
@@ -114,6 +114,8 @@
         <button class="wbtn wc-close" onclick="MIC.win.close()" title="关闭"><svg class="ic"><use href="#i-close"/></svg></button>
       </span>
     </header>
+    <!-- 环境横幅挂在这里而不是某一页：以前只有概览页有，进了别的页就看不见「还差几项」 -->
+    <div class="envslot" id="envslot"></div>
     <div class="content"><div class="inner" id="view"></div></div>
   </div>
 </div>

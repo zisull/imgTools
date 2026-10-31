@@ -4,38 +4,43 @@ const MIC=window.MIC=window.MIC||{};
 const esc=MIC.esc, ic=MIC.ic;
 
 /* ---------- 构件 ---------- */
+/* 说明语一律做成悬浮提示（挂在标签上）：摆在明面上每页要多占一行，
+   而真正需要解释的控件是少数——鼠标停一下就能看到，界面本身干净得多。 */
 function field(label,control,hint){
-  return `<div class="f"><label>${label}</label><div class="c">${control}</div>${hint?`<div class="hint">${hint}</div>`:''}</div>`;
+  return `<div class="f"><label${hint?` class="tip" title="${esc(hint)}"`:''}>${label}</label>`+
+    `<div class="c">${control}</div></div>`;
 }
 function card(title,iconName,body,opts){
   const o=opts||{};
   return `<section class="card ${o.cls||''}">
-    <header class="card-h">${ic(iconName)}<h2>${title}</h2>
+    <header class="card-h"${o.tip?` title="${esc(o.tip)}"`:''}>${ic(iconName)}<h2>${title}</h2>
       ${o.note?`<span class="note">${o.note}</span>`:''}
       <span class="grow"></span>${o.actions||''}</header>
     <div class="card-b${o.tight?' tight':''}">${body}</div></section>`;
 }
+/* 卡片里的折叠块：只是分隔线 + 一行标题，不再套一层卡片（嵌套边框是最显乱的来源） */
+function fold(title,iconName,body,note){
+  return `<div class="fold">
+    <div class="fold-h closed" onclick="MIC.form.foldToggle(this)">
+      ${ic('chev')}${ic(iconName,'s')}<span>${title}</span><span class="hint">${note||''}</span></div>
+    <div class="fold-b hide">${body}</div></div>`;
+}
 function foldcard(title,iconName,body,note){
-  return `<section class="card"><div class="fold" style="border-top:0">
-    <div class="fold-h closed" onclick="MIC.form.fold(this)">
+  return `<section class="card"><div class="fold flat">
+    <div class="fold-h closed" onclick="MIC.form.foldToggle(this)">
       ${ic('chev')}${ic(iconName,'s')}<span>${title}</span><span class="hint">${note||''}</span></div>
     <div class="fold-b hide">${body}</div></div></section>`;
 }
-/* 日志卡：各页面都用，标题可换，右上角固定「复制 / 清空」
-   （复制走剪贴板，清空只清界面这一路的缓冲，后端日志文件不动）
-   extra 传页面自己的按钮（如概览的刷新统计），排在复制之前。 */
-function logcard(keys,title,extra){
-  return card(title||'运行日志','refresh',
-    `<div class="log" data-role="log" data-keys="${keys||''}"></div>`,
-    {tight:true,actions:(extra||'')+
-      `<button class="btn sm gho" onclick="MIC.form.copyLog('${keys||''}')">${ic('copy','s')}复制</button>`+
-      `<button class="btn sm gho" onclick="MIC.form.clearLog('${keys||''}')">${ic('trash','s')}清空</button>`});
-}
-/* 运行卡下半截：状态灯 + 进度这两行在补邮箱/转换/导出三页完全同构，只差最后一行统计，
+/* 运行卡下半截：状态灯 + 进度这两行在各页完全同构，只差最后一行统计，
    所以收成一个 helper；按钮行各页不一样，仍由调用方自己拼。 */
 function strow(k,inner){return `<div class="strow"><span class="k">${k}</span>${inner}</div>`;}
+/* 双栏页构件：左主右辅。生成页=左参数右运行预览；环境页=左千问右Moss；设置页同理。
+   窄窗口自动落回单列（见 base.css .duo 媒体查询）。cls 传 'eq' 让左右等宽（双分区对比用）。 */
+function duo(left,right,cls){
+  return `<div class="duo${cls?' '+cls:''}"><div class="duo-m">${left}</div><div class="duo-s">${right}</div></div>`;
+}
 function runstat(run,extra){
-  return `<div class="status" style="margin-top:16px">${
+  return `<div class="status" style="margin-top:10px">${
     strow('任务状态',`<span class="dot ${run?'run':''}" data-role="dot"></span><span data-role="st"></span>`)+
     strow('进度',`<div class="prog"><i data-role="prog"></i></div><span class="mut fine" data-role="pgtext"></span>`)+
     (extra||'')}</div>`;
@@ -49,6 +54,35 @@ function ta(k,rows,ph){
 }
 function num(k,unit){
   return `<div class="numw"><input class="inp w" data-k="${k}" data-t="num" value="${esc(MIC.mget(MIC.s.cfg,k))}">${unit?`<span class="unit">${unit}</span>`:''}</div>`;
+}
+/* 种子：随机/指定做成一下点得动的开关——为了随机去敲 -1 太别扭了。
+   随机=配置里存 -1（后端每轮换一个全新种子，张张不同）；
+   指定=沿用这次界面里输过的数值（seedKeep 只活在内存，不落配置）。
+   随机态下输入框摘掉 data-k：否则 read() 会把空框读成 0，把随机顶掉。 */
+const seedKeep={};
+function seedRow(k){
+  const v=parseInt(MIC.mget(MIC.s.cfg,k),10);
+  const rand=!(v>=0);
+  return `<div class="seedw${rand?' off':''}" data-sk="${k}">
+    <div class="sw${rand?' on':''}" title="开=每次换一张新图；关=固定种子，同样的参数复现同样的图"></div>
+    <span class="unit">随机</span>
+    <input class="inp w" data-t="num" data-k="${rand?'':k}" value="${rand?'':esc(v)}"${rand?' inert':''}
+      placeholder="种子数"></div>`;
+}
+function seedMode(box,rand){
+  const k=box.dataset.sk,inp=box.querySelector('input');
+  box.classList.toggle('off',rand);
+  box.querySelector('.sw').classList.toggle('on',rand);
+  inp.toggleAttribute('inert',rand);
+  inp.dataset.k=rand?'':k;
+  if(rand)inp.value='';
+  else if(inp.value===''||inp.value=='-1')inp.value=seedKeep[k]!=null&&seedKeep[k]!==''?seedKeep[k]:'0';
+}
+function seedFlip(box){
+  const k=box.dataset.sk,toRand=!box.classList.contains('off');
+  if(toRand)seedKeep[k]=box.querySelector('input').value;
+  seedMode(box,toRand);
+  commitPath(k,toRand?-1:parseInt(box.querySelector('input').value,10)||0);
 }
 function sel(k,list,ph){
   const v=MIC.mget(MIC.s.cfg,k);
@@ -66,9 +100,10 @@ function chk(k,label){
 function sw(k){
   return `<div class="sw ${MIC.mget(MIC.s.cfg,k)?'on':''}" data-k="${k}"></div>`;
 }
-function seg(k,items){
+/* rr=true：这一档一改整页布局都要跟着变（如「输出格式」切透明），点完重画一次 */
+function seg(k,items,rr){
   const v=String(MIC.mget(MIC.s.cfg,k));
-  return `<div class="seg" data-k="${k}">${items.map(([val,label])=>
+  return `<div class="seg"${rr?' data-rr="1"':''} data-k="${k}">${items.map(([val,label])=>
     `<button class="${val===v?'on':''}" data-v="${esc(val)}">${label}</button>`).join('')}</div>`;
 }
 function pathrow(k,ph,pickKind){
@@ -77,6 +112,19 @@ function pathrow(k,ph,pickKind){
   return `<div class="inrow dropz" data-into="${k}" data-drop="${pickKind||'file'}"
       title="可以直接把文件从资源管理器拖进来">${txt(k,ph,'fpath')}
     <button class="btn" onclick="MIC.form.pickInto('${k}','${pickKind}')">浏览</button></div>`;
+}
+/* 尺寸/画幅下拉：三个出图页各有一份档位表，构件只有一个 sizeSel，
+   档位表由各页给（两台模型的可用尺寸本来就不一样）。
+   rr=true：选「自定义」要当场多出宽高输入框，选完重画一次。 */
+function sizeSel(k,list,dis,rr){
+  const v=String(MIC.mget(MIC.s.cfg,k));
+  /* 画廊回填的可能是档位表外的历史自定义尺寸（960x704 这类）：
+     不补一个选项的话下拉会空着，看起来像没选上 */
+  const extra=(!list.some(o=>o.code===v)&&/^\d+x\d+$/.test(v))
+    ?`<option value="${esc(v)}" selected>${esc(v)}（历史自定义）</option>`:'';
+  return `<select class="inp" data-k="${k}"${rr?' data-rr="1"':''}>${list.map(o=>
+      `<option value="${esc(o.code)}"${o.code===v?' selected':''}>${esc(o.name)}</option>`).join('')}${extra}${
+      dis?`<option value="" disabled>${esc(dis)}</option>`:''}</select>`;
 }
 /* 任务跑着的时候参数改不动（与桌面版禁用控件同义）：inert 挡键盘，dis 挡鼠标 */
 function lock(run,inner){
@@ -104,6 +152,13 @@ function syncFields(){
     if(el===document.activeElement)return;
     const nv=v==null?'':String(v);
     if(el.value!==nv)el.value=nv;
+  });
+  /* 种子那一行是开关+输入框两件套：画廊回填/后端回包把值换成具体数字时，
+     开关也要跟着落到「指定」，不然界面显示随机、实际发的是那个数 */
+  document.querySelectorAll('#view .seedw').forEach(box=>{
+    const v=parseInt(MIC.mget(MIC.s.cfg,box.dataset.sk),10);
+    if(box.querySelector('input')===document.activeElement)return;
+    seedMode(box,!(v>=0));
   });
 }
 function saved(patch){
@@ -171,20 +226,12 @@ function pickInto(k,kind){
     commitPath(k,p);
   }).catch(()=>{});
 }
-/* 日志卡右上角两个按钮：keys 就是卡上 data-keys 那串（空 = 全部这一路）
-   清空只清界面这份环形缓冲，后端日志文件照旧写。 */
-function logKeys(keys){return keys?String(keys).split(','):null;}
-function copyLog(keys){
-  const t=MIC.view.logText(logKeys(keys));
-  if(!t){MIC.toast('这一路还没有日志');return;}
-  MIC.view.copy(t,'已复制全部日志');
-}
-function clearLog(keys){MIC.clearLogs(logKeys(keys));MIC.render();}
-
 /* 事件委托：文本/下拉 change 即存；勾选/开关/分段 click 即存 */
 document.addEventListener('change',e=>{
   const el=e.target.closest?e.target.closest('#view [data-k]'):null;
   if(!el||el.classList.contains('chk')||el.classList.contains('sw')||el.classList.contains('seg'))return;
+  /* data-rr 的下拉（尺寸选「自定义」）改完整页重画：先 commit 收下这一屏的字 */
+  if(el.dataset.rr){commit();MIC.render();return;}
   commitPath(el.dataset.k,valOf(el));
 });
 document.addEventListener('click',e=>{
@@ -192,13 +239,22 @@ document.addEventListener('click',e=>{
   if(btn){
     const box=btn.parentElement;
     box.querySelectorAll('button').forEach(b=>b.classList.toggle('on',b===btn));
-    commitPath(box.dataset.k,btn.dataset.v);
+    /* 带 data-rr 的那档改完要整页重画：先 commit 把这一屏的输入全收下
+       （只落一个 mode 键的话，重画会把没blur的提示词框画回上次的旧值）；
+       控制台模式这类还会动导航树，applyMode 先把可见页修好再重画主区 */
+    if(box.dataset.rr){
+      commit();
+      if(MIC.nav&&MIC.nav.applyMode)MIC.nav.applyMode();
+      MIC.render();
+    }else commitPath(box.dataset.k,btn.dataset.v);
     return;
   }
+  /* 种子的随机开关没有 data-k（避免和下面的通用开关逻辑撞车），单独接 */
+  const sd=e.target.closest?e.target.closest('#view .seedw .sw'):null;
+  if(sd){seedFlip(sd.parentElement);return;}
   const t=e.target.closest?e.target.closest('#view .chk[data-k],#view .sw[data-k]'):null;
   if(t){t.classList.toggle('on');commitPath(t.dataset.k,t.classList.contains('on'));}
 });
-
 /* ---------- 拖文件进来填路径 ----------
    只有 .dropz（文件路径格）接住，其余位置一律 preventDefault：
    浏览器默认「拖文件=打开文件」会把整页换掉，跑一半的状态当场就没。 */
@@ -262,9 +318,9 @@ document.addEventListener('drop',e=>{
   }).catch(err=>MIC.toast('识别失败：'+(err&&err.message||err)));
 });
 
-MIC.form={field,card,foldcard,logcard,runstat,strow,txt,ta,num,sel,chk,sw,seg,pathrow,lock,read,commit,commitPath,commitMany,pickInto,
-  copyLog,clearLog,applyCfg,dropCands,resolveDrop,
-  fold(h){h.classList.toggle('closed');h.nextElementSibling.classList.toggle('hide');},
+MIC.form={field,card,fold,foldcard,runstat,strow,duo,txt,ta,num,seedRow,sel,chk,sw,seg,pathrow,sizeSel,lock,read,commit,commitPath,commitMany,pickInto,
+  applyCfg,dropCands,resolveDrop,
+  foldToggle(h){h.classList.toggle('closed');h.nextElementSibling.classList.toggle('hide');},
   /* 页面里非 data-k 的临时控件：取值不写配置 */
   raw(id){const el=MIC.$(id);return el?(el.value!=null?el.value.trim():el.textContent):'';},
 };

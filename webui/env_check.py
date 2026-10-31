@@ -4,7 +4,7 @@ env_check.py —— 按 env.json 清单体检运行环境，并给出「缺什�
 ====================================================================
 存在的意义：换电脑时只有代码是跟着 git 走的，`.venv/` 和 30GB 的 `models/` 都不进版本库。
 所以「跑起来需要什么」必须写成一份机器可读的清单（ROOT/env.json），由这里逐项核对，
-壳上的「环境与模型」页据此提供一键补齐。
+壳上的「环境」页据此提供一键补齐。
 
 三条口径：
   · 检测是纯函数 + 可注入探针（单测不装包、不碰真权重）
@@ -13,6 +13,7 @@ env_check.py —— 按 env.json 清单体检运行环境，并给出「缺什�
 """
 import json
 import os
+import re
 import shutil
 import sys
 
@@ -22,6 +23,7 @@ SPEC_FILE = "env.json"
 G_PY = "运行环境"
 G_PKG = "依赖包"
 G_MODEL = "模型权重"
+G_MOSS = "Moss 环境"
 G_DIR = "目录"
 
 
@@ -54,16 +56,86 @@ def _pkg_version(name):
         return None
 
 
+def _site_packages(python_exe):
+    """从解释器路径推它的 site-packages：venv 建在 <根>/Scripts（Win）或 <根>/bin。"""
+    import glob
+
+    root = os.path.dirname(os.path.dirname(os.path.abspath(python_exe)))
+    for pat in (os.path.join(root, "Lib", "site-packages"),
+                os.path.join(root, "lib", "python*", "site-packages")):
+        hit = sorted(glob.glob(pat))
+        if hit:
+            return hit[0]
+    return ""
+
+
+def torch_flavor(python_exe):
+    """这个解释器里的 torch 装没装、是不是 CUDA 轮子——**故意不 import torch**。
+
+    CPU 轮子的 site-packages/torch/version.py 里写的是 `cuda = None`，读文本就够判；
+    而 import 一次 torch 要十几秒，环境体检不能为它付这个钱（体检是点一下就要出结果的）。
+    """
+    out = {"installed": False, "version": "", "cuda": ""}
+    vf = os.path.join(_site_packages(python_exe), "torch", "version.py") if python_exe else ""
+    try:
+        with open(vf, "r", encoding="utf-8", errors="replace") as f:
+            txt = f.read()
+    except OSError:
+        return out
+    import re
+
+    ver = re.search(r"^__version__\s*=\s*['\"]([^'\"]+)['\"]", txt, re.M)
+    cud = re.search(r"^cuda\b[^=\n]*=\s*['\"]([^'\"]+)['\"]", txt, re.M)
+    out["installed"] = True
+    out["version"] = ver.group(1) if ver else ""
+    out["cuda"] = cud.group(1) if cud else ""      # 空串 = CPU 轮子（Windows 上 PyPI 默认就是它）
+    return out
+
+
+_GPU_OK = None
+
+
+def _has_gpu():
+    """机器上有没有一块能用的 N 卡——用 nvidia-smi 问（实测 60ms，且等子进程时放开 GIL），
+    不为这个 import torch。结果按进程缓存：显卡不会在运行中途凭空出现。"""
+    global _GPU_OK
+    if _GPU_OK is None:
+        _GPU_OK = False
+        try:
+            import subprocess
+
+            si = None
+            if sys.platform == "win32":
+                si = subprocess.STARTUPINFO()
+                si.dwFlags |= subprocess.STARTF_USESHOWWINDOW   # 别闪一个黑框出来
+            r = subprocess.run(["nvidia-smi", "-L"], capture_output=True,
+                               timeout=8, startupinfo=si)
+            _GPU_OK = r.returncode == 0 and b"GPU" in (r.stdout or b"")
+        except Exception:
+            pass
+    return _GPU_OK
+
+
 def _cuda_state():
-    """(是否可用, torch 编译时的 CUDA 版本)。torch 本身没装时返回 (None, None)。"""
-    try:
-        import torch
-    except Exception:
+    """(是否可用, torch 编译时的 CUDA 版本)。torch 本身没装时返回 (None, None)。
+
+    绝不 import torch：warm 机器要 1.5 秒、冷盘十几秒，而且这段时间 GIL 被独占，
+    WebView2 的消息泵停在桥调用上——「启动卡界面」就是它。轮子是不是 CUDA 版读
+    version.py（见 torch_flavor），有没有卡问 nvidia-smi；torch 已经热了才问它本人。
+    """
+    fl = torch_flavor(sys.executable)
+    if not fl["installed"]:
         return None, None
-    try:
-        return bool(torch.cuda.is_available()), (torch.version.cuda or "")
-    except Exception:
-        return False, ""
+    built = fl["cuda"]
+    if not built:
+        return False, ""                      # CPU 轮子：装上了也跑不了 CUDA
+    t = sys.modules.get("torch")
+    if t is not None:
+        try:
+            return bool(t.cuda.is_available()), built
+        except Exception:
+            return False, built
+    return _has_gpu(), built
 
 
 def _v(name):
@@ -140,37 +212,39 @@ def _check_pkg(spec, name, have, cuda, gitc=None):
     minv = str(name.get("min") or want)
     pin = str(name.get("commit") or "")
     optional = bool(name.get("optional"))
+    # 分组默认「依赖包」（=千问分区）；只服务某一个引擎的包在清单里标 group 归到它那边
+    group = str(name.get("group") or G_PKG)
     label = "%s %s" % (name["name"], pin[:8] if pin else want)
     key = "pkg:" + name["name"]
     idx = (spec.get("indexes") or {}).get(name.get("index") or "")
     fix = {"kind": "pip", "spec": _pip_spec(name), "index": idx or "",
            "index_url": bool(name.get("index") == "torch")}
     if have is None:
-        return _item(key, G_PKG, label, "warn" if optional else "miss",
-                     "没装" + ("（可选，只影响 API 服务页）" if optional else ""), fix)
+        return _item(key, group, label, "warn" if optional else "miss",
+                     "没装" + ("（可选，只影响设置里的 API 服务）" if optional else ""), fix)
     if pin:
         # 钉死 commit 的开发版：版本号（0.41.0.dev0）比不出任何东西，只能核对装的是哪个 commit
         got = (gitc or _git_commit)(name["name"])
         if not got:
-            return _item(key, G_PKG, label, "warn",
+            return _item(key, group, label, "warn",
                          "已装 %s，但查不出装的是哪个 commit（清单钉 %s）· "
                          "出图异常时点这项重装" % (have, pin[:8]), fix)
         if got[:len(pin)] != pin and pin[:len(got)] != got:
-            return _item(key, G_PKG, label, "part",
+            return _item(key, group, label, "part",
                          "已装 %s，但 commit 是 %s，清单钉的是 %s" % (have, got[:8], pin[:8]), fix)
-        return _item(key, G_PKG, label, "ok", "已装 %s · commit %s" % (have, got[:8]))
+        return _item(key, group, label, "ok", "已装 %s · commit %s" % (have, got[:8]))
     if not _ver_ge(have, minv):
-        return _item(key, G_PKG, label, "part", "已装 %s，要求 ≥%s" % (have, minv), fix)
+        return _item(key, group, label, "part", "已装 %s，要求 ≥%s" % (have, minv), fix)
     if name.get("cuda"):
         ok_cuda, built = cuda
         if ok_cuda is None:
-            return _item(key, G_PKG, label, "part", "已装 %s 但 import 不了" % have, fix)
+            return _item(key, group, label, "part", "已装 %s 但 import 不了" % have, fix)
         if not ok_cuda:
-            return _item(key, G_PKG, label, "part",
+            return _item(key, group, label, "part",
                          "已装 %s，但 CUDA 用不了%s——多半是从 PyPI 默认索引装的 CPU 轮子，"
                          "得走 %s 重装" % (have, "（编译时 CUDA=%s）" % built if built else "",
                                           idx or "cu128 索引"), fix)
-    return _item(key, G_PKG, label, "ok", "已装 %s" % have)
+    return _item(key, group, label, "ok", "已装 %s" % have)
 
 
 def _pip_spec(pkg):
@@ -210,6 +284,123 @@ def _check_model(root, m):
                  "文件齐全（%d 项校验过）" % len(m.get("must") or {}), fix)
 
 
+def _abs(root, rel):
+    return os.path.join(root, *str(rel).split("/"))
+
+
+def _comfyui_version(d):
+    """读 comfyui_version.py 里的 __version__（纯文本，不 import 它的代码）。"""
+    try:
+        with open(os.path.join(d, "comfyui_version.py"), "r",
+                  encoding="utf-8", errors="replace") as f:
+            m = re.search(r"""['"](\d+\.\d+\.\d+)['"]""", f.read())
+            return m.group(1) if m else ""
+    except OSError:
+        return ""
+
+
+def _check_comfyui(root, moss, probe):
+    cx = moss.get("comfyui") or {}
+    rel = cx.get("dir") or "comfyui"
+    d = _abs(root, rel)
+    fix = {"kind": "comfyui", "repo": cx.get("repo"), "branch": cx.get("branch")}
+    if os.path.isfile(os.path.join(d, "main.py")):
+        # 「main.py 在」不等于「认得 moss_image」：原生支持是 v0.42.0 才进的（PR#17095）。
+        # 拿 min_commit 做 git 祖先判断又慢又脆（用户可能不用 git 方式拿代码），
+        # 直接看那个节点文件在不在最准——缺它的版本一起步就会在出图时报「未知 class_type」，
+        # 那正是「换机 clone → 打开即出图」这条链上最难查的静默失败。
+        if not os.path.isfile(os.path.join(d, "comfy_extras", "nodes_moss_image.py")):
+            return _item("comfy:app", G_MOSS, "内嵌 ComfyUI（%s）" % rel, "part",
+                         "已有 ComfyUI（版本 %s）但不认 moss_image：原生支持要 v0.42+，"
+                         "一键补全会拉到 %s" % (_comfyui_version(d) or "未知",
+                                                cx.get("branch") or "v0.42.1"), fix)
+        return _item("comfy:app", G_MOSS, "内嵌 ComfyUI（%s）" % rel, "ok",
+                     "main.py 就位 · %s · 含 moss_image 节点" % (
+                         _comfyui_version(d) and "v" + _comfyui_version(d)
+                         or "版本未知"))
+    if probe is None:
+        return _item("comfy:app", G_MOSS, "内嵌 ComfyUI（%s）" % rel, "miss",
+                     "还没 clone（约 100MB · %s）" % (cx.get("repo") or "Comfy-Org/ComfyUI"),
+                     fix)
+    return _item("comfy:app", G_MOSS, "内嵌 ComfyUI（%s）" % rel, "miss",
+                 probe(d), fix)
+
+
+def _check_comfyvenv(root, moss, probe):
+    v = moss.get("venv") or {}
+    cx = moss.get("comfyui") or {}
+    d = _abs(root, cx.get("dir") or "comfyui")
+    py = os.path.join(d, ".venv", "Scripts" if os.name == "nt" else "bin",
+                      "python.exe" if os.name == "nt" else "python")
+    fix = {"kind": "comfyvenv", "dir": v.get("dir") or "comfyui/.venv",
+           "requirements": v.get("requirements") or "comfyui/requirements.txt"}
+    if os.path.isfile(py):
+        # 「有 python.exe」不等于「能用」：Windows 上按 ComfyUI 的 requirements 直装
+        # 会拿到 CPU 版 torch，ComfyUI 一起步就 AssertionError 崩掉——所以这里必须看轮子颜色。
+        fl = torch_flavor(py)
+        if not fl["installed"]:
+            return _item("comfy:venv", G_MOSS, "ComfyUI 独立环境", "part",
+                         ".venv 建好了但依赖没装（里面没有 torch）", fix)
+        if not fl["cuda"]:
+            return _item("comfy:venv", G_MOSS, "ComfyUI 独立环境", "part",
+                         "torch 装成了 CPU 版（%s）：ComfyUI 起不来，点补齐换 CUDA 轮子"
+                         % (fl["version"] or "版本未知"), fix)
+        return _item("comfy:venv", G_MOSS, "ComfyUI 独立环境", "ok",
+                     ".venv 已建 · torch %s（CUDA %s）" % (fl["version"], fl["cuda"]))
+    if not os.path.isfile(os.path.join(d, "main.py")):
+        return _item("comfy:venv", G_MOSS, "ComfyUI 独立环境", "miss",
+                     "要先有 ComfyUI 本体才能建它的环境", fix)
+    return _item("comfy:venv", G_MOSS, "ComfyUI 独立环境", "miss",
+                 "ComfyUI 已在但没建 .venv（装它自己的 torch/依赖）", fix)
+
+
+def _check_moss_model(root, m, probe):
+    rel = str(m.get("dir") or "")
+    d = _abs(root, rel)
+    label = "%s（%s）" % (m.get("label") or rel, m.get("repo") or "")
+    key = "moss:" + str(m.get("key") or rel)
+    fix = {"kind": "mossmodel", "repo": m.get("repo"), "name": rel,
+           "allow": m.get("allow") or []}
+    if not os.path.isdir(d):
+        return _item(key, G_MOSS, label, "miss",
+                     "目录不存在：%s · 约 %s GB" % (rel, m.get("gb", "?")), fix, gb=m.get("gb"))
+    lost, bad = [], []
+    for f, size in (m.get("must") or {}).items():
+        p = os.path.join(d, *str(f).split("/"))
+        try:
+            got = os.path.getsize(p)
+        except OSError:
+            lost.append(f)
+            continue
+        if int(size) and got != int(size):
+            bad.append("%s（%d / 应 %d）" % (f, got, int(size)))
+    if lost or bad:
+        why = probe(d) if probe else ""
+        bits = []
+        if lost:
+            bits.append("缺 %d 个文件（%s）" % (len(lost), "、".join(lost[:2])))
+        if bad:
+            bits.append("%d 个字节数不对（%s）" % (len(bad), bad[0]))
+        det = "权重不完整：" + "；".join(bits) + " · 续传补齐即可"
+        if why:
+            det += " · " + why
+        return _item(key, G_MOSS, label, "part", det, fix, gb=m.get("gb"))
+    return _item(key, G_MOSS, label, "ok",
+                 "权重齐全（%d 项校验过）" % len(m.get("must") or {}), fix)
+
+
+def _moss_checks(root, spec, probe=None):
+    """Moss 一组的体检项：ComfyUI 本体 / 独立环境 / 两组权重。"""
+    moss = spec.get("moss")
+    if not isinstance(moss, dict):
+        return []
+    items = [_check_comfyui(root, moss, probe),
+             _check_comfyvenv(root, moss, probe)]
+    for m in moss.get("models") or []:
+        items.append(_check_moss_model(root, m, probe))
+    return items
+
+
 def _check_dir(root, d):
     p = os.path.join(root, *str(d["path"]).split("/"))
     fix = {"kind": "dir", "path": d["path"]}
@@ -228,6 +419,8 @@ def _check_dir(root, d):
 
 def _check_disk(root, spec, free_gb):
     need = sum(float(m.get("gb") or 0) for m in spec.get("models") or [])
+    for m in ((spec.get("moss") or {}).get("models") or []):
+        need += float(m.get("gb") or 0)
     f = float(free_gb or 0)
     if f >= need * 1.15:
         return _item("disk", G_PY, "磁盘空间", "ok", "本盘剩余 %.1f GB（权重共约 %.1f GB）" % (f, need))
@@ -256,6 +449,7 @@ def check(root, spec=None, py_version=None, prefix=None, pkg_version=None,
         items.append(_check_pkg(spec, pkg, pv(pkg["name"]), cu, gitc=git_commit))
     for m in spec.get("models") or []:
         items.append(_check_model(root, m))
+    items.extend(_moss_checks(root, spec))
     for d in spec.get("dirs") or []:
         items.append(_check_dir(root, d))
     todo = fix_plan(items)

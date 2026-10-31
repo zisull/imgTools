@@ -13,6 +13,11 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 for _p in (os.path.join(ROOT, "webui"), os.path.join(ROOT, "engine")):
     sys.path.insert(0, _p)
 
+# 沙箱配置：App 落盘走 app.CFG_PATH，指到临时文件才咬不到用户那份。
+# 光在内存里改 cfg 挡不住任何一次 save_cfg——它会连整份 cfg 一起写回磁盘。
+TMP = tempfile.mkdtemp(prefix="qic_task_test_")
+os.environ["QIC_CONFIG"] = os.path.join(TMP, "config.json")
+
 from app import App, _to_int          # noqa: E402
 from store import Store                # noqa: E402
 
@@ -47,7 +52,7 @@ class FakeMgr:
 
 
 def main():
-    tmp = tempfile.mkdtemp(prefix="qic_task_test_")
+    tmp = TMP
     out = os.path.join(tmp, "outputs")
     os.makedirs(out, exist_ok=True)
     fails = []

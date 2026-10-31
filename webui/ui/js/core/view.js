@@ -17,7 +17,7 @@ function cls(t){
 }
 function logHTML(keys){
   const lines=MIC.logsOf(keys);
-  if(!lines.length)return `<div class="empty">暂无日志 · 运行后这里逐条追加，文字可直接选中复制</div>`;
+  if(!lines.length)return `<div class="empty">暂无日志 · 运行后逐条追加</div>`;
   return lines.slice(-200).map(l=>{
     return `<div class="ln ${cls(l.text)}"><span class="t">${esc(l.t)}</span>`+
       `<span class="x">${esc(l.text)}</span></div>`;
@@ -56,21 +56,49 @@ function vramHTML(){
   const p=Math.max(0,Math.min(100,Math.round(used/tot*100)));
   const hot=used>=tot*0.92;
   return `<div class="vbar"><i style="width:${p}%;${hot?'background:var(--warn)':''}"></i></div>`+
-    `<span class="mut fine">${used.toFixed(1)} / ${tot} GB${hot?' · 接近上限，建议 1024 档':''}</span>`;
+    `<span class="mut fine">${used.toFixed(1)} / ${tot} GB${hot?' · 接近上限，建议降一档':''}</span>`;
+}
+/* 顶栏三盏灯按「千问 / Moss / 系统」分类摆：两个引擎各有各的常驻态，
+   混在一颗灯里就看不出「现在这张卡到底被谁占着」。仅单引擎模式下另一盏不出现。
+   引擎灯三段：进程活着 ≠ 权重上卡，所以 Moss 分「已停 / 搬权重 / 已常驻」。 */
+/* 一盏灯 = 图标 + 类名 + 灯 + 状态字：三段各有用处，
+   图标与类名认得出是哪一路，灯看活没活，状态字说活到哪一步。 */
+function engPill(name,icon,on,txt,tip){
+  return `<span class="pill ${on?'on':''}" title="${esc(tip)}">${ic(icon,'s')}<b>${name}</b>`+
+    `<span class="dot ${on?'ok':'off'}"></span><i>${esc(txt)}</i></span>`;
 }
 function pillsHTML(){
-  const s=MIC.s.st;
-  return `<span class="pill ${s.model_loaded?'on':''}"><span class="dot ${s.model_loaded?'ok':''}"></span>${
-      s.model_loaded?'模型已载入':'模型未载入'}</span>
-    <span class="pill">显存 <b>${(Number(s.vram_used)||0).toFixed(1)}</b>/${s.vram_total||12}G</span>
-    <span class="pill">图库 <b>${MIC.n(s.img_count)}</b></span>
-    <span class="pill ${s.running?'on':''}"><span class="dot ${s.running?'run':''}"></span>${s.running?'运行中':'空闲'}</span>`;
+  const s=MIC.s.st,m=String(MIC.s.cfg.console_mode||'both');
+  const pills=[];
+  if(m!=='moss')
+    pills.push(engPill('千问','flower',!!s.model_loaded,s.model_loaded?'已载入':'未载入',
+      '千问（diffusers 直跑）：权重在显存才谈得上秒出'));
+  if(m!=='qwen')
+    pills.push(engPill('Moss','wave',!!s.comfyui_loaded,
+      s.comfyui_on?(s.comfyui_loaded?'已常驻':'搬权重'):'已停',
+      'Moss（内嵌 ComfyUI）：已停=没起进程，搬权重=正在把权重上显存'));
+  pills.push(engPill('系统','cog',!!s.running,
+    '显存 '+(Number(s.vram_used)||0).toFixed(1)+'/'+(s.vram_total||12)+'G · '+(s.running?'出图中':'空闲'),
+    '整卡显存与任务队列；两个引擎共用这一张卡，同一时间只可能一边在载'));
+  return pills.join('');
 }
 
 /* 收起的只是预览：记住收起时那张的路径，下一张（路径变了）自然又显示出来 */
 let prevHidden='';
 function hidePrev(){prevHidden=MIC.s.st.last_image||'';MIC.render();}
 function showPrev(){prevHidden='';MIC.render();}
+
+/* 失败轮次不许被一张旧图盖住：状态里写的是失败，就把失败摊在结果行上 */
+function failed(){return /失败|没出图/.test(String(MIC.s.st.status||''));}
+function resultHTML(){
+  const s=MIC.s.st;
+  if(failed())
+    return `<b class="bad">❌ 本轮失败</b>${s.last_fail?'：'+esc(s.last_fail):''} · `+
+      (s.last_image?'画面仍是上一张':'尚无成图');
+  return `上一张 <b>${(Number(s.last_sec)||0).toFixed(1)}</b> 秒 · `+
+    (s.last_image?`输出 <b>${esc(String(s.last_image).split(/[\\/]/).pop())}</b>`:'尚无输出')+
+    (s.dup_last?' · <span class="warn">与上一张相同（种子固定，填 -1 每轮随机）</span>':'');
+}
 
 /* 环境补全收尾：后端把 env_busy 落下来的那一刻重新体检一次，
    否则卡片会一直停在「补全中…」，得人手点「重新体检」才更新 */
@@ -83,26 +111,34 @@ function watchEnv(){
   lastEnv=b;
 }
 
-/* 环境横幅：只有缺东西才出内容（齐了空着不占地方）。
-   挂在 data-role 上而不是整页重画：体检数是从轮询并进来的，八秒内自己就变了。 */
+/* 环境横幅：只在「环境」页显示——两个引擎各自管各自的环境，齐一个就能单独用，
+   别的页不拿「还差几项」挡视线（明细、逐项补、一键补齐都在环境页）。
+   挂在 data-role 插槽上而不是整页重画：体检数是从轮询并进来的，八秒内自己就变了。 */
 function envBarHTML(){
   const s=MIC.s.st;
+  if(!(MIC.nav&&MIC.nav.pageOf&&MIC.nav.pageOf()==='models'))return '';
   if(s.env_busy)
     return `<div class="envbar busy"><span class="tic">${ic('refresh','s')}</span>
-      <b>环境补全中…</b><span class="mut fine">装包 / 下载权重的进度在下面日志里逐行滚</span></div>`;
+      <b>环境补全中…</b><span class="mut fine">装包 / 下载权重的进度逐行滚</span><span class="grow"></span>
+      <button class="btn sm gho" onclick="MIC.nav.goto('logs')">${ic('hist','s')}看日志</button></div>`;
   const n=Number(s.env_todo)||0;
   if(!n)return '';
   return `<div class="envbar warn"><span class="tic">${ic('tool','s')}</span>
     <b>环境还差 ${n} 项</b>
-    <span class="mut fine">不用自己查该装什么，也不用开终端</span><span class="grow"></span>
-    <button class="btn sm pri" onclick="MIC.env.fixAll()">${ic('down','s')}一键补齐</button>
-    <button class="btn sm gho" onclick="MIC.nav.goto('models')">看明细</button></div>`;
+    <span class="mut fine">两个引擎互相独立，齐一个就能先用一个</span><span class="grow"></span>
+    <button class="btn sm pri" onclick="MIC.env.fixAll()">${ic('down','s')}一键补齐</button></div>`;
 }
 
 /* 每次轮询后调用：只刷新页面上存在的插槽 */
+/* 左上角那一行跟着控制台模式走：一眼看出这套界面是哪一路的 */
+const MODE_TXT={both:'千问 + Moss · 本地生图',qwen:'仅千问 · 本地生图',moss:'仅 Moss · 本地生图'};
 function tick(){
   const s=MIC.s.st;
   MIC.$('pills').innerHTML=pillsHTML();
+  const bs=MIC.$('brandSub');
+  if(bs)bs.textContent=MODE_TXT[String(MIC.s.cfg.console_mode||'both')]||MODE_TXT.both;
+  /* 环境横幅在全局插槽上（不在 #view 里）：哪一页都跟着刷新 */
+  const slot=MIC.$('envslot');if(slot)slot.innerHTML=envBarHTML();
   document.querySelectorAll('#view [data-role]').forEach(el=>{
     const r=el.dataset.role;
     if(r==='log')fillLog(el,el.dataset.keys?el.dataset.keys.split(','):null);
@@ -121,22 +157,30 @@ function tick(){
       else{bar.classList.remove('indet');el.style.width=pct()+'%';}
     }
     else if(r==='pgtext')el.textContent=pgText();
+    else if(r==='logcount')el.textContent=MIC.s.logs.length;
     else if(r==='vram')el.innerHTML=vramHTML();
     else if(r==='count')el.textContent=MIC.n(s[el.dataset.field||'img_count']);
-    else if(r==='envbar')el.innerHTML=envBarHTML();
-    else if(r==='result')el.innerHTML=`上一张 <b>${(Number(s.last_sec)||0).toFixed(1)}</b> 秒 · `+
-      `用时目标 ≤60 秒 · `+(s.last_image?`输出 <b>${esc(String(s.last_image).split(/[\\/]/).pop())}</b>`:'尚无输出');
+    else if(r==='result')el.innerHTML=resultHTML();
     else if(r==='imgprev'){
-      if(!s.last_image){el.innerHTML=`<div class="empty">尚无成图 · 生成完成后这里出预览，点图片可打开所在文件夹</div>`;return;}
+      if(!s.last_image){el.innerHTML=`<div class="empty">尚无成图 · 出图后在这里预览，点图可打开文件夹</div>`;return;}
       if(prevHidden===s.last_image){
-        el.innerHTML=`<div class="empty">预览已收起（文件还在，删图去画廊） · `+
+        el.innerHTML=`<div class="empty">预览已收起 · 删图去画廊 · `+
           `<button class="btn sm gho" onclick="MIC.view.showPrev()">重新显示</button></div>`;return;
       }
       const T=MIC.s.lastThumb;
-      if(T&&T.path===s.last_image)
-        el.innerHTML=`<div class="prevbox"><img class="prev" src="${esc(T.url)}" alt="上一张" onclick="MIC.api.openPath(MIC.s.st.last_image)">`+
+      /* 这块里嵌着一整张 base64 缩略图：每 800ms 无条件重刷 innerHTML，WebView2 就得把
+         同一张图重新解码一遍。同一个文件、同一个收起态就直接跳过（取图失败时不记签名，
+         下一跳还会重试）。失败标记也进签名：这一轮失败了要立刻在图上说一声。 */
+      const bad=failed();
+      const have=T&&T.path===s.last_image;
+      const sig=s.last_image+'|'+(prevHidden===s.last_image?'h':'v')+'|'+(bad?'f':'-');
+      if(have&&el.dataset.sig===sig)return;
+      if(have)el.dataset.sig=sig;
+      if(have)
+        el.innerHTML=(bad?`<div class="failnote">❌ 本轮失败，下面是上一张</div>`:'')+
+          `<div class="prevbox"><img class="prev" src="${esc(T.url)}" alt="上一张" onclick="MIC.api.openPath(MIC.s.st.last_image)">`+
           `<button class="px" onclick="MIC.view.hidePrev()" title="收起这张预览（不删文件）">${ic('close','s')}</button></div>`+
-          `<div class="btnrow"><span class="mut fine">这一张还想再改？</span><span class="grow"></span>`+
+          `<div class="btnrow"><span class="grow"></span>`+
           `<button class="btn sm gho" onclick="MIC.runner.again('inpaint')">局部改这块</button>`+
           `<button class="btn sm gho" onclick="MIC.runner.again('edit')">整张再编辑</button></div>`;
       else{el.innerHTML=`<div class="empty">正在载入预览…</div>`;fetchThumb(s.last_image);}
@@ -189,6 +233,23 @@ function watchFinish(){
   MIC.render();
 }
 
+/* 结构性状态一变，整页布局就得跟着变：engine / 档位 / 引擎灯这些决定的是
+   「这一屏该出现哪颗按钮」，不是 data-role 占位，tick 只补占位会留下一屏旧按钮
+   （引擎已经切走了，页上还挂着上一档的按钮）。走同一道输入闸门。 */
+let lastStruct="";
+function watchStruct(){
+  const s=MIC.s.st;
+  /* env_todo 也算结构：它决定欢迎页/生图页那条环境提示在不在，
+     开机体检晚半秒到，到了一屏字得自己补上。 */
+  const k=[s.engine,s.moss_tier,s.comfyui_on,s.comfyui_loaded,s.moss_installed,s.env_todo].join('|');
+  if(k===lastStruct)return;
+  const first=lastStruct==="";
+  lastStruct=k;
+  if(first)return;                 // 进页面头一帧由 boot 的 render 负责，别抢
+  if(skipForFocus())return;
+  MIC.render();
+}
+
 /* 右键/快捷键复制一类的小工具 */
 function copyText(t,msg){
   const done=()=>MIC.toast(msg||'已复制');
@@ -212,6 +273,6 @@ function refreshStats(){
   }).catch(()=>{});
 }
 
-MIC.view={tick,watchFinish,logHTML,logText,fillLog,copy:copyText,
+MIC.view={tick,watchFinish,watchStruct,logHTML,logText,fillLog,copy:copyText,
   pct,refreshStats,vramHTML,hidePrev,showPrev,envBarHTML};
 })();

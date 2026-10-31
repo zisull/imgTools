@@ -22,7 +22,7 @@ CSS_ORDER = [
     "css/gen.css",
 ]
 
-# 依赖顺序：dom → api/state → theme/nav/form/view → router → runner → pages → boot
+# 依赖顺序：dom → api/state → theme/nav/form/view → router → runner → prompts/inspire → pages → boot
 JS_ORDER = [
     "js/core/dom.js",
     "js/core/api.js",
@@ -34,16 +34,16 @@ JS_ORDER = [
     "js/core/win.js",
     "js/core/router.js",
     "js/core/runner.js",
-    "js/pages/overview.js",
+    "js/core/prompts.js",
+    "js/core/inspire.js",
     "js/pages/t2i.js",
     "js/pages/edit.js",
     "js/pages/inpaint.js",
-    "js/pages/rgba.js",
     "js/pages/gallery.js",
-    "js/pages/pe.js",
+    "js/pages/logs.js",
     "js/pages/models.js",
-    "js/pages/api.js",
     "js/pages/settings.js",
+    "js/pages/welcome.js",
     "js/pages/blank.js",
     "js/boot.js",
 ]

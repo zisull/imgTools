@@ -47,8 +47,12 @@ MIC.api={
   unloadModel:()=>call('unload_model'),
   startGen:p=>call('start_gen',p),
   stop:key=>call('stop',key||'gen'),
+  /* 引擎切换与 Moss 档位：同一时间只激活一个生图引擎；档位是 Moss 的显存分时复用 */
+  setEngine:n=>call('set_engine',n),
+  mossSetTier:t=>call('moss_set_tier',t),
+  mossStatus:()=>call('moss_status'),
   /* 画廊：扫描输出目录；预览图统一走 thumb（data: 缩略，html= 内联页显示不了 file://） */
-  thumb:p=>call('thumb',p),
+  thumb:(p,wide)=>call('thumb',p,wide),
   galleryList:()=>call('gallery_list'),
   galleryDelete:f=>call('gallery_delete',f||''),
   galleryFav:(f,on)=>call('gallery_fav',f,!!on),

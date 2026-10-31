@@ -1,4 +1,4 @@
-/* pages/inpaint.js —— 局部编辑：选一张原图 → 在画布上涂抹「要重绘」的区域 →
+/* pages/inpaint.js —— 重绘：选一张原图 → 在画布上涂抹「要重绘」的区域 →
    涂抹区被合成进输入图的 alpha（透明=模型重绘，其余保留原样）。
    机制来自 pipeline：条件图强制 RGBA，透明区即待生成区，文本编码器看合成白底后的图。 */
 (function(){
@@ -6,8 +6,8 @@ const MIC=window.MIC=window.MIC||{};
 const C=MIC.form, ic=MIC.ic, esc=MIC.esc;
 
 const RES=[
-  {code:'512',name:'草图画幅 512² · 最快最稳（约 22 秒）'},
-  {code:'768',name:'中画幅 768² · 更清晰（约 27 秒，显存已接近上限）'},
+  {code:'512',name:'512² 草图'},
+  {code:'768',name:'768² 更清晰'},
 ];
 let base='';          // 原图绝对路径
 let bgData='';        // 原图缩略 data-uri（当画布背景）
@@ -57,13 +57,6 @@ function measure(cv){
   if(el)el.textContent=area?'已涂 '+area+'%':'还没涂抹';
 }
 
-function resSel(k){
-  const v=String(MIC.mget(MIC.s.cfg,k));
-  return '<select class="inp" data-k="'+k+'">'+RES.map(function(o){
-    return '<option value="'+o.code+'"'+(o.code===v?' selected':'')+'>'+esc(o.name)+'</option>';
-  }).join('')+'<option value="" disabled>1024² —— 12G 显存会溢出到共享内存，实测慢几十倍，暂不可用</option></select>';
-}
-
 function stage(){
   if(!base){
     return '<div class="refdrop" onclick="MIC.inp.pickBase()" '+
@@ -78,9 +71,10 @@ function stage(){
       '<span class="mut fine" title="'+esc(base)+'">'+esc(fn)+'</span>'+
       '<span class="mut fine" id="paintArea">'+(area?'已涂 '+area+'%':'还没涂抹')+'</span>'+
       '<span class="grow"></span>'+
+      '<span class="unit">画笔</span>'+C.num('inpaint.brush','px')+
       '<button class="btn sm gho" onclick="MIC.inp.undo()">'+ic('hist','s')+'撤销一笔</button>'+
       '<button class="btn sm gho" onclick="MIC.inp.clearPaint()">'+ic('trash','s')+'清空涂抹</button>'+
-      '<button class="btn sm gho" onclick="MIC.inp.removeBase()" title="移除这张原图，回到选图状态">'+ic('close','s')+'移除原图</button>'+
+      '<button class="btn sm gho" onclick="MIC.inp.removeBase()" title="回到选图状态">'+ic('close','s')+'移除原图</button>'+
     '</div>'+
     '<div class="stage" id="paintStage">'+
       '<img id="paintBg" class="paintbg" src="'+bgData+'" alt="">'+
@@ -90,27 +84,26 @@ function stage(){
 }
 
 MIC.registerPage('inpaint',{
-  title:'局部编辑',sub:'涂抹蒙版 · 只改选中的区域',icon:'brush',
+  title:'重绘',sub:'涂抹要改的区域，其余保持原样',icon:'brush',
   render(){
-    const s=MIC.s.st, run=!!s.running;
+    const run=!!MIC.s.st.running;
     const params=
-      C.field('重绘指令',C.ta('inpaint.prompt',3,
-        'A pair of sunglasses resting on the dashboard.'),'想在这个区域改成什么')+
-      C.field('原图',stage(),'在图上涂抹：涂到的地方才会被重新生成，其余保持原样')+
-      C.field('画笔粗细',C.num('inpaint.brush','px'))+
-      C.field('画幅',resSel('inpaint.res'),
-        '跟随原图比例。要手机竖屏图：原图用竖版（如 9:16）即可，画幅自动跟随')+
-      '<div class="grid3">'+
-        C.field('步数',C.seg('inpaint.steps',[['8','8 步 · Turbo'],['40','40 步 · 精细']]))+
-        C.field('随机种子',C.num('inpaint.seed','-1 = 随机'))+
-        C.field('张数',C.num('inpaint.count','张'))+
+      C.field('重绘指令',C.ta('inpaint.prompt',3,'在仪表台上放一副墨镜。'),'说清要改成什么')+
+      MIC.inspire.box('inpaint.prompt')+
+      C.field('原图',stage(),'涂到的地方才会重绘，其余保持原样')+
+      '<div class="grid4">'+
+        C.field('画幅',C.sizeSel('inpaint.res',RES),'输出画幅跟随原图比例，这里只定清晰度')+
+        C.field('步数',C.sel('inpaint.steps',
+          [{code:'8',name:'极速 · 8 步'},{code:'40',name:'精细 · 40 步'}]),'8 步够用，40 步更细（慢 5 倍）')+
+        C.field('种子',C.seedRow('inpaint.seed'),'开着每次换一张新图；关掉就固定这个数，同参数复现同图')+
+        C.field('张数',C.num('inpaint.count','张'),'连发这么多张，每张一个不同种子')+
       '</div>'+
-      C.foldcard('反向提示词 / 高级','cog',
-        C.field('反向提示词',C.ta('inpaint.negative',2,'blurry, watermark'))+
-        C.field('KV 缓存',C.chk('inpaint.kv_cache','use_kv_cache')),'可选，默认收起');
-    return C.card('局部重绘','brush',C.lock(run,params),
-        {note:s.model_loaded?'模型已就绪':'未载入模型时点开始会先自动载入（十几秒）'})+
-      MIC.runner.runCard('选好原图并涂抹区域后开始','MIC.inp.start()');
+      C.fold('高级','cog',
+        C.field('反向提示词',C.ta('inpaint.negative',2,MIC.lib.NEG_BASE),'空着时点灵感卡会自动配一条通用的'));
+    return C.duo(
+      C.card('重绘参数','brush',C.lock(run,params)+MIC.runner.action('MIC.inp.start()'),
+        {note:MIC.runner.modelNote(run)}),
+      MIC.runner.runCard(''));
   },
   mount(){MIC.inp.initCanvas();},
 });
@@ -199,13 +192,13 @@ MIC.inp={
     if(!base){MIC.toast('先选一张原图');return;}
     const cv=MIC.inp._cv;
     if(!cv||!cv.width||!cv.height){MIC.toast('画布还没就绪');return;}
-    if(!painted){MIC.toast('还没涂抹：在图上涂出要重绘的区域');return;}
+    if(!painted){MIC.toast('先在图上涂出要重绘的区域');return;}
     // 只导出涂抹层（透明底上的红痕）→ alpha>0 处即重绘区
     const mask=cv.toDataURL('image/png');
     MIC.form.commit();          // 先写回界面值，否则刚打的指令会被旧配置顶掉
     const g=MIC.s.cfg.inpaint||{};
     MIC.runner.start('gen',{mode:'inpaint',images:[base],mask:mask,
-      prompt:g.prompt||'',res:g.res||'1024',steps:g.steps||'8',
+      prompt:g.prompt||'',res:g.res||'768',steps:g.steps||'8',
       seed:g.seed!=null?g.seed:-1,count:g.count||1,negative:g.negative||'',
       kv_cache:g.kv_cache!==false});
   },

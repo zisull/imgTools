@@ -12,7 +12,7 @@ MIC.s={
     model_loaded:false,
     model_name:'',
     quant:'fp8',
-    vram_used:0,vram_total:12,    // GB，概览药丸与显存条用
+    vram_used:0,vram_total:12,    // GB，顶栏药丸与显存条用
     img_count:0,                  // 画廊张数
     last_sec:0,                   // 上一张耗时（秒）
     last_image:'',                // 上一张绝对路径

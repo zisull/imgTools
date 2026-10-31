@@ -14,6 +14,7 @@ function load(tree,open){
   TREE=Array.isArray(tree)&&tree.length?JSON.parse(JSON.stringify(tree)):[];
   if(open)S.open=Object.assign({},open);
   S.sel=findId(S.sel)||findId(MIC.s.cfg.last_tab)||firstTab()||(TREE[0]&&TREE[0].id);
+  ensureSel();                       // 控制台模式下当前页可能被收走了，换到第一张可见页
 }
 function save(){MIC.api.save({nav:TREE,open:S.open}).catch(()=>{});}
 function walk(nodes,fn,parent,depth){
@@ -24,21 +25,52 @@ function findId(id){return id&&find(id)?id:null;}
 function pathOf(id){const parts=[];let f=find(id);while(f){parts.unshift(f.node.name);f=f.parent?find(f.parent.id):null;}return parts;}
 function allTabs(){const r=[];walk(TREE,n=>{if(n.type==='tab')r.push(n);});return r;}
 function allGroups(){const r=[];walk(TREE,n=>{if(n.type==='group')r.push(n);});return r;}
-function firstTab(){const t=allTabs();return t.length?t[0].id:null;}
+function firstTab(){const t=allTabs().filter(n=>!pageHidden(n.page));return t.length?t[0].id:null;}
 function isDesc(grp,id){let f=false;if(grp.children)walk(grp.children,n=>{if(n.id===id)f=true;});return f;}
 
 /* ---------- 渲染 ---------- */
+/* 控制台模式（cfg.console_mode：both/qwen/moss）：整个界面只留所选引擎用得上的功能页。
+   生图页两个引擎共用所以永远在；编辑与重绘只有千问那条流水线支持。
+   只在显示层过滤，TREE 本身不动——切回「两者兼有」时自定义的分组结构原样回来。 */
+function pageHidden(p){
+  const m=String((MIC.s.cfg||{}).console_mode||'both');
+  if(m==='moss')return p==='edit'||p==='inpaint';
+  return false;
+}
+/* 功能页的引擎归属：编辑/重绘只有千问那条流水线认，其余两引擎都走得通。
+   两边都在界面里时把归属标在行尾——切到「仅 Moss」会凭空少两页，
+   先说在哪一页上，省得人到设置页去猜是谁收走的。 */
+const QW_ONLY={edit:1,inpaint:1};
+function pageEng(p){return QW_ONLY[p]?'千问':'';}
+function visNodes(nodes){
+  const out=[];
+  (nodes||[]).forEach(n=>{
+    if(n.type!=='group'){if(!pageHidden(n.page))out.push(n);return;}
+    const kids=visNodes(n.children);
+    /* 原本有孩子、现在一个都看不见＝这一整组是另一个引擎的，连组名一起收走 */
+    if((n.children||[]).length&&!kids.length)return;
+    out.push(Object.assign({},n,{children:kids}));
+  });
+  return out;
+}
+function ensureSel(){
+  const f=find(S.sel);
+  if(f&&f.node.type==='tab'&&!pageHidden(f.node.page))return;
+  S.sel=firstTab()||(TREE[0]&&TREE[0].id);
+}
 function renderTree(){
   const box=MIC.$('tree');if(!box)return;
+  const vis=visNodes(TREE);
   box.innerHTML=S.layout==='flat'
-    ? allTabs().map(n=>tabHTML(n)).join('')
-    : TREE.map(n=>nodeHTML(n)).join('');
+    ? allTabs().filter(n=>!pageHidden(n.page)).map(n=>tabHTML(n)).join('')
+    : vis.map(n=>nodeHTML(n)).join('');
   MIC.$('btnFlat').classList.toggle('on',S.layout==='flat');
   MIC.$('btnTree').classList.toggle('on',S.layout==='tree');
 }
 function nodeHTML(n){return n.type==='group'?grpHTML(n):tabHTML(n);}
 function grpHTML(n){
-  const closed=!S.open[n.id];
+  // 没记过状态＝默认展开；只有明确点过折叠（存成 false）才收起
+  const closed=S.open[n.id]===false;
   const kids=n.children||[];
   return `<div class="node grp ${closed?'closed':''}" data-id="${n.id}" data-type="group" data-open="${closed?0:1}" draggable="true"
       onclick="MIC.nav.click('${n.id}')" ondblclick="MIC.nav.startRename('${n.id}')">
@@ -52,17 +84,20 @@ function grpHTML(n){
 }
 function tabHTML(n){
   const path=S.layout==='flat'?pathOf(n.id).slice(0,-1).join(' / '):'';
+  const eng=pageEng(n.page);
+  const tag=path||eng;
+  const tip=path||'这一页只有'+eng+'走得通';
   return `<div class="node tab ${S.sel===n.id?'sel':''}" data-id="${n.id}" data-type="tab" draggable="true"
       onclick="MIC.nav.click('${n.id}')" ondblclick="MIC.nav.startRename('${n.id}')">
     ${ic(n.icon||'tool','ni')}
     <span class="nm">${esc(n.name)}</span>
-    ${path?`<span class="path" title="${esc(path)}">${esc(path)}</span>`:''}
+    ${tag?`<span class="path" title="${esc(tip)}">${esc(tag)}</span>`:''}
     <span class="more" onclick="MIC.nav.nodeMenu(event,'${n.id}')">${ic('dots')}</span>
   </div>`;
 }
 
 /* ---------- 交互 ---------- */
-function toggleOpen(id,e){if(e)e.stopPropagation();S.open[id]=!S.open[id];renderTree();save();}
+function toggleOpen(id,e){if(e)e.stopPropagation();S.open[id]=S.open[id]===false;renderTree();save();}
 function click(id){
   const f=find(id);if(!f)return;
   if(f.node.type!=='tab'){toggleOpen(id);return;}
@@ -158,7 +193,7 @@ function setOpenAll(v){S.open={};walk(TREE,n=>{if(n.type==='group')S.open[n.id]=
 function bindPage(id){
   const f=find(id);if(!f)return;
   MIC.closeMenu();
-  const keys=Object.keys(MIC.pages).filter(k=>k!=='__blank__');
+  const keys=Object.keys(MIC.pages).filter(k=>k!=='__blank__'&&!pageHidden(k));
   const p=MIC.$('pop');
   p.innerHTML=`<div class="ph">${ic('link')}<b>绑定功能页</b><span class="grow"></span>
       <span class="mut fine">${esc(f.node.name)}</span></div>
@@ -284,7 +319,10 @@ MIC.nav={
   newGroup,dissolve,dissolveAll,resetNav,moveTo,moveBefore,setOpenAll,
   bindPage,doBind,nodeMenu,mAddGrp,movePop,menu,
   pageOf(){const f=find(S.sel);return (f&&f.node.page)||'__blank__';},
+  pageHidden,
   tabIdFor(page){const t=allTabs().filter(n=>n.page===page);return t.length?t[0].id:null;},
-  goto(page){const id=this.tabIdFor(page);if(id)this.click(id);},
+  goto(page){if(pageHidden(page))return;const id=this.tabIdFor(page);if(id)this.click(id);},
+  /* 设置页切控制台模式后走这里：先修好选中页与侧栏，主区由调用方重画 */
+  applyMode(){ensureSel();renderTree();},
 };
 })();

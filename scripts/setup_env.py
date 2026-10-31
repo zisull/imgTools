@@ -1,12 +1,15 @@
 # -*- coding: utf-8 -*-
-"""按 env.json 补齐依赖：换电脑 clone 代码后的命令行入口。
+"""按 env.json 补齐千问那套依赖：命令行入口（可选，不是开界面的必经路）。
 
-    .venv\\Scripts\\python.exe scripts\\setup_env.py            # 装齐依赖 + 建目录
-    .venv\\Scripts\\python.exe scripts\\setup_env.py --models   # 顺带把缺的权重也拉下来
+    .venv\\Scripts\\python.exe scripts\\setup_env.py            # 装齐千问依赖 + 建目录
+    .venv\\Scripts\\python.exe scripts\\setup_env.py --models   # 顺带把缺的千问权重也拉下来
+
+只想开界面就双击 启动.bat：它只备好壳（.venv + pywebview，几秒）立刻开窗，
+剩下的都在这里或界面上补。30GB 的千问权重默认不在这里下：打开壳在「环境与模型」页
+的「千问生图」分区点「一键补齐」看得见进度，命令行要一把梭就加 --models。
+Moss 那套（内嵌 ComfyUI + 它的 venv + 权重）命令行不碰，只在界面「Moss 生图」分区补。
 
 必须用 .venv 里的 python 跑（体检看的就是「这个解释器装了些什么」）。
-30GB 的权重默认不在这里下：打开壳在「环境与模型」页点「一键补齐」看得见进度，
-真要命令行一把梭就加 --models。
 """
 import os
 import subprocess
@@ -27,7 +30,9 @@ def main() -> int:
         print("清单读不了：%s" % e)
         return 1
     todo = ec.fix_plan(r["items"], None if with_models else
-                       [k for k in r["todo"] if not k.startswith("model:")])
+                       [k for k in r["todo"]
+                        if not (k.startswith("model:") or k.startswith("moss:")
+                                or k.startswith("comfy:"))])
     if not todo:
         print("环境已齐（依赖 + 目录%s）" % ("" if with_models else "，权重另说）"))
         return 0
@@ -52,6 +57,10 @@ def main() -> int:
             if rc:
                 print("× 模型没下完：重跑这条命令会从断点继续")
                 bad += 1
+        elif it["fix"]["kind"] in ("comfyui", "comfyvenv", "mossmodel"):
+            print("\n[Moss] %s：命令行不装这组（clone ComfyUI / 建独立 .venv / 拉权重），"
+                  "请打开控制台用界面里的「一键补全 Moss 环境」——它才看得见进度、断点续传，"
+                  "也不会踩到千问那套 .venv。" % it["label"])
     left = ec.fix_plan(ec.check(ROOT)["items"], None)
     print("\n补全结束：失败 %d 项 · 还差 %d 项%s"
           % (bad, len(left), ("（%s）" % "、".join(x["label"] for x in left)) if left else ""))

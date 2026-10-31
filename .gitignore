@@ -1,5 +1,6 @@
 # 整合包排除项：删目录即净；仓库只提交代码与文档
 .venv/
+comfyui/
 models/
 outputs/
 logs/

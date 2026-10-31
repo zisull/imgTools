@@ -18,6 +18,10 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 for _p in (os.path.join(ROOT, "webui"), os.path.join(ROOT, "engine")):
     sys.path.insert(0, _p)
 
+# 必须在 import app 之前定好：CFG_PATH 读一次环境变量，之后改就晚了
+TMP = tempfile.mkdtemp(prefix="qic_api_test_")
+os.environ["QIC_CONFIG"] = os.path.join(TMP, "config.json")
+
 from app import App                      # noqa: E402
 from store import Store                   # noqa: E402
 from api_server import ApiServer          # noqa: E402
@@ -55,7 +59,7 @@ def wait_status(api, jid, want, timeout=25):
 
 
 def main():
-    tmp = tempfile.mkdtemp(prefix="qic_api_test_")
+    tmp = TMP
     out = os.path.join(tmp, "outputs")
     os.makedirs(out, exist_ok=True)
     fails = []
@@ -111,8 +115,10 @@ def main():
                b"\x89PNG\r\n\x1a\n", s)
         s, _ = req("/v1/images/generations", body={"prompt": "", "size": "512x512"})
         ck("空 prompt 被拒", s == 400, s)
-        s, _ = req("/v1/images/generations", body={"prompt": "x", "size": "999x999"})
-        ck("非法 size 被拒", s == 400, s)
+        s, _ = req("/v1/images/generations", body={"prompt": "x", "size": "9999x9999"})
+        ck("越界 size 被拒", s == 400, s)
+        s, _ = req("/v1/images/generations", body={"prompt": "x", "size": "一千见方"})
+        ck("乱写 size 被拒", s == 400, s)
     finally:
         srv.stop()
         st._db.close()

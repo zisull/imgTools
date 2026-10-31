@@ -1,12 +1,18 @@
 # -*- coding: utf-8 -*-
 """拖放/对话框回归：drop_path 四种候选形态 + 文件过滤串合法性。不启窗口。"""
 import os
+import shutil
 import sys
+import tempfile
 import urllib.parse
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 for _p in (os.path.join(ROOT, "webui"), os.path.join(ROOT, "engine")):
     sys.path.insert(0, _p)
+
+# 沙箱配置（默认 output_dir=outputs 就是本目录下的 outputs，按文件名兜底那条才测得到）
+CFG_TMP = tempfile.mkdtemp(prefix="qic_drop_test_")
+os.environ["QIC_CONFIG"] = os.path.join(CFG_TMP, "config.json")
 
 from app import App, _IMG_FILTER  # noqa: E402
 
@@ -68,6 +74,7 @@ def main():
                 os.remove(k["path"])
     finally:
         os.remove(f)
+        shutil.rmtree(CFG_TMP, ignore_errors=True)
     print("DROP TEST PASS")
 
 

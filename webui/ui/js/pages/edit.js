@@ -1,24 +1,17 @@
-/* pages/edit.js —— 图像编辑（多参考图）：给 ≤10 张参考图 + 编辑指令，出一张合成/改绘结果。
+/* pages/edit.js —— 编辑（多参考图）：≤10 张参考图 + 一句指令，出一张合成或改绘。
    官方配方：输入图转 RGBA 透传给 pipeline 的 image 参数（扁平列表=多参考图），
-   最后一张决定输出画幅比例。12G 显存下 1024 档约 30~40 秒。 */
+   最后一张决定输出画幅比例。 */
 (function(){
 const MIC=window.MIC=window.MIC||{};
 const C=MIC.form, ic=MIC.ic, esc=MIC.esc;
 
 const RES=[
-  {code:'512',name:'草图画幅 512² · 最快最稳（约 22 秒）'},
-  {code:'768',name:'中画幅 768² · 更清晰（约 27 秒，显存已接近上限）'},
+  {code:'512',name:'512² 草图'},
+  {code:'768',name:'768² 更清晰'},
 ];
 
 let imgs=[];          // 已选参考图绝对路径
 const thumbs={};      // path -> data url 缓存
-
-function resSel(k){
-  const v=String(MIC.mget(MIC.s.cfg,k));
-  return '<select class="inp" data-k="'+k+'">'+RES.map(function(o){
-    return '<option value="'+o.code+'"'+(o.code===v?' selected':'')+'>'+esc(o.name)+'</option>';
-  }).join('')+'<option value="" disabled>1024² —— 12G 显存会溢出到共享内存，实测慢几十倍，暂不可用</option></select>';
-}
 
 function grid(){
   /* 一张没选时不占位：拖放区自己就写着「点我/拖进来」，再补一行空态只是重复 */
@@ -44,32 +37,32 @@ function loadThumb(p){
 }
 
 MIC.registerPage('edit',{
-  title:'图像编辑',sub:'多参考图合成 · 改绘 / 风格迁移',icon:'wand',
+  title:'编辑',sub:'给 ≤10 张参考图，出一张合成或改绘',icon:'wand',
   render(){
-    const s=MIC.s.st, run=!!s.running;
+    const run=!!MIC.s.st.running;
     const dropzone='<div class="refdrop" onclick="MIC.edit.add()" '+
       'ondragover="event.preventDefault();this.classList.add(\'over\')" '+
       'ondragleave="this.classList.remove(\'over\')" '+
       'ondrop="event.preventDefault();this.classList.remove(\'over\');MIC.edit.onDrop(event)">'+
       ic('plus','s')+'点我添加参考图，或把图片拖到这里</div>';
     const params=
-      C.field('编辑指令',C.ta('edit.prompt',4,
-        'Turn the pencil sketch into a photorealistic image of the same object on a white background.'),
-        '想要怎么改这组图，英文最稳')+
-      C.field('参考图',dropzone+grid(),'最多 10 张，最后一张定画幅比例；选好后每张显示缩略图，右上角 × 移除')+
-      C.field('画幅',resSel('edit.res'),
-        '出图比例跟随最后一张参考图。要手机竖屏图：上传竖版参考图（如 9:16）即可，画幅自动跟随')+
-      '<div class="grid3">'+
-        C.field('步数',C.seg('edit.steps',[['8','8 步 · Turbo'],['40','40 步 · 精细']]))+
-        C.field('随机种子',C.num('edit.seed','-1 = 随机'))+
-        C.field('张数',C.num('edit.count','张'))+
+      C.field('编辑指令',C.ta('edit.prompt',4,'把这张铅笔素描变成白底上的同款实物照片。'),
+        '说清要怎么改这组图')+
+      MIC.inspire.box('edit.prompt')+
+      C.field('参考图',dropzone+grid(),'最多 10 张，最后一张决定输出画幅比例')+
+      '<div class="grid4">'+
+        C.field('画幅',C.sizeSel('edit.res',RES),'比例跟随最后一张参考图；768² 已接近 12G 显存上限')+
+        C.field('步数',C.sel('edit.steps',
+          [{code:'8',name:'极速 · 8 步'},{code:'40',name:'精细 · 40 步'}]),'8 步够用，40 步更细（慢 5 倍）')+
+        C.field('种子',C.seedRow('edit.seed'),'开着每次换一张新图；关掉就固定这个数，同参数复现同图')+
+        C.field('张数',C.num('edit.count','张'),'连发这么多张，每张一个不同种子')+
       '</div>'+
-      C.foldcard('反向提示词 / 高级','cog',
-        C.field('反向提示词',C.ta('edit.negative',2,'blurry, watermark, extra limbs…'))+
-        C.field('KV 缓存',C.chk('edit.kv_cache','use_kv_cache（多参考图时更快）')),'可选，默认收起');
-    return C.card('编辑参数','wand',C.lock(run,params),
-        {note:s.model_loaded?'模型已就绪':'未载入模型时点开始会先自动载入（十几秒）'})+
-      MIC.runner.runCard('选好几张参考图后开始','MIC.edit.start()');
+      C.fold('高级','cog',
+        C.field('反向提示词',C.ta('edit.negative',2,MIC.lib.NEG_BASE),'空着时点灵感卡会自动配一条通用的'));
+    return C.duo(
+      C.card('编辑参数','wand',C.lock(run,params)+MIC.runner.action('MIC.edit.start()'),
+        {note:MIC.runner.modelNote(run)}),
+      MIC.runner.runCard(''));
   },
   mount(){imgs.forEach(loadThumb);},
 });
@@ -96,7 +89,7 @@ MIC.edit={
     MIC.form.commit();
     const g=MIC.s.cfg.edit||{};
     MIC.runner.start('gen',{mode:'edit',images:imgs.slice(),
-      prompt:g.prompt||'',res:g.res||'1024',steps:g.steps||'8',
+      prompt:g.prompt||'',res:g.res||'768',steps:g.steps||'8',
       seed:g.seed!=null?g.seed:-1,count:g.count||1,negative:g.negative||'',
       kv_cache:g.kv_cache!==false});
   },

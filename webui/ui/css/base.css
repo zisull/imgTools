@@ -1,10 +1,10 @@
 *{box-sizing:border-box;margin:0;padding:0}
 :root{
   --r:9px;                 /* 控件圆角 */
-  --r-card:14px;           /* 卡片圆角 */
+  --r-card:10px;           /* 卡片圆角 */
   --sw:242px;              /* 侧栏宽度 */
-  --gap:14px;              /* 卡片间距 */
-  --h-ctl:32px;            /* 控件高度 */
+  --gap:10px;              /* 卡片间距 */
+  --h-ctl:30px;            /* 控件高度 */
   --h-node:34px;           /* 导航行高 */
 }
 /* --grad 必须声明在定义 --ac 的同一元素上，否则 var() 在 :root 处解析不到 */
@@ -55,23 +55,41 @@ button{cursor:pointer}
   border:1px solid var(--line);border-radius:var(--r-card);box-shadow:var(--shadow);
   margin-bottom:var(--gap);overflow:hidden;transition:border-color .25s,background .6s}
 .card:hover{border-color:var(--line2)}
-.card-h{display:flex;align-items:center;gap:9px;padding:13px 20px;border-bottom:1px solid var(--line)}
-.card-h h2{font-size:14px;font-weight:700;letter-spacing:.2px}
+.card-h{display:flex;align-items:center;gap:8px;padding:7px 12px;border-bottom:1px solid var(--line)}
+.card-h h2{font-size:13.5px;font-weight:700;letter-spacing:.2px}
 .card-h .ic{color:var(--ac)}
 .card-h .note{font-size:12px;color:var(--fg3)}
-.card-b{padding:16px 20px}
+.card-b{padding:10px 12px}
 .card-b.tight{padding:0}
+
+/* 双栏页：左主右辅（生成页=左参数右运行，环境页=左千问右Moss，设置页同理）。
+   右栏吸顶——长表单往下滚时运行状态/预览仍钉在眼前。
+   窗口不够宽就落回单列堆叠。 */
+.duo{display:grid;grid-template-columns:minmax(0,1fr) 392px;gap:var(--gap);align-items:start}
+.duo.eq{grid-template-columns:1fr 1fr}
+.duo.eq>.duo-s{position:static}
+.duo-m,.duo-s{min-width:0}
+.duo-s{position:sticky;top:0}
+@media (max-width:1360px){.duo{grid-template-columns:1fr}.duo-s{position:static}}
 
 .cols{display:grid;gap:0 var(--gap)}
 .cols.c2{grid-template-columns:1fr 1fr}
 @media (max-width:1180px){.cols.c2{grid-template-columns:1fr}.cols.c2>.card{margin-bottom:var(--gap)}}
 
 /* 字段：标签左对齐列 + 控件 */
-.fields{display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:11px 26px}
-.f{display:flex;align-items:flex-start;gap:12px;min-width:0;flex-wrap:wrap}
-.f>label{width:92px;flex:none;text-align:right;line-height:var(--h-ctl);font-size:13px;color:var(--fg2)}
-.f>.c{flex:1;min-width:0;display:flex;align-items:center;gap:9px;flex-wrap:wrap}
-.f .hint{font-size:12px;color:var(--fg3);line-height:1.6;margin-top:3px;flex-basis:100%;padding-left:104px}
+.fields{display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:7px 16px}
+.f{display:flex;align-items:flex-start;gap:9px;min-width:0;flex-wrap:wrap}
+.f>label{width:76px;flex:none;text-align:right;line-height:var(--h-ctl);font-size:13px;color:var(--fg2)}
+.f>.c{flex:1;min-width:0;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.f .hint{font-size:11.5px;color:var(--fg3);line-height:1.45;margin-top:1px;flex-basis:100%;padding-left:85px}
+/* 说明语收进悬浮提示：标签上一条虚线，停一下就看得到，不用再各占一行 */
+.f>label.tip{cursor:help;text-decoration:underline dotted var(--line2);text-underline-offset:3px}
+/* 种子行：随机开关 + 数值框。off=随机态，数值框灰掉（inert 挡键盘，这里挡鼠标视觉） */
+.seedw{display:flex;align-items:center;gap:8px;width:100%;min-width:0}
+.seedw .sw{flex:none}
+.seedw .unit{flex:none}
+.seedw .inp{flex:1;min-width:0;max-width:132px}
+.seedw.off .inp{opacity:.45}
 .inp{height:var(--h-ctl);width:100%;min-width:0;padding:0 11px;border-radius:var(--r);
   border:1px solid var(--line);background:var(--input);color:var(--fg);font-size:13px;
   transition:border-color .2s,box-shadow .2s,background .6s}
@@ -106,22 +124,22 @@ textarea.inp{height:auto;min-height:92px;padding:9px 11px;line-height:1.7;resize
 .sw.on{background:var(--grad)}
 .sw.on::after{left:19px}
 
-.btn{height:var(--h-ctl);padding:0 15px;border-radius:10px;font-size:13px;white-space:nowrap;
-  display:inline-flex;align-items:center;justify-content:center;gap:7px;
+.btn{height:var(--h-ctl);padding:0 13px;border-radius:9px;font-size:13px;white-space:nowrap;
+  display:inline-flex;align-items:center;justify-content:center;gap:6px;
   border:1px solid var(--line2);color:var(--fg2);background:var(--panel2);transition:.18s}
 .btn:hover{border-color:var(--ac);color:var(--ac);background:var(--ac-soft)}
 .btn.pri{border-color:transparent;background:var(--grad);color:var(--on-ac);font-weight:700;
   box-shadow:0 3px 12px rgba(var(--ac-rgb),.26)}
 .btn.pri:hover{color:var(--on-ac);filter:brightness(1.07);background:var(--grad)}
 .btn.gho{background:transparent;border-color:var(--line)}
-.btn.sm{height:27px;padding:0 11px;font-size:12.5px;border-radius:8px}
+.btn.sm{height:26px;padding:0 10px;font-size:12.5px;border-radius:8px}
 .btn.dgr:hover{color:var(--danger);border-color:var(--danger);background:rgba(255,120,100,.08)}
 .btn[disabled]{opacity:.42;pointer-events:none}
-.btnrow{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+.btnrow{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
 
 /* 状态条 */
-.status{display:flex;flex-direction:column;gap:9px}
-.strow{display:flex;align-items:center;gap:10px;font-size:12.5px;color:var(--fg2)}
+.status{display:flex;flex-direction:column;gap:5px}
+.strow{display:flex;align-items:center;gap:8px;font-size:12.5px;color:var(--fg2)}
 .strow .k{width:72px;flex:none;color:var(--fg3);text-align:right}
 .prog{flex:1;height:7px;border-radius:99px;background:var(--track);border:1px solid var(--track-line);
   overflow:hidden;min-width:90px}
@@ -129,26 +147,6 @@ textarea.inp{height:auto;min-height:92px;padding:9px 11px;line-height:1.7;resize
 /* 载入模型：没有步数可量，用一段来回扫动的光条表示「在忙、进度未知」 */
 .prog.indet i{width:38%;transition:none;animation:indet 1.15s ease-in-out infinite}
 @keyframes indet{0%{margin-left:-38%}100%{margin-left:100%}}
-
-/* 统计砖 */
-.stats{display:grid;grid-template-columns:repeat(auto-fit,minmax(168px,1fr));gap:12px;margin-bottom:var(--gap)}
-.stat{background:var(--panel);backdrop-filter:blur(16px) saturate(1.2);border:1px solid var(--line);
-  border-radius:var(--r-card);padding:14px 16px;box-shadow:var(--shadow);transition:border-color .25s,background .6s}
-.stat:hover{border-color:var(--line2)}
-.stat .k{font-size:12.5px;color:var(--fg3);letter-spacing:.2px}
-.stat .v{font-size:22px;font-weight:700;line-height:1.25;margin-top:3px}
-.stat .u{font-size:12px;color:var(--fg3);font-weight:400;margin-left:3px}
-.stat.ok .v{color:var(--ok)}.stat.warn .v{color:var(--warn)}.stat.ac .v{color:var(--ac)}
-
-/* 快捷入口 */
-.tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(226px,1fr));gap:12px}
-.tile{display:flex;align-items:center;gap:12px;padding:14px 16px;border-radius:12px;
-  border:1px solid var(--line);background:var(--panel2);text-align:left;transition:.18s}
-.tile:hover{border-color:var(--ac-line);background:var(--ac-soft);transform:translateY(-1px)}
-.tile .tic{width:34px;height:34px;border-radius:10px;display:grid;place-items:center;flex:none;
-  background:var(--grad);color:var(--on-ac)}
-.tile .tt{font-size:13.5px;font-weight:650;color:var(--fg)}
-.tile .td{font-size:12px;color:var(--fg3);margin-top:1px}
 
 /* 表格 */
 .tblwrap{max-height:300px;overflow:auto}
@@ -176,15 +174,18 @@ td.st{font-weight:650}
 .log .ln.wn{border-left-color:var(--warn)}.log .ln.wn .x{color:var(--warn)}
 .log .ln.er{border-left-color:var(--danger)}.log .ln.er .x{color:var(--danger)}
 .log .empty{padding:14px 16px;color:var(--fg3);font-size:12px}
+/* 日志单页：整页就为看日志，框子跟着窗口长（别的页都放不下这么大的框） */
+.log.tall{height:calc(100vh - 272px);min-height:280px;max-height:none}
 
-/* 折叠 */
-.fold{border-top:1px solid var(--line);padding:0 20px}
-.fold-h{display:flex;align-items:center;gap:9px;height:44px;cursor:pointer;font-size:13px;color:var(--fg2);user-select:none}
+/* 折叠：卡内的一段分隔线 + 一行标题，展开内容与表单左对齐（不再缩进一层） */
+.fold{border-top:1px solid var(--line);padding:0 12px;margin-top:7px}
+.fold.flat{border-top:0;margin-top:0}
+.fold-h{display:flex;align-items:center;gap:9px;height:34px;cursor:pointer;font-size:13px;color:var(--fg2);user-select:none}
 .fold-h:hover{color:var(--ac)}
 .fold-h .ic{color:var(--fg3);transition:transform .16s}
 .fold-h.closed .ic{transform:rotate(-90deg)}
-.fold-h .hint{margin-left:auto;font-size:12px;color:var(--fg3)}
-.fold-b{padding:2px 0 16px 25px}
+.fold-h .hint{margin-left:auto;font-size:11.5px;color:var(--fg3)}
+.fold-b{padding:1px 0 10px}
 
 /* 文档 */
 .doc{padding:18px 22px;font-size:13px;line-height:1.85;color:var(--fg2)}

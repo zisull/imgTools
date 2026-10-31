@@ -3,16 +3,29 @@
 (function(){
 const MIC=window.MIC=window.MIC||{};
 
+/* 表单块按引擎分：千问参数在 gen.*，Moss 在 moss.*；后端都记成 gen 任务。
+   firing 是界面这层的占位：桥调用是异步的，r.ok 回来之前连点第二下会再提交一次。 */
+const TASKS={gen:{block:'gen'},moss:{block:'moss',extra:{engine:'moss'}}};
+let firing=false;
 function start(key,payload){
+  const t=TASKS[key]||TASKS.gen;
+  if(firing||MIC.s.st.running)return;
+  firing=true;
   const patch=MIC.form.commit();
-  const body=Object.assign({},patch[key]||{},payload||{});
-  if(key!=='gen'){MIC.toast('未注册的任务：'+key);return;}
+  const body=Object.assign({},patch[t.block]||{},t.extra||{},payload||{});
+  /* 尺寸选了「自定义」：宽高取整到 16 的倍数（两台模型都按 16 对齐最稳），
+     限 256~2048（12G 卡再大就溢共享内存了），折成后端认的 size 字符串 */
+  if(body.size==='custom'){
+    const r16=n=>Math.max(256,Math.min(2048,Math.round((Number(n)||1024)/16)*16));
+    body.size=r16(body.cw)+'x'+r16(body.ch);
+  }
   MIC.api.startGen(body).then(r=>{
-    if(!r||!r.ok){MIC.toast((r&&r.msg)||'任务未启动');return;}
-    MIC.s.st.running=key;MIC.s.st.done=0;MIC.s.st.total=r.total||8;
+    firing=false;
+    if(!r||!r.ok){MIC.toast((r&&r.msg)||'任务没起来');return;}
+    MIC.s.st.running='gen';MIC.s.st.done=0;MIC.s.st.total=r.total||8;
     MIC.s.st.status='运行中…';
     MIC.render();
-  }).catch(e=>MIC.toast('启动失败：'+(e.message||e)));
+  }).catch(e=>{firing=false;MIC.toast('启动失败：'+(e.message||e));});
 }
 function stop(key){
   MIC.api.stop(key||MIC.s.st.running).then(r=>{
@@ -26,15 +39,15 @@ function toggle(key){
 }
 /* 模型装卸：载入约需十几秒（fp8 权重整份进显存），卸载归还显存 */
 function load(){
-  if(MIC.s.st.model_loaded){MIC.toast('模型已在显存里');return;}
-  if(MIC.s.st.running){MIC.toast('有任务在跑：'+MIC.s.st.running);return;}
+  if(MIC.s.st.model_loaded){MIC.toast('模型已在显存');return;}
+  if(MIC.s.st.running){MIC.toast('有任务在跑，先停止');return;}
   MIC.api.loadModel().then(r=>{
     if(!r||!r.ok)MIC.toast((r&&r.msg)||'未能开始载入');
     else MIC.render();
   }).catch(e=>MIC.toast('载入失败：'+(e.message||e)));
 }
 function unload(){
-  if(!MIC.s.st.model_loaded){MIC.toast('模型本来就没在显存里');return;}
+  if(!MIC.s.st.model_loaded){MIC.toast('显存里没有模型');return;}
   if(MIC.s.st.running){MIC.toast('生成还在跑，先停止');return;}
   MIC.api.unloadModel().then(r=>{
     if(!r||!r.ok)MIC.toast((r&&r.msg)||'未能卸载');
@@ -42,10 +55,12 @@ function unload(){
   }).catch(e=>MIC.toast('卸载失败：'+(e.message||e)));
 }
 
-/* 成图接力：把上一张成图当输入送进编辑页。局部改=当原图去涂抹，整张改=当参考图。 */
+/* 成图接力：上一张成图当输入。局部改=当原图去涂抹，整张改=当参考图。 */
 function again(target){
   const p=MIC.s.st.last_image;
   if(!p){MIC.toast('还没有成图');return;}
+  if(MIC.nav.pageHidden&&MIC.nav.pageHidden(target)){
+    MIC.toast('控制台模式收起了「'+(MIC.pages[target]||{}).title+'」页，切回「两者兼有」再用');return;}
   if(target==='inpaint')MIC.inp.useImage(p);
   else if(target==='edit')MIC.edit.useImage(p);
   else{MIC.toast('不认识的接力目标：'+target);return;}
@@ -62,27 +77,48 @@ document.addEventListener('keydown',e=>{
   }
 });
 
-MIC.runner={start,stop,toggle,load,unload,again,payload:{}};
+MIC.runner={start,stop,toggle,load,unload,again};
 
-/* 运行卡 + 成图预览 + 日志卡：文生图/编辑/局部/透明四页同构，收成一个 helper。
-   startCall 是「空闲时点开始」要执行的表达式（如 "MIC.edit.start()"）；
-   运行中固定显示停止按钮（后端只有一种在跑的任务，一律 toggle 'gen'）。 */
-MIC.runner.runCard=function(runNote,startCall){
+/* 「点开始要不要先等载入」这句话千问的三个出图页都要说；引擎切在 Moss 那边时
+   s.model_loaded 指的是 ComfyUI，照抄会把灯说反——按引擎给话术。 */
+MIC.runner.modelNote=function(run){
+  const s=MIC.s.st;
+  if(run)return '运行中，参数已锁定';
+  if(s.engine==='moss')return '现在是 Moss 引擎：点开始会先切回千问';
+  return s.model_loaded?'模型已在显存，点开始直接出图':'点开始会自动载入模型（十几秒）';
+};
+
+/* 主操作行：开始按钮在参数卡末尾（锁外面——运行中「停止」必须点得动）。
+   按当前引擎决定发哪一块：千问发 gen.*，Moss 发 moss.* 并带上 engine 让后端走 ComfyUI。 */
+MIC.runner.action=function(startCall){
+  const run=!!MIC.s.st.running,ic=MIC.ic;
+  const key=MIC.s.st.engine==='moss'?'moss':'gen';
+  return run
+    ? '<div class="actrow"><button class="btn pri big" onclick="MIC.runner.stop(\'gen\')">'+ic('stop','s')+'停止</button><span class="mut fine">参数已锁定</span></div>'
+    : '<div class="actrow"><button class="btn pri big" data-start title="Ctrl+Enter" '+
+      'onclick="'+(startCall||('MIC.runner.start(\''+key+'\')'))+'">'+ic('play','s')+'开始生成</button>'+
+      '<span class="mut fine">Ctrl+Enter</span></div>';
+};
+
+/* 运行卡 + 成图预览：三个出图页同构，收成一个 helper。
+   主「开始/停止」在参数卡的 MIC.runner.action() 里；这里只留状态、进度、
+   本轮结果、成图与页特有的次级按钮。
+   opts.rows / opts.btns 给页面塞自己的状态行和按钮（生图页的显存条与载入/卸载）。
+   预览并进同一张卡：以前「运行」「成图预览」两张卡上下摞着，多一层壳就多一截空；
+   现在一道虚线隔开，配合 .duo 双栏整块吸在右栏。 */
+MIC.runner.runCard=function(runNote,opts){
   const s=MIC.s.st, run=!!s.running, C=MIC.form, ic=MIC.ic;
-  const btn=run
-    ? '<button class="btn pri" onclick="MIC.runner.stop(\'gen\')">'+ic('stop','s')+'停止</button>'
-    : '<button class="btn pri" data-start title="Ctrl+Enter 也能开始" onclick="'
-      +(startCall||'MIC.runner.start(\'gen\')')+'">'+ic('play','s')+'开始</button>';
+  const o=opts||{};
   const statusBody=
     '<div class="status">'+
       C.strow('任务状态','<span class="dot '+(run?'run':'')+'" data-role="dot"></span><span data-role="st"></span>')+
       C.strow('进度','<div class="prog"><i data-role="prog"></i></div><span class="mut fine" data-role="pgtext"></span>')+
+      (o.rows||'')+
       C.strow('本轮结果','<span class="mut" data-role="result">'+(runNote||'就绪后开始')+'</span>')+'</div>'+
-    '<div class="btnrow">'+btn+
+    '<div class="btnrow">'+(o.btns||'')+
       '<button class="btn" onclick="MIC.gen.openDir()">'+ic('folder','s')+'打开输出目录</button>'+
-    '</div>';
-  return C.card('运行','play',statusBody)+
-    C.card('成图预览','image','<div data-role="imgprev" class="prevwrap"></div>',{tight:true})+
-    C.logcard('gen','生成日志');
+    '</div>'+
+    '<div class="rprev"><div class="prevwrap" data-role="imgprev"></div></div>';
+  return C.card('运行','play',statusBody);
 };
 })();
