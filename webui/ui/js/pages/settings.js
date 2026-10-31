@@ -23,7 +23,7 @@ function curlText(){
 jh,
 '  -d \'{"prompt":"a red fox in the snow","size":"512x512","n":1}\'',
 '',
-'# 同步直出（TAIlive 这类同步客户端用这个）：加 response_format:"b64_json"，',
+'# 同步直出（同步客户端用这个）：加 response_format:"b64_json"，',
 '# 等出图才返回，形状就是 OpenAI 的 {created, data:[{b64_json}]}；极速档 512² 一两秒',
 `curl -X POST ${u}/v1/images/generations \\`,
 jh,
@@ -33,10 +33,10 @@ jh,
 '# 都不带时用设置页的「默认引擎」，再回落控制台当前激活的引擎。',
 '# 尺寸除预设档外认自定义 WxH：千问 64~4096，Moss 64~2048（16 的倍数，零头自动下取整对齐）',
 '',
-'# ── 接 TAIlive（本机 game 侧一次配好即可）：把下面这段并进 data/AI设置.json 的 imageProviders ──',
+'# ── 接本地游戏 / AI 客户端（一次配好即可）：把下面这段并进它的 imageProviders ──',
 '{ "id": "img-moss", "name": "Moss 生图", "enabled": true,',
 `  "baseUrl": "${u}/v1", "apiKey": "", "model": "moss", "apiStyle": "openai", "priority": 1 },`,
-'# 它走同步 b64_json；把 data/生图配置.json 的 baseUrl 也换成同一个地址（那只影响底模列表）',
+'# 它走同步 b64_json；调用方自己的生图配置里 baseUrl 也换成同一个地址',
 '',
 '# 2) 轮询任务（status: queued/running/done/failed，done 里带 images[].id）',
 `curl ${u}/v1/tasks/<task_id> ${A}`,
@@ -115,7 +115,7 @@ MIC.registerPage('settings',{
     const qwenOn=String(MIC.s.cfg.console_mode||'both')!=='moss';
     const quantRow=qwenOn?`<div class="grid3">
           ${C.field('量化方式',C.seg('console.quant',[['fp8','fp8（12G 必选）'],['none','不量化（会爆显存）']]),
-            'fp8+offload 是 4070 12G 上唯一达标的组合；bf16/bnb8 溢出到共享内存，慢 6 倍以上')}
+            'fp8+offload 是 12G 卡上唯一达标的组合；bf16/bnb8 溢出到共享内存，慢 6 倍以上')}
           ${C.field('CPU offload',C.sw('console.offload'),'权重按需换入换出内存：稍慢，但 12G 装得下')}
           ${C.field('载入状态','<span class="pill '+(s.model_loaded?'on':'')+'"><span class="dot '+
             (s.model_loaded?'ok':'')+'"></span>'+(s.model_loaded?'已在显存':'未载入')+'</span>')}
@@ -142,7 +142,7 @@ MIC.registerPage('settings',{
       +C.card('关于','book',
         `<div class="kv"><span>版本</span><b>v${esc(MIC.s.version||'-')}</b></div>
          <div class="kv"><span>模型</span><b>Qwen-Image-2.1-Turbo（Qwen Research License，非商用）· MOSS-Image（内嵌 ComfyUI）</b></div>
-         <div class="kv"><span>硬件基线</span><b>RTX 4070 12G · 32G DDR5 · 1024 档：千问约 28 秒，Moss 约 3.3 秒</b></div>`),
+         <div class="kv"><span>建议配置</span><b>NVIDIA 12G 显存级 · 32G 以上内存 · 1024 档：千问约半分钟，Moss 约 3 秒</b></div>`),
       C.card('API 服务','globe',svc,{note:s.api_on?'运行中':'未启动'})
       +C.foldcard('端点与 curl 示例','globe',demo,'要接外部程序再展开'));
   },

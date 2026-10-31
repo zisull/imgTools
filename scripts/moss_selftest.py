@@ -301,7 +301,7 @@ def test_comfyui_torch_index():
 
     这不是洁癖：MOSS-Image 的权重是 int8_convrot / w4a8_gptq，ComfyUI 的
     comfy/quant_ops.py 在 torch.version.cuda < 13 时把整套 kitchen CUDA 后端
-    disable 掉，只走 eager 反量化。同一张 4070 热 512²/8 步实测 4.3 秒 → 0.9 秒。
+    disable 掉，只走 eager 反量化。同一张 12G 卡热 512²/8 步实测 4.3 秒 → 0.9 秒。
     """
     import env_check as ec
 
