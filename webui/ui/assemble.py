@@ -30,6 +30,7 @@ JS_ORDER = [
     "js/core/theme.js",
     "js/core/nav.js",
     "js/core/form.js",
+    "js/core/picker.js",
     "js/core/view.js",
     "js/core/win.js",
     "js/core/router.js",

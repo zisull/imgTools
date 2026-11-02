@@ -127,7 +127,7 @@ MIC.registerPage('video',{
         C.field('高（px）',C.num('video.ch','768'),'自动贴到 16 的倍数')+
       '</div>':'')+
       C.field(cloud?'参考图（必填）':'首帧',
-        C.pathrow('video.first',cloud?'选一张图：云端按参考生成，纯文字不接':'留空=文生视频 · 选一张图=从它开始动','file'),
+        C.pathrow('video.first',cloud?'选一张图：云端按参考生成，纯文字不接':'留空=文生视频 · 选一张图=从它开始动','file',false,{gal:true}),
         cloud?'上传到这个号的平台 input 里当首帧/身份参考。这份 H3 工作流只有图生与参考生视频两种模式，不填平台会判失败'
              :'想接着上一段拍就把那一帧存成图填进来')+
       (cloud?wfRow():'')+

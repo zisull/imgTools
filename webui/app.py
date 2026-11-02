@@ -755,13 +755,19 @@ class App(WindowCtl):
             # 合成一条过滤：拆多项时对话框默认项只放行一种扩展名，jpg 会被整个灰掉。
             # 多个扩展名必须用分号分隔——pywebview 的 parse_file_type 正则不认空格，
             # 传空格形式会抛 ValueError（被下面 except 吞掉，症状就是「点了没反应」）
+            # kind=output：对话框直接从输出目录起，想翻画廊文件夹里的旧图不必再点几次
+            kw = {}
+            if kind == "output":
+                out = _abs_path((self.cfg.get("console") or {}).get("output_dir", ""))
+                if os.path.isdir(out):
+                    kw["directory"] = out
             try:
                 r = w.create_file_dialog(_fd("OPEN"),
-                                         file_types=(_IMG_FILTER,))
+                                         file_types=(_IMG_FILTER,), **kw)
             except Exception as e:
                 self._log("⚠️ 文件对话框没打开：%s" % e)
                 try:
-                    r = w.create_file_dialog(_fd("OPEN"))   # 过滤串坏掉也要让人能选文件
+                    r = w.create_file_dialog(_fd("OPEN"), **kw)   # 过滤串坏掉也要让人能选文件
                 except Exception as e2:
                     self._log("⚠️ 重试也没打开：%s" % e2)
                     return ""

@@ -304,7 +304,7 @@ MIC.registerPage('film',{
       '</div>'+
       C.field(cloud?'首帧（必填）':'首帧（可选）',
         C.pathrow('film.first',cloud?'选一张图：云端按参考生成，纯文字不接'
-          :'留空=纯文字起步；选一张=全片从这张图开始','file'),
+          :'留空=纯文字起步；选一张=全片从这张图开始','file',false,{gal:true}),
         cloud?'这一份 H3 工作流按参考生成：不填平台会判失败。第 2 段起会改用上一段尾帧'
              :'接帧模式下全片从这张图开始；不给就用文字直接起第一段')+
       (cloud?'<div class="grid3">'+

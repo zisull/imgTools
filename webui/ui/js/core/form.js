@@ -112,11 +112,13 @@ function seg(k,items,rr){
   return `<div class="seg"${rr?' data-rr="1"':''} data-k="${k}">${items.map(([val,label])=>
     `<button class="${val===v?'on':''}" data-v="${esc(val)}">${label}</button>`).join('')}</div>`;
 }
-function pathrow(k,ph,pickKind,rr){
+function pathrow(k,ph,pickKind,rr,opts){
   /* 类名别叫 path：nav.css 里的 .path 是给侧栏面包屑的（max-width:88px;flex:none），
      挂到输入框上会把目录路径压成「D:/AI/Qwe…」，也长不大 */
+  const o=opts||{};
   return `<div class="inrow dropz" data-into="${k}" data-drop="${pickKind||'file'}"
       title="可以直接把文件从资源管理器拖进来">${txt(k,ph,'fpath',rr)}
+    ${o.gal?`<button class="btn" onclick="MIC.picker.open('${k}')">${ic('image','s')}画廊</button>`:''}
     <button class="btn" onclick="MIC.form.pickInto('${k}','${pickKind}')">浏览</button></div>`;
 }
 /* 尺寸/画幅下拉：三个出图页各有一份档位表，构件只有一个 sizeSel，

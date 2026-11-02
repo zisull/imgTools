@@ -232,3 +232,16 @@
 .ssum{font-size:12.5px;color:var(--fg2);margin-bottom:4px}
 .smain textarea{width:100%;box-sizing:border-box}
 .sact{flex:none;display:flex;flex-direction:column;align-items:flex-end;gap:6px}
+
+/* 画廊选图弹层（core/picker.js）：整块砖就是选中，缩略仍按需取 */
+.pickmodal{width:min(880px,94vw)}
+.pickgrid{flex:1 1 auto;min-height:120px;overflow:auto;display:grid;
+  grid-template-columns:repeat(auto-fill,minmax(148px,1fr));grid-auto-rows:max-content;
+  align-content:start;gap:10px;padding:14px 16px 16px}
+.pickgrid .empty{grid-column:1/-1}
+.pickcell{position:relative;display:flex;flex-direction:column;padding:0;border:1px solid var(--line2);
+  border-radius:10px;overflow:hidden;background:var(--panel);cursor:pointer;text-align:left;
+  color:var(--fg2);transition:border-color .12s,transform .12s}
+.pickcell:hover{border-color:var(--ac);transform:translateY(-1px)}
+.pickcell img{display:block;width:100%;aspect-ratio:1/1;object-fit:cover;background:var(--track)}
+.pickcell span{padding:6px 8px;font-size:11.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
