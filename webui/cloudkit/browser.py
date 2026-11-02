@@ -170,15 +170,25 @@ class BrowserHost:
                 self._b = Chromium(self._opts())
             return self._b
 
-    def alive(self):
-        """读的是 self._b 这份共享状态：与 browser()/close() 同一把锁，不然就是数据竞争。"""
-        with self._lock:
+    def alive(self, wait=True):
+        """读的是 self._b 这份共享状态：与 browser()/close() 同一把锁，不然就是数据竞争。
+
+        出片那整段都占着这把锁（见 gen.run）：界面轮询只要一句「开没开」，
+        wait=False 时锁被占着就按「进程还在」回答，别为探活把 UI 线程卡到出片结束。
+        """
+        if wait:
+            self._lock.acquire()
+        elif not self._lock.acquire(blocking=False):
+            return self._b is not None
+        try:
             if self._b is None:
                 return False
             if not self._conn_ok(self._b):
                 self._b = None
                 return False
             return True
+        finally:
+            self._lock.release()
 
     def tab(self):
         """拿一个能用的页：连接断了就重连/重开一次。
@@ -290,19 +300,20 @@ class BrowserHost:
 
 
 class KeepAlive:
-    """后台保活：每 keep_min 分钟把每个账号轮着用一遍。
+    """后台保活：每 keep_min 分钟把每个账号轮着访问一遍。
 
-    并发固定 1（一只浏览器）：轮换、不要并行——并行换 cookie 等于互相顶号。
-    浏览器没开就跳过并记一句，绝不自己偷偷拉起一个窗口。
+    每个号用自己那只浏览器（host_for）：1 号走主窗口，2 号起走各自的独立窗口，
+    互不顶号。某只没开就跳过它，绝不自己偷偷拉起一个窗口。
     """
 
-    def __init__(self, host, store, cfg, log=None, busy=None):
+    def __init__(self, host, store, cfg, log=None, busy=None, host_for=None):
         self.host = host
         self.store = store
         self.cfg = cfg if isinstance(cfg, dict) else {}
         self.log = log or (lambda *_: None)
         # 有人在手动操作账号 / 云端正在出片：这两个都不许保活插进来换号
         self.busy = busy or (lambda: False)
+        self.host_for = host_for or (lambda _aid: self.host)
         self.last = 0
         self.last_msg = "还没跑过"
         self._stop = threading.Event()
@@ -330,38 +341,37 @@ class KeepAlive:
                 self.last_msg = "保活出错：%s" % e
 
     def sweep(self, force=False):
-        """返回这轮成功的账号数；浏览器没开或被占着时返回 0 并把原因写进 last_msg。
+        """返回这轮成功的账号数；某只浏览器没开或被占着就跳过它。
 
         force=True 是人在界面上点了「立即保活」：他自己就是那个 busy 的人，
         但云端出片（purpose=gen）那段照样不让插。
         """
-        if not self.host.alive():
-            self.last_msg = "浏览器没开，保活暂停"
-            return 0
-        if self.host.purpose == "gen":
-            self.last_msg = "云端出片占着浏览器，保活先让路"
-            return 0
         if not force and self.busy():
             self.last_msg = "有人在动这只浏览器，保活先让路"
             return 0
-        done = 0
+        done = live = gen = held = 0
         for a in self.store.list():
-            # 号一个一个换：中途有人开登录页/要出片就停在这，别把剩下的号也换一遍。
-            # 直接 return（不写 self.last）：下一分钟就该重试，而不是等满一个保活周期
-            if self.host.occupied():
-                self.last_msg = "保活让路：已跑 %d 个账号" % done
-                return done
             aid = a["id"]
+            host = self.host_for(aid)
+            if host is None or not host.alive():
+                continue
+            live += 1
+            if host.purpose == "gen":
+                gen += 1
+                continue
+            if host.occupied():
+                held += 1
+                continue
             state = self.store.load(aid)
             if not state or not state.get("cookies"):
                 continue
             try:
-                with self.host.lock:
-                    self.host.apply(state, aid=aid)
-                    tab = self.host.tab()
-                    tab.get(self.host.base)
+                with host.lock:
+                    host.apply(state, aid=aid)
+                    tab = host.tab()
+                    tab.get(host.base)
                     st, detail = login_state(tab)
-                    snap = snapshot_state(tab, self.host.domains)
+                    snap = snapshot_state(tab, host.domains)
                     # cookie 没变就不写盘：每 30 分钟一份把 12 份备份挤没了
                     if cookie_fp(snap["cookies"]) != cookie_fp(state.get("cookies")):
                         self.store.save(aid, snap["cookies"], snap["storage"], snap["url"])
@@ -370,7 +380,15 @@ class KeepAlive:
             except Exception as e:
                 self.store.mark(aid, "error", brief_error(e))
         self.last = time.time()
-        self.last_msg = "保活完成：%d 个账号" % done
+        if live == 0:
+            self.last_msg = "浏览器没开，保活暂停"
+            return 0
+        if gen and done == 0:
+            self.last_msg = "云端出片占着浏览器，保活先让路"
+        elif held:
+            self.last_msg = "保活让路：已跑 %d 个账号" % done
+        else:
+            self.last_msg = "保活完成：%d 个账号" % done
         if done:
             self.log("☁️ 浏览器保活：%d 个账号" % done)
         return done

@@ -3,9 +3,10 @@
 
     .venv\\Scripts\\python.exe scripts\\cloud_test.py
 
-不起 Chromium、不碰 GPU：拿假 tab / 假 host 把「多账号 = 一只浏览器 + 多份数据」
-这条契约钉住——落盘结构、备份轮换、换号时清残留、保活只在数据真变了才写盘、
-以及索引里绝不出现凭据。真机冒烟（端口 9333、扫码登录）另跑，不在这里。
+不起 Chromium、不碰 GPU：拿假 tab / 假 host 把「一个号一只浏览器（1 号=主窗口，
+2 号起独立端口）+ 快照落盘」这条契约钉住——备份轮换、灌快照前清残留、保活只在
+数据真变了才写盘、号位/端口不重叠，以及索引里绝不出现凭据。
+真机冒烟（端口 9333、扫码登录）另跑，不在这里。
 """
 import json
 import os
@@ -783,29 +784,50 @@ def test_browser_selfheal():
     print("  ✓ 浏览器自愈：窗口关掉后探活丢死连接、重开一次；进页撞断连也只重试一次")
 
 
-def test_pool_and_restart():
-    """一个号一只浏览器 + 坏号标 fail：端口/profile 互不重叠，重启连进程一起收。"""
+def test_account_browsers():
+    """一个号一只浏览器：1 号用主窗口，2 号起独立端口/profile，坏号标 fail 后跳过。"""
     from cloudkit import pool as cp
     s = _fresh()
     a = s.create("A 号")
     b = s.create("B 号")
-    c = s.create("没登录的号")
+    s.create("没登录的号")
     s.save(a["id"], _snap()["cookies"], {}, "https://www.runninghub.cn/")
     s.save(b["id"], _snap()["cookies"], {}, "https://www.runninghub.cn/")
 
-    pool = cp.CloudPool(ROOT, {"port": 19100}, s)
+    main = cb.BrowserHost(ROOT, {"port": 19100},
+                          profile=os.path.join(TMP, "prof_main"))
+    br = cp.AccountBrowsers(ROOT, {"port": 19100}, s, main)
+    pool = cp.CloudPool(br)
     rows = pool.accounts()
     assert [x["id"] for x in rows] == [a["id"], b["id"]], rows   # 没快照的不进池
+    assert (br.slot(a["id"]), br.slot(b["id"])) == (1, 2)
     wa, wb = pool.workers(rows)
-    assert wa.host.port == 19101 and wb.host.port == 19102, (wa.host.port, wb.host.port)
-    assert wa.host.profile != wb.host.profile, (wa.host.profile, wb.host.profile)
-    assert wa.host.profile.startswith(os.path.abspath(os.environ["QIC_CLOUD_DIR"])), \
-        wa.host.profile
+    # 1 号就是主窗口（9333/19100），2 号分到下一只；两个号不再抢一个窗口
+    assert wa.host is main and wa.host.port == 19100, wa.host.port
+    assert wb.host is not main and wb.host.port == 19101, wb.host.port
+    assert main.profile != wb.host.profile, (main.profile, wb.host.profile)
+    assert wb.host.profile.startswith(os.path.abspath(os.environ["QIC_CLOUD_DIR"])), \
+        wb.host.profile
     assert pool.worker(rows[0]) is wa, "同一个号必须复用同一只，不能重复起浏览器"
+    st = br.state()
+    assert [x["slot"] for x in st] == [1, 2, 3], st
+    assert [x["port"] for x in st] == [19100, 19101, 19102], st
+    assert st[0]["main"] and not st[1]["main"]
 
     pool.mark_fail(wa, "两次都没出成")
     assert wa.bad and s.get(a["id"])["state"] == "fail"
     assert [x["id"] for x in pool.accounts()] == [b["id"]], "fail 的号下次必须跳过"
+
+    # 成片收尾只丢调度包装；账号浏览器（含 2 号那只）继续留着
+    pool.close()
+    assert b["id"] in br._hosts, "close() 不该把账号自己的浏览器一起收掉"
+
+    # 删掉 1 号：2 号顺延成「浏览器 1」，原独立窗口收掉，下一次直接用主窗口
+    s.delete(a["id"])
+    br.reconcile()
+    assert br.slot(b["id"]) == 1 and b["id"] not in br._hosts
+    assert br.host_for(b["id"]) is main
+    br.close_all()
 
     # restart：连进程一起收（force），下一次拉起新的
     h = cb.BrowserHost(ROOT, {}, port=19103, profile=os.path.join(TMP, "prof_x"))
@@ -821,8 +843,7 @@ def test_pool_and_restart():
     h.browser = lambda: "fresh"
     assert h.restart() == "fresh" and h._b is None
     assert calls == [(5, True)], calls
-    pool.close()
-    print("  ✓ 账号池：端口/profile 隔离、坏号标 fail 后跳过、重启连进程一起收")
+    print("  ✓ 账号浏览器：1 号主窗口 / 2 号起独立端口，坏号标 fail，重启连进程一起收")
 
 
 def test_bridge_without_dp():
@@ -864,7 +885,7 @@ def main():
         test_media_item,
         test_platform_state,
         test_browser_selfheal,
-        test_pool_and_restart,
+        test_account_browsers,
         test_bridge_without_dp,
     ]
     print("云端账号库自测（无浏览器 / 无 GPU）")

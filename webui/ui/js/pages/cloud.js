@@ -1,7 +1,7 @@
-/* pages/cloud.js —— 云端账号：登录一次存成档案，之后换号只换数据
-   登录/看平台仍用主窗口那只（一个浏览器 + 多份 cookies/localStorage 快照）；
-   成片逐镜要并行时，每个号各起一只独立浏览器（不同端口/profile），跑完就收。
-   保活按账号轮着访问平台（并发固定 1），浏览器只管登录，生成仍走协议。 */
+/* pages/cloud.js —— 云端账号：一个号一只调试浏览器，登录/检查/出片各走各的
+   1 号用主窗口（默认 9333），2 号起自动分到下一只（9334、9335…）；
+   快照存在 data/cloud/u/<id>，浏览器只是窗口，换了也不丢登录态。
+   保活按账号轮着访问平台（并发固定 1），生成仍走协议。 */
 (function(){
 const MIC=window.MIC=window.MIC||{};
 const C=MIC.form, ic=MIC.ic, esc=MIC.esc;
@@ -21,11 +21,15 @@ const STATE={
 };
 
 function byId(id){return (data&&data.accounts||[]).filter(a=>a.id===id)[0]||{};}
-/* 浏览器这只窗口当下被谁占着（后端 host.purpose）：保活见到非空闲就让路 */
+/* 某只浏览器当下被谁占着（后端 host.purpose）：保活见到非空闲就让路 */
 const BUSY_TXT={login:'登录页开着',gen:'云端出片中',hold:'有人在用'};
-/* 云端出片占着同一只浏览器：这期间登录/换号/关浏览器都会把正在跑的号顶掉 */
+/* 云端出片占着它自己那只：别的号照样能登录/检查，只有「关闭全部」得等 */
 function runBusy(){return !!((MIC.s.st.cloud||{}).run);}
 function locked(){return !!MIC.s.st.cloud_busy||runBusy();}
+function acctBusy(a){
+  const b=((data&&data.browsers)||[]).filter(x=>x.account_id===a.id)[0];
+  return !!(b&&b.purpose==='gen');
+}
 function stamp(ts){
   const n=Number(ts)||0;if(!n)return '';
   const d=new Date(n*1000),p=x=>String(x).padStart(2,'0');
@@ -33,7 +37,9 @@ function stamp(ts){
 }
 function acctSub(a){
   const s=STATE[a.state]||STATE.new;
-  const bits=[s.txt];
+  const bits=[];
+  if(a.slot)bits.push('浏览器 '+a.slot);
+  bits.push(s.txt);
   if(a.state==='ok'||a.state==='unknown'||a.state==='expired'||a.state==='fail'){
     if(a.detail)bits.push(a.detail);
     if(a.last_check)bits.push('检查于 '+stamp(a.last_check));
@@ -44,18 +50,20 @@ function acctSub(a){
 }
 function liveSub(){
   const n=(data&&data.accounts||[]).length;
-  if(runBusy())return '云端任务在跑 · 账号先别动';
+  if(runBusy())return '云端任务在跑';
   const busy=MIC.s.st.cloud_busy;
   if(busy)return busy+'…';
-  const on=data&&data.browser&&data.browser.on;
+  if(!n)return '还没有账号';
+  const on=((data&&data.browsers)||[]).filter(b=>b.on).length;
   const par=+(data&&data.parallel)||0;
-  return n+' 个账号 · '+(on?'浏览器已连':'浏览器未启动')+
-    (par>1?' · 成片可 '+par+' 号并行':' · 并发 1');
+  return n+' 个账号 · '+on+'/'+n+' 只浏览器在开'+
+    (par>1?' · 成片可 '+par+' 号并行':'');
 }
 
 function row(a){
   const s=STATE[a.state]||STATE.new;
-  const off=locked()||(data&&data.dp===false);   // 缺浏览器依赖或出片中：登录/保存点不动，档案仍可改名/备份
+  // 缺依赖 / 账号操作进行中 / 这个号自己正在出片：登录、保存点不动；别的号不受影响
+  const off=!!MIC.s.st.cloud_busy||(data&&data.dp===false)||acctBusy(a);
   return `<div class="mrow">
     <span class="dot ${s.dot}"></span>
     <div class="minfo"><b>${esc(a.name)}</b><span class="mut fine">${esc(acctSub(a))}</span></div>
@@ -72,31 +80,35 @@ function createRow(){
         onkeydown="if(event.key==='Enter')MIC.cloud.create()">
       <button class="btn pri" onclick="MIC.cloud.create()"${locked()?' disabled':''}>新建登录</button>
     </div>
-    <div class="mut fine" style="margin-top:6px">点开后在新窗口里登录；登录完回到这里点「保存」，这个号就留下了。</div>`;
+    <div class="mut fine" style="margin-top:6px">每个号一只浏览器：1 号用主窗口，2 号起另开一只。登录完回来点「保存」。</div>`;
 }
 
 function browserCard(){
   const d=data||{}, b=d.browser||{}, k=d.keep||{};
   const busy=locked();
-  const cur=byId(b.account);
-  const on=!!b.on, noDp=d.dp===false;
+  const noDp=d.dp===false;
+  const brs=(d.browsers&&d.browsers.length)?d.browsers:
+    [{slot:1,port:b.port,on:false,account:'',purpose:''}];
+  const on=brs.filter(x=>x.on).length;
+  const allOn=on===brs.length;
+  const rows=brs.map(x=>{
+    const txt=x.on?(BUSY_TXT[x.purpose]||'空闲'):'未启动';
+    return C.strow('浏览器 '+x.slot,
+      `<span class="dot ${x.on?'ok':'off'}"></span>`+
+      `<span class="mut">${esc(x.account||'未用')} · ${esc(String(x.port||''))} · ${esc(txt)}</span>`);
+  }).join('');
   return C.card('浏览器','globe',
-    '<div class="status">'+
-      C.strow('状态',`<span class="dot ${on?'ok':'off'}"></span><span>${on?'已启动':'未启动'}</span>`)+
-      C.strow('调试端口',`<span class="mut">${esc(String(b.port||''))}</span>`)+
-      C.strow('当前账号',`<span class="mut">${esc(cur.name||'—')}</span>`)+
+    '<div class="status">'+rows+
       C.strow('保活',`<span class="mut">${esc(k.on?'每 '+(k.min||30)+' 分钟':'关')}${k.msg?' · '+esc(k.msg):''}</span>`)+
-      /* 这只窗口现在归谁用：保活看到非「空闲」就让路，登录/出片期间不会被人换号 */
-      C.strow('当前用途',`<span class="mut">${esc(BUSY_TXT[k.purpose]||'空闲')}</span>`)+
-      C.strow('并发',`<span class="mut">单条视频 1 个号；成片逐镜最多 ${+(data&&data.parallel)||1} 个号并行（每号一只浏览器）</span>`)+
+      C.strow('并发',`<span class="mut">单条视频 1 个号；成片逐镜最多 ${+(d&&d.parallel)||1} 个号并行</span>`)+
     '</div>'+
     '<div class="btnrow" style="margin-top:10px">'+
-      `<button class="btn sm pri" onclick="MIC.cloud.start()"${busy||on||noDp?' disabled':''}>打开平台</button>`+
+      `<button class="btn sm pri" onclick="MIC.cloud.start()"${busy||allOn||noDp?' disabled':''}>打开全部</button>`+
       `<button class="btn sm gho" onclick="MIC.cloud.checkAll()"${busy||!on?' disabled':''}>立即保活</button>`+
-      `<button class="btn sm gho" onclick="MIC.cloud.stop()"${busy||!on?' disabled':''}>关闭浏览器</button>`+
+      `<button class="btn sm gho" onclick="MIC.cloud.stop()"${busy||!on?' disabled':''}>关闭全部</button>`+
     '</div>'+
     C.field('自动保活',C.sw('cloud.keep'),
-      `每 ${k.min||30} 分钟把每个号轮着访问一次平台，把服务端刷新的 cookie 存回去；浏览器没开就跳过`));
+      `每 ${k.min||30} 分钟把每个号在自己的浏览器里访问一次平台，把服务端刷新的 cookie 存回去；没开的窗口跳过`));
 }
 
 function page(){
@@ -108,9 +120,9 @@ function page(){
   const warn=d.dp?'':
     `<div class="notebar">${ic('tool','s')}<b>缺 DrissionPage</b>`+
     `<span class="grow"></span><button class="btn sm pri" onclick="MIC.env.focus('base')">去基础补</button></div>`;
-  /* 出片占着这只浏览器：登录/换号/关窗口都先把话说明白，别让人点了才发现弹回来一句忙 */
+  /* 某个号正在出片：先说清楚哪只窗口不能动，别让人点了才发现弹回来一句忙 */
   const run=runBusy()?`<div class="notebar">${ic('refresh','s')}
-      <b>云端任务在跑 · 登录、换号、关浏览器先等它结束</b>
+      <b>云端任务在跑 · 正在出片的号先别动，「关闭全部」等它结束</b>
       <span class="grow"></span><button class="btn sm gho" onclick="MIC.nav.goto('${
         (MIC.s.st.cloud||{}).run==='film'?'film':'video'}')">去看进度</button></div>`:'';
   const rows=(d.accounts||[]).map(row).join('')||

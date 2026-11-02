@@ -909,7 +909,7 @@ class App(WindowCtl):
         if self._cloudx is not None:
             try:
                 self._cloudx["keep"].stop()
-                self._cloudx["host"].close()   # 共用调试浏览器是我们拉起的，退出时一起收
+                self._cloudx["browsers"].close_all()   # 每个号那只，连主窗口一起收
             except Exception:
                 pass
         self._save_cfg()
@@ -1692,6 +1692,11 @@ class App(WindowCtl):
             row = g.account(str(v.get("cloud_acct") or ""))
         except Exception as e:
             return {"ok": False, "msg": "云端还没备好：%s" % e}
+        # 界面没选号时 account() 会回第一个可用号：把号写回去，
+        # 出片那段才不会落到别的浏览器里
+        v["cloud_acct"] = row["id"]
+        # 2 号起的号有自己的浏览器：单条视频也进它自己那只，别去顶 1 号的窗口
+        g = self._cloud_h3_for(row["id"])
         try:
             kind, src = g.wf_src(str(v.get("cloud_wf") or ""))
             # 本地文件没有平台编号：宿主页到开页时再自动借，这里先验结构；
@@ -1710,8 +1715,9 @@ class App(WindowCtl):
         if not self._launch("video", lambda: self._do_video_cloud(v), lane="cloud"):
             return {"ok": False, "msg": self._busy_msg("cloud")}
         w, h = self._h3_size(v, hi=self.H3_HI_CLOUD)
-        self._log("☁️ 云端出片：%ds · %dx%d · 号「%s」· %s（要开浏览器，按平台计费）"
+        self._log("☁️ 云端出片：%ds · %dx%d · 号「%s」· 浏览器 %d · %s（按平台计费）"
                   % (_to_int(v.get("seconds"), 5, 5, 15), w, h, row["name"],
+                     self._cloudkit()["browsers"].slot(row["id"]),
                      ("本地 · " + os.path.basename(src)) if kind == "file" else wf))
         return {"ok": True, "total": 1, "exec": "cloud", "acct": row["name"]}
 
@@ -1734,8 +1740,9 @@ class App(WindowCtl):
                 # 云端这份工作流没有纯文字模式：图不在了就当场说清，别让人以为还能出片
                 self._log("⚠️ 参考图不在了：%s · 云端这份工作流必须有图，这一段会直接停下"
                           % os.path.basename(str(v.get("first"))))
-            path = self._cloud_h3().run(p, on_progress=self._cloud_step,
-                                        should_stop=self._stop_cloud.is_set)
+            path = self._cloud_h3_for(p["acct"]).run(
+                p, on_progress=self._cloud_step,
+                should_stop=self._stop_cloud.is_set)
             if self._stop_cloud.is_set():
                 c["status"] = "已停止"
                 return
@@ -2488,8 +2495,10 @@ class App(WindowCtl):
                       % len(workers))
             self._film_cloud_serial(d, proj, fs, t0, workers)
         else:
-            self._log("☁️ 云端成片：逐镜并行 · %d 个号（最多同时 %d 个）"
-                      % (len(workers), min(3, len(workers))))
+            cap = min(4, len(workers),
+                      int((self.cfg.get("cloud") or {}).get("parallel") or 3))
+            self._log("☁️ 云端成片：逐镜并行 · %d 个号（最多同时 %d 个，每号一只浏览器）"
+                      % (len(workers), max(1, cap)))
             self._film_cloud_parallel(d, proj, fs, t0, workers)
 
     def _film_run(self, d, proj):
@@ -2523,7 +2532,7 @@ class App(WindowCtl):
                 try:
                     self._film_cloud_run(d, proj, fs, t0)
                 finally:
-                    self._film_pool_close()   # 出片结束就收浏览器，别拖到合成之后
+                    self._film_pool_close()   # 收调度包装；账号浏览器留着，下次直接用
             for sh in ([] if cloud else proj["shots"]):
                 if self._film_should_stop():
                     break
@@ -2980,22 +2989,27 @@ class App(WindowCtl):
             self._release()
 
     # ------------------------------------------------------------ js_api：云端账号
-    # 一只调试浏览器 + 多份登录态快照：换号只换 cookies/localStorage，不重启进程。
-    # 浏览器只在登录/保活时起；启动路径不 import DrissionPage（与不 import torch 同理）。
+    # 一个号一只调试浏览器：1 号用主窗口，2 号起各用独立端口/profile，互不顶号。
+    # 浏览器只在登录/检查/保活/出片时起；启动路径不 import DrissionPage（与不 import torch 同理）。
     def _cloudkit(self):
         # pywebview 每个 js_api 调用各起一个线程：冷启动时两个云端入口撞在一起，
         # 没锁就会各建一套 store/host/keep，最后赋值盖掉，留下一条没人管的保活线程和一个浏览器
         with self._cloud_lock:
             if self._cloudx is None:
                 from cloudkit import browser as cb
+                from cloudkit import pool as cp
                 from cloudkit import store as cs
                 cfg = self.cfg.setdefault("cloud", {})
                 store = cs.AccountStore(ROOT)
                 host = cb.BrowserHost(ROOT, cfg, log=self._log)
+                # 1 号用主窗口，2 号起各用一只独立浏览器；登录、检查、出片都找自己那只
+                browsers = cp.AccountBrowsers(ROOT, cfg, store, host, log=self._log)
                 keep = cb.KeepAlive(host, store, cfg, log=self._log,
                                     busy=lambda: bool(self.st.get("cloud_busy"))
-                                    or self._cloud_gen.is_set())
-                self._cloudx = {"store": store, "host": host, "keep": keep}
+                                    or self._cloud_gen.is_set(),
+                                    host_for=browsers.host_for)
+                self._cloudx = {"store": store, "host": host,
+                                "browsers": browsers, "keep": keep}
                 keep.start()   # 只等定时器；浏览器没开不会自己拉起
             return self._cloudx
 
@@ -3017,13 +3031,12 @@ class App(WindowCtl):
             return self._h3cloud
 
     def _film_pool(self):
-        """成片并行时每个号一只浏览器；只读档案，不提前起窗口。"""
+        """成片并行时每个号用它自己那只常驻浏览器；只读档案，不提前起窗口。"""
         with self._cloud_lock:
             if self._filmpool is None:
                 from cloudkit import pool as cp
                 h = self._cloudkit()
-                self._filmpool = cp.CloudPool(ROOT, self.cfg.setdefault("cloud", {}),
-                                              h["store"], log=self._log)
+                self._filmpool = cp.CloudPool(h["browsers"], log=self._log)
             return self._filmpool
 
     def _film_pool_close(self):
@@ -3034,6 +3047,16 @@ class App(WindowCtl):
                 p.close()
             except Exception as e:
                 self._log("⚠️ 关闭成片浏览器池失败：%s" % e)
+
+    def _cloud_h3_for(self, aid=""):
+        """这条活该进哪只浏览器：1 号用主窗口的执行器，2 号起用它自己那只。"""
+        h = self._cloudkit()
+        if h["browsers"].slot(aid) <= 1:
+            return self._cloud_h3()
+        row = h["store"].get(aid)
+        if not row:
+            return self._cloud_h3()
+        return self._film_pool().worker(row).gen
 
     def cloud_brief(self):
         """视频页那格「云端」要用的一句话实话：有没有号、有没有 DrissionPage、用的哪份工作流。
@@ -3080,8 +3103,9 @@ class App(WindowCtl):
                 "msg": "结构没问题：%d 个节点 · 主节点/输出节点都在" % meta["nodes"]}
 
     def cloud_state(self):
-        """给界面的账号表 + 浏览器/保活状态。不含任何凭据。"""
+        """给界面的账号表 + 每只浏览器的状态。不含任何凭据。"""
         c = self.cfg.get("cloud") or {}
+        base_port = int(c.get("port") or 9333)
         if self._cloudx is None and not self._dp_ready():
             # 缺浏览器依赖也把档案列出来：名字和备份是本地数据，不该跟着一起消失
             try:
@@ -3089,8 +3113,16 @@ class App(WindowCtl):
                 accounts = cs.AccountStore(ROOT).list()
             except Exception:
                 accounts = []
+            for i, a in enumerate(accounts, 1):
+                a["slot"] = i
+                a["browser_port"] = base_port + i - 1
             return {"ok": True, "dp": False, "accounts": accounts,
-                    "browser": {"on": False, "port": int(c.get("port") or 9333),
+                    "browsers": [{"slot": a["slot"], "port": a["browser_port"],
+                                  "on": False, "account": str(a.get("name") or ""),
+                                  "account_id": str(a.get("id") or ""),
+                                  "purpose": "", "main": a["slot"] == 1}
+                                 for a in accounts],
+                    "browser": {"on": False, "port": base_port,
                                 "base": str(c.get("base") or ""), "account": ""},
                     "busy": self.st.get("cloud_busy", ""),
                     "msg": "缺 DrissionPage：到「环境管理 → 基础」补齐后重开这页",
@@ -3101,6 +3133,13 @@ class App(WindowCtl):
         h = self._cloudkit()
         keep = h["keep"]
         accounts = h["store"].list()
+        browsers = h["browsers"].state()
+        # 账号行上直接看得到「这个号用第几只浏览器 / 哪个端口」
+        by_id = {b["account_id"]: b for b in browsers}
+        for a in accounts:
+            b = by_id.get(str(a.get("id") or "")) or {}
+            a["slot"] = int(b.get("slot") or 0)
+            a["browser_port"] = int(b.get("port") or 0)
         try:
             from cloudkit.pool import MAX_PARALLEL
             healthy = sum(1 for a in accounts
@@ -3109,11 +3148,15 @@ class App(WindowCtl):
             parallel = min(MAX_PARALLEL, healthy)
         except Exception:
             parallel = 1
+        running = [b for b in browsers if b["on"]]
         return {
             "ok": True, "dp": True,
             "accounts": accounts,
-            "browser": {"on": h["host"].alive(), "port": h["host"].port,
-                        "base": h["host"].base, "account": h["host"].current},
+            "browsers": browsers,
+            # 老字段：主窗口那只是为了兼容「打开平台/关闭全部」那组按钮的读数
+            "browser": {"on": h["host"].alive(wait=False), "port": h["host"].port,
+                        "base": h["host"].base, "account": h["host"].current,
+                        "open": len(running)},
             "busy": self.st.get("cloud_busy", ""),
             "msg": self.st.get("cloud_msg", ""),
             "keep": {"on": bool((self.cfg.get("cloud") or {}).get("keep", True)),
@@ -3126,11 +3169,20 @@ class App(WindowCtl):
             "parallel": parallel, "page": h["host"].base,
         }
 
-    def _cloud_run(self, label, fn):
+    def _cloud_run(self, label, fn, aid=""):
         """浏览器操作一律进后台：pywebview 在 UI 线程派发 js_api，
-        起浏览器/加载页面动辄几秒，同步等会把消息泵饿死（界面先卡住）。"""
-        if self._cloud_gen.is_set():
-            # 云端出片那段占着同一只浏览器：这时候换号等于把正在跑的号顶掉
+        起浏览器/加载页面动辄几秒，同步等会把消息泵饿死（界面先卡住）。
+
+        aid 是这次要动的号：只拦「它自己那只浏览器正在出片」，
+        别的号在跑不该把登录/检查/保存全堵死。
+        """
+        if aid:
+            try:
+                if self._cloudkit()["browsers"].host_for(aid).purpose == "gen":
+                    return False, "这个号正在出片：等这一段跑完再动它"
+            except Exception:
+                pass
+        elif self._cloud_gen.is_set():
             return False, "云端出片正占用浏览器：先等这一段跑完"
         with self._cloud_lock:
             if self.st.get("cloud_busy"):
@@ -3168,11 +3220,14 @@ class App(WindowCtl):
         row = h["store"].create(name)
         aid = row["id"]
         h["store"].mark(aid, "pending", "等待登录")
-        # 新建档案要一块干净的登录页：共用浏览器里可能还留着上一个号的 cookie，
+        # 新建档案要一块干净的登录页：这只浏览器里可能还留着上一个号的 cookie，
         # 不清掉的话「新建登录」会直接看到旧号——保存下来就是重复的一份
-        ok, msg = self._cloud_run("打开登录页", lambda: h["host"].open_login({}, aid=aid))
+        ok, msg = self._cloud_run(
+            "打开登录页", lambda: h["browsers"].host_for(aid).open_login({}, aid=aid),
+            aid=aid)
         if ok:
-            self._log("☁️ 新建登录：%s（在浏览器里登录后点「保存」）" % row["name"])
+            self._log("☁️ 新建登录：%s（浏览器 %d · 登录后点「保存」）"
+                      % (row["name"], h["browsers"].slot(aid)))
         return {"ok": ok, "msg": msg, "account": row, "state": self.cloud_state()}
 
     def cloud_login(self, aid=""):
@@ -3183,9 +3238,9 @@ class App(WindowCtl):
         h["store"].mark(aid, "pending", "等待登录")
 
         def job():
-            h["host"].open_login(state, aid=aid)
+            h["browsers"].host_for(aid).open_login(state, aid=aid)
             self.st["cloud_msg"] = "登录完点「保存」；以后换号不用再登"
-        ok, msg = self._cloud_run("打开登录页", job)
+        ok, msg = self._cloud_run("打开登录页", job, aid=aid)
         return {"ok": ok, "msg": msg}
 
     def cloud_save(self, aid="", name=""):
@@ -3196,23 +3251,24 @@ class App(WindowCtl):
 
         def job():
             from cloudkit.browser import login_state
+            host = h["browsers"].host_for(aid)
             # 整段一次取锁：读快照和判登录态必须是同一个号的同一次状态，
             # 分两次取锁的话中间正好能插进一次保活换号
-            with h["host"].lock:
-                snap = h["host"].snapshot()
+            with host.lock:
+                snap = host.snapshot()
                 if not snap.get("cookies"):
                     raise RuntimeError("没读到登录态：先在浏览器里登录，再点保存")
                 ts = h["store"].save(aid, snap["cookies"], snap["storage"], snap["url"])
-                st, detail = login_state(h["host"].tab())
+                st, detail = login_state(host.tab())
                 h["store"].mark(aid, st, detail)
-                h["host"].purpose = ""   # 登录流程收尾，保活可以接着轮换
+                host.purpose = ""       # 登录流程收尾，保活可以接着轮换
             if name:
                 h["store"].rename(aid, name)
             n = len(h["store"].backups(aid))
             self.st["cloud_msg"] = "已保存 %s · 共 %d 份备份" % (row["name"], n)
             self._log("☁️ 登录态已保存：%s（%d 份）" % (row["name"], n))
             return ts
-        ok, msg = self._cloud_run("保存登录态", job)
+        ok, msg = self._cloud_run("保存登录态", job, aid=aid)
         return {"ok": ok, "msg": msg}
 
     def cloud_apply(self, aid=""):
@@ -3223,9 +3279,13 @@ class App(WindowCtl):
         state = h["store"].load(aid)
         if not state or not state.get("cookies"):
             return {"ok": False, "msg": "这个号还没保存登录态"}
-        ok, msg = self._cloud_run("切换账号", lambda: h["host"].open_base(state, aid=aid, hold=True))
+        host = h["browsers"].host_for(aid)
+        ok, msg = self._cloud_run("切换账号",
+                                  lambda: host.open_base(state, aid=aid, hold=True),
+                                  aid=aid)
         if ok:
-            self._log("☁️ 切换到账号：%s" % row["name"])
+            self._log("☁️ 切换到账号：%s（浏览器 %d）"
+                      % (row["name"], h["browsers"].slot(aid)))
         return {"ok": ok, "msg": msg}
 
     def cloud_check(self, aid=""):
@@ -3235,30 +3295,38 @@ class App(WindowCtl):
 
         def job():
             from cloudkit.browser import cookie_fp, login_state, snapshot_state
+            host = h["browsers"].host_for(aid)
             state = h["store"].load(aid)
-            with h["host"].lock:
+            with host.lock:
                 # hold=True：这一段里保活不许插进来换号，否则检查的是别人的会话、
                 # 结论却记在这个号头上
-                h["host"].open_base(state, aid=aid, hold=True)
-                tab = h["host"].tab()
+                host.open_base(state, aid=aid, hold=True)
+                tab = host.tab()
                 st, detail = login_state(tab)
-                snap = snapshot_state(tab, h["host"].domains)
-                h["host"].purpose = ""
+                snap = snapshot_state(tab, host.domains)
+                host.purpose = ""
             # 没变就不写：反复点「检查」不该把 12 份备份挤成同一分钟的 12 份
             if snap.get("cookies") and cookie_fp(snap["cookies"]) != cookie_fp((state or {}).get("cookies")):
                 h["store"].save(aid, snap["cookies"], snap["storage"], snap["url"])
             h["store"].mark(aid, st, detail)
             self.st["cloud_msg"] = "%s：%s" % (row["name"], detail)
-        ok, msg = self._cloud_run("检查登录", job)
+        ok, msg = self._cloud_run("检查登录", job, aid=aid)
         return {"ok": ok, "msg": msg}
 
     def cloud_delete(self, aid=""):
         h, row = self._cloud_acct(aid)
         if not row:
             return {"ok": False, "msg": "账号不存在"}
-        if h["host"].current == aid:
-            h["host"].current = ""
+        if self._cloud_gen.is_set():
+            # 删号会让后面的号位往前挪，正在跑的那只窗口会被当成「号位变了」收掉
+            return {"ok": False, "msg": "云端在出片：出完再删，免得号位一挪把正在跑的窗口换掉"}
+        if h["browsers"].slot(aid) <= 1:
+            if h["host"].current == aid:
+                h["host"].current = ""
+        else:
+            h["browsers"].close(aid)     # 这个号的独立窗口跟着一起收，别留个空壳
         h["store"].delete(aid)
+        h["browsers"].reconcile()        # 后面的号顺延：原号位的窗口收掉，改走新号位
         self._log("☁️ 已删除账号：%s" % row["name"])
         return {"ok": True, "state": self.cloud_state()}
 
@@ -3298,9 +3366,9 @@ class App(WindowCtl):
 
         def job():
             h["store"].mark(aid, "saved", "从备份恢复")
-            h["host"].open_base(state, aid=aid)
+            h["browsers"].host_for(aid).open_base(state, aid=aid)
             self.st["cloud_msg"] = "%s 已恢复到 %s" % (row["name"], ts)
-        ok, msg = self._cloud_run("恢复备份", job)
+        ok, msg = self._cloud_run("恢复备份", job, aid=aid)
         return {"ok": ok, "msg": msg}
 
     def cloud_key_set(self, aid="", key=""):
@@ -3324,8 +3392,8 @@ class App(WindowCtl):
         if not self._dp_ready():
             return {"ok": False, "msg": "缺 DrissionPage：到「环境管理 → 基础」补齐后重开这页"}
         h = self._cloudkit()
-        if not h["host"].alive():
-            return {"ok": False, "msg": "浏览器还没开：先点「打开平台」"}
+        if not any(b["on"] for b in h["browsers"].state()):
+            return {"ok": False, "msg": "浏览器还没开：先点「打开全部」"}
         ok, msg = self._cloud_run("保活", lambda: h["keep"].sweep(force=True))
         return {"ok": ok, "msg": msg}
 
@@ -3335,8 +3403,20 @@ class App(WindowCtl):
         h = self._cloudkit()
 
         def job():
-            h["host"].browser()
-            self.st["cloud_msg"] = "浏览器已启动（共用调试端口 %d）" % h["host"].port
+            opened = []
+            for a in h["store"].list():
+                state = h["store"].load(a["id"])
+                if not state or not state.get("cookies"):
+                    continue
+                # 每个号回自己那只窗口：2 号开的是第二只浏览器，不去顶别人的号
+                host = h["browsers"].host_for(a["id"])
+                host.open_base(state, aid=a["id"])
+                opened.append("浏览器 %d（%d）" % (h["browsers"].slot(a["id"]), host.port))
+            if not opened:
+                # 一个号都没登录过：先开主窗口停在平台首页，登录入口还留着
+                h["host"].open_base({})
+                opened.append("浏览器 1（%d）" % h["host"].port)
+            self.st["cloud_msg"] = "已打开：" + "、".join(opened)
         ok, msg = self._cloud_run("启动浏览器", job)
         return {"ok": ok, "msg": msg}
 
@@ -3344,8 +3424,8 @@ class App(WindowCtl):
         h = self._cloudkit()
 
         def job():
-            h["host"].close()
-            self.st["cloud_msg"] = "浏览器已关闭"
+            h["browsers"].close_all()
+            self.st["cloud_msg"] = "浏览器已全部关闭"
         ok, msg = self._cloud_run("关闭浏览器", job)
         return {"ok": ok, "msg": msg}
 
@@ -3354,7 +3434,8 @@ class App(WindowCtl):
         h, row = self._cloud_acct(aid)
         if not row:
             return {"ok": False, "msg": "账号不存在", "names": []}
-        return {"ok": True, "names": sorted(h["host"].headers(h["store"].load(aid)))}
+        return {"ok": True,
+                "names": sorted(h["browsers"].host_for(aid).headers(h["store"].load(aid)))}
 
     # ------------------------------------------------------------ js_api：API 服务
     def api_state(self):
