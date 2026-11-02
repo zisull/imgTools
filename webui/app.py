@@ -211,8 +211,10 @@ DEFAULT_CFG = {
     # exec=local 走本机 ComfyUI（占显存）；cloud 走 RunningHub 那份工作流（不占显存，要登录）
     # 两条通道共用上面这四个键：换通道只换「在哪跑」，不换「跑什么」
     # 尺寸只有一个来源＝size（WxH，界面那对 P 档×朝向落它）；老配置里的 tier/ratio 仍认，但不再写
+    # 参考图（refs）顺序即编号，描述里用 @1/@2 引用；单图时代只写 first，
+    # 旧配置与旧工程都还会折成 refs 的第一张。
     "video": {"prompt": "", "seconds": 5, "size": "1344x768", "cw": 1344, "ch": 768,
-              "first": "", "seed": -1, "exec": "local", "cloud_acct": ""},
+              "first": "", "refs": [], "seed": -1, "exec": "local", "cloud_acct": ""},
     "lib": {"cat": "person"},           # 生图页灵感行与词库全览共用的当前分类
     "api": {"enabled": False, "lan": False, "port": 8765,
             "token": "", "no_token": False,
@@ -231,10 +233,13 @@ DEFAULT_CFG = {
     # 成片：一段剧本 → N 个镜头 → 逐段出片 → 合成。
     # total=目标总秒数，shot=单镜秒数（只认 5/10/15），段数=round(total/shot)；
     # exec=cloud 走 RunningHub（不占显存），local 走本机 H3；mode=chain 用上一段尾帧接下一段，
-    # shot=每镜独立（靠同一张首帧/参考图保持身份）。first 只有云端必填。
+    # shot=每镜独立（靠参考图保持身份）。
+    # acct_mode=single 单号串行 / multi 多号并行（多号不接帧，固定参考图逐镜跑）；
+    # ref_mode=same 同一张 / seq 第 i 段第 i 张 / all 每段全带；refs 顺序即 @1/@2 的编号。
     "film": {"story": "", "total": 60, "shot": 15, "size": "768x1344", "cw": 768, "ch": 1344,
-             "exec": "cloud", "mode": "chain", "first": "", "style": "电影感写实",
-             "acct": "", "retry": 2, "seed": -1},
+             "exec": "cloud", "mode": "chain", "first": "", "refs": [],
+             "ref_mode": "same", "acct_mode": "single",
+             "style": "电影感写实", "acct": "", "retry": 2, "seed": -1},
     # 导航：分组套一页一个标签；组名两字作层级，页名 3~5 字说清这页干什么
     # 环境四页并成一页（页内子页切换），导航只留九页：创作五页 + 系统四页
     "nav": [
@@ -1660,6 +1665,22 @@ class App(WindowCtl):
         v.update(payload or {})
         if not str(v.get("prompt", "")).strip():
             return {"ok": False, "msg": "先写一句想要什么画面"}
+        raw = v.get("refs")
+        if isinstance(raw, str):
+            raw = [raw]
+        raw = [x for x in (raw or []) if str(x or "").strip()]
+        if not raw and v.get("first"):
+            raw = [v.get("first")]
+        # 同一张图选两次只占一个编号：和分镜那边的 norm_refs 同一套
+        raw = list(dict.fromkeys(str(x) for x in raw))
+        refs = [self._ref_path(str(x)) for x in raw]
+        lost = sum(1 for x in refs if not x)
+        if lost:
+            return {"ok": False, "msg": "有 %d 张参考图找不到了：重新选一遍" % lost}
+        if len(refs) > 4:
+            return {"ok": False, "msg": "参考图最多 4 张：现在给了 %d 张" % len(refs)}
+        v["refs"] = refs
+        v["first"] = refs[0] if refs else ""   # 本地通道与画廊回填仍只认第一张
         # 云端不碰本机权重与 ComfyUI，所以 h3 那个开关管不到它：只管本地那一路
         if str(v.get("exec") or "local") == "cloud":
             return self._video_cloud(v)
@@ -1683,6 +1704,8 @@ class App(WindowCtl):
         这里先把「跑不动」的话说完再占任务位：账号没登录、缺 DrissionPage、
         没工作流这三种情况各是一句话，让人知道差哪一步，而不是点了没反应。
         """
+        if not (v.get("refs") or []):
+            return {"ok": False, "msg": "云端按参考生成：先在「参考图」里选一张"}
         g = self._cloud_h3()
         if not self._dp_ready():
             return {"ok": False, "msg": "云端要浏览器：到「环境管理 → 基础」补齐 DrissionPage 后重开软件"}
@@ -1715,8 +1738,9 @@ class App(WindowCtl):
         if not self._launch("video", lambda: self._do_video_cloud(v), lane="cloud"):
             return {"ok": False, "msg": self._busy_msg("cloud")}
         w, h = self._h3_size(v, hi=self.H3_HI_CLOUD)
-        self._log("☁️ 云端出片：%ds · %dx%d · 号「%s」· 浏览器 %d · %s（按平台计费）"
-                  % (_to_int(v.get("seconds"), 5, 5, 15), w, h, row["name"],
+        refs = list(v.get("refs") or [])
+        self._log("☁️ 云端出片：%ds · %dx%d · 参考 %d 张 · 号「%s」· 浏览器 %d · %s（按平台计费）"
+                  % (_to_int(v.get("seconds"), 5, 5, 15), w, h, len(refs), row["name"],
                      self._cloudkit()["browsers"].slot(row["id"]),
                      ("本地 · " + os.path.basename(src)) if kind == "file" else wf))
         return {"ok": True, "total": 1, "exec": "cloud", "acct": row["name"]}
@@ -1732,6 +1756,7 @@ class App(WindowCtl):
             p = {"prompt": str(v.get("prompt") or ""),
                  "seconds": _to_int(v.get("seconds"), 5, 5, 15),
                  "width": w, "height": h,
+                 "refs": list(v.get("refs") or []),
                  "first": self._ref_path(v.get("first") or ""),
                  "acct": str(v.get("cloud_acct") or ""),
                  "wf": str(v.get("cloud_wf") or ""),
@@ -1943,6 +1968,9 @@ class App(WindowCtl):
         （Windows 的分隔符与相对路径的斜杠方向是两套）；文件真在才算有。
         """
         from filmkit import project as prj
+        # 每段实际带哪几张图：界面上直接标出来，省得用户猜 @n 指的是哪张。
+        # 接帧第 2 段起上一段尾帧会顶到 @1（顺序与 refs_for 一致）。
+        mode = str(proj.get("mode") or "")
         out = []
         for x in (proj.get("shots") or []):
             s = dict(x)
@@ -1950,6 +1978,20 @@ class App(WindowCtl):
             fr = prj.abs_path(d, s.get("frame") or "") if d else ""
             s["file_abs"] = f if f and os.path.isfile(f) else ""
             s["frame_abs"] = fr if fr and os.path.isfile(fr) else ""
+            try:
+                i = int(s.get("i") or 1)
+            except (TypeError, ValueError):
+                i = 1
+            # 编号按实际上传顺序标（尾帧顶到 @1），不写池里的下标
+            planned = prj.refs_for(proj, s, "_prev_")
+            if mode == "chain" and i > 1:
+                n = max(0, len(planned) - 1)
+                s["ref_note"] = ("@1尾帧" if n == 0 else
+                                 "@1尾帧 @2" if n == 1 else
+                                 "@1尾帧 @2..@%d" % (n + 1))
+            else:
+                s["ref_note"] = " ".join("@%d" % k
+                                         for k in range(1, len(planned) + 1))
             out.append(s)
         return out
 
@@ -1964,6 +2006,9 @@ class App(WindowCtl):
             "missing": sum(1 for x in shots if x.get("state") in ("fail", "skip")),
             "merge_ok": bool(proj.get("merge_ok", True)), "msg": "",
             "exec": str(proj.get("exec") or ""), "mode": str(proj.get("mode") or ""),
+            "acct_mode": str(proj.get("acct_mode") or "single"),
+            "ref_mode": str(proj.get("ref_mode") or "same"),
+            "refs": len(proj.get("refs") or []),
             "parallel": 0, "shots": shots,
         }
         v.update(kw)
@@ -1984,8 +2029,19 @@ class App(WindowCtl):
                      "这是 API 格式", "这份 JSON 里没有画布", "工作流连线",
                      "本地工作流文件读不了", "云端编辑器还没挂好")
 
+    def _ref_file(self, raw, base_dir=""):
+        """配置里的参考图折成绝对路径：工程内的相对路径按工程目录，其余按软件根。"""
+        raw = str(raw or "").strip()
+        if not raw:
+            return ""
+        if base_dir and not os.path.isabs(raw):
+            p = os.path.join(base_dir, *raw.replace("\\", "/").split("/"))
+            return p if os.path.isfile(p) else ""
+        return self._ref_path(raw)
+
     def _film_precheck(self, f, count, base_dir=""):
-        """开跑前把「一定跑不动」的话说完：通道、账号、工作流、首帧、ffmpeg。"""
+        """开跑前把「一定跑不动」的话说完：通道、账号、工作流、参考图、ffmpeg。"""
+        from filmkit import project as prj
         exec_ = "cloud" if str(f.get("exec")) == "cloud" else "local"
         hi = self.H3_HI_CLOUD if exec_ == "cloud" else self.H3_HI_LOCAL
         if f.get("width") and f.get("height"):
@@ -1993,18 +2049,40 @@ class App(WindowCtl):
         else:
             w, h = self._h3_size({"size": f.get("size"), "cw": f.get("cw"),
                                   "ch": f.get("ch")}, hi=hi)
-        raw_first = str(f.get("first") or "")
-        if base_dir and raw_first and not os.path.isabs(raw_first):
-            first = os.path.join(base_dir, *raw_first.replace("\\", "/").split("/"))
-            first = first if os.path.isfile(first) else ""
-        else:
-            first = self._ref_path(raw_first)
+        raw_refs = prj.norm_refs(f.get("refs"))
+        if not raw_refs:
+            raw_refs = prj.norm_refs(f.get("first"))
+        refs, lost = [], 0
+        for r in raw_refs:
+            p = self._ref_file(r, base_dir)
+            if p:
+                refs.append(p)
+            else:
+                lost += 1
+        ref_mode = str(f.get("ref_mode") or "same")
+        if ref_mode not in ("same", "seq", "all"):
+            ref_mode = "same"
+        acct_mode = "multi" if (exec_ == "cloud"
+                                and str(f.get("acct_mode")) == "multi") else "single"
+        mode = "chain" if str(f.get("mode")) == "chain" else "shot"
+        note = ""
+        # 接帧要等上一段尾帧，多号同时开工就落空了：直接按逐镜跑，并说一声
+        if acct_mode == "multi" and mode == "chain":
+            mode = "shot"
+            note = "多号并行不等尾帧，已按逐镜跑；要连贯就改单号接帧"
         acct = str(f.get("acct") or "")
         acct_id, acct_name = "", ""
         wf = str((self.cfg.get("cloud") or {}).get("workflow")
                  or f.get("workflow") or "")
         err = ""
-        if exec_ == "cloud":
+        if lost:
+            err = "有 %d 张参考图找不到了：重新选一遍再开" % lost
+        elif len(refs) > prj.MAX_REFS:
+            err = "参考图最多 %d 张：现在给了 %d 张" % (prj.MAX_REFS, len(refs))
+        if not err and exec_ == "cloud" and not refs:
+            err = ("云端这份工作流按参考生成：先在「参考图」里选图"
+                   "（本地通道可纯文字起步）")
+        if not err and exec_ == "cloud":
             if not self._dp_ready():
                 err = "云端要浏览器：到「环境管理 → 基础」补齐 DrissionPage 后重开软件"
             elif self._cloud_gen.is_set():
@@ -2025,6 +2103,9 @@ class App(WindowCtl):
                                                "「环境管理 → 云端账号」重新登录或换号")
                         raise RuntimeError("还没有可用的登录账号：到「环境管理 → 云端账号」"
                                            "新建登录并保存")
+                    if acct_mode == "multi" and len(rows) < 2:
+                        self._log("☁️ 只有 1 个可用号：多号模式会退化成串行，"
+                                  "再登一个号才跑得快")
                     if acct:
                         hit = next((a for a in rows if a["id"] == acct), None)
                         if hit:
@@ -2046,17 +2127,17 @@ class App(WindowCtl):
                                                " H3 工作流地址当兜底")
                     else:
                         g.wf_url(src)
-                    if not first:
-                        err = ("云端这份工作流按参考生成：先在「首帧」那格选一张图"
-                               "（本地通道可纯文字起步）")
                 except Exception as e:
                     err = str(e)
-        elif not self._env_on().get("h3"):
+        elif not err and not self._env_on().get("h3"):
             err = "H3 环境已关闭 · 到「环境管理 → H3」开启"
-        if not err and str(f.get("mode")) == "chain" and not self._ff():
+        if not err and mode == "chain" and not self._ff():
             err = ("接帧模式要 FFmpeg 抽尾帧：到「环境管理 → 基础」补上"
                    "「FFmpeg 静态包」（约 190 MB）")
-        return {"err": err, "exec": exec_, "width": w, "height": h, "first": first,
+        return {"err": err, "exec": exec_, "width": w, "height": h,
+                "refs": refs, "ref_mode": ref_mode, "acct_mode": acct_mode,
+                "mode": mode, "note": note,
+                "first": refs[0] if refs else "",
                 "acct": acct_id, "acct_name": acct_name, "wf": wf, "count": count}
 
     def _film_new(self, f, shots, title, chk):
@@ -2064,26 +2145,31 @@ class App(WindowCtl):
         out_dir = _abs_path(self.cfg["console"]["output_dir"])
         d = prj.new_dir(out_dir)
         proj = {
-            "ver": 1, "id": os.path.basename(d), "title": title or "未命名短剧",
+            "ver": 2, "id": os.path.basename(d), "title": title or "未命名短剧",
             "story": str(f.get("story") or ""), "exec": chk["exec"],
-            "mode": "chain" if str(f.get("mode")) == "chain" else "shot",
+            "mode": chk["mode"], "ref_mode": chk["ref_mode"],
+            "acct_mode": chk["acct_mode"],
             "shot_sec": _to_int(f.get("shot"), 15, 5, 15),
             "width": chk["width"], "height": chk["height"],
             "acct": chk["acct"], "acct_name": chk["acct_name"], "workflow": chk["wf"],
-            "style": str(f.get("style") or ""), "first": "",
+            "style": str(f.get("style") or ""), "first": "", "refs": [],
             "seed": _to_int(f.get("seed"), -1, -1, 10 ** 12),
             "retry": _to_int(f.get("retry"), 2, 0, 5),
             "shots": shots, "film": "", "merge_ok": True, "merge_missing": 0,
             "created": time.strftime("%Y-%m-%d %H:%M:%S"),
         }
-        first = chk["first"]
-        if first:
-            ext = os.path.splitext(first)[1].lower()
+        # 参考图复制进工程：工程可以整个搬走，编号与顺序原样保留
+        refs = []
+        for i, src in enumerate(chk.get("refs") or [], 1):
+            ext = os.path.splitext(src)[1].lower()
             if ext not in IMG_EXT:
                 ext = ".png"
-            dst = os.path.join(d, "first" + ext)
-            shutil.copy2(first, dst)
-            proj["first"] = prj.rel(d, dst)
+            dst = os.path.join(d, "refs", "%03d%s" % (i, ext))
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            shutil.copy2(src, dst)
+            refs.append(prj.rel(d, dst))
+        proj["refs"] = refs
+        proj["first"] = refs[0] if refs else ""
         prj.save(d, proj)
         return d, proj
 
@@ -2111,26 +2197,31 @@ class App(WindowCtl):
             return got
         return ""
 
-    def _film_one(self, d, proj, sh, first, worker=None):
+    def _film_one(self, d, proj, sh, refs, worker=None):
         from filmkit import project as prj
         out = prj.abs_path(d, prj.shot_file(sh["i"]))
         os.makedirs(os.path.dirname(out), exist_ok=True)
         w = _to_int(proj.get("width"), 768, 16, 8192)
         h = _to_int(proj.get("height"), 1344, 16, 8192)
         prompt = self._film_prompt(proj, sh)
+        refs = [prj.abs_path(d, r) if not os.path.isabs(str(r)) else str(r)
+                for r in (refs or [])]
+        refs = [r for r in refs if r and os.path.isfile(r)]
         if str(proj.get("exec")) == "cloud":
             # worker 是池里的一格（一个号一只浏览器）；没有就走主窗口那只（单条视频那条路）
             acct = str(worker.aid if worker is not None else (proj.get("acct") or ""))
             gen = worker.gen if worker is not None else self._cloud_h3()
             who = (" · " + worker.name) if worker is not None else ""
             p = {"prompt": prompt, "seconds": sh["seconds"], "width": w, "height": h,
-                 "first": first, "acct": acct,
+                 "refs": refs, "first": (refs[0] if refs else ""), "acct": acct,
                  "wf": str(proj.get("workflow") or ""), "out_dir": os.path.dirname(out)}
             got = gen.run(
                 p, on_progress=lambda m: self._film_step(
                     "第 %d 段%s · %s" % (sh["i"], who, m)),
                 should_stop=self._film_should_stop)
         else:
+            # 本机 H3 模板没有多图引用链路：只认第一张，多图留给云端
+            first = refs[0] if refs else ""
             mgr = self._get_moss()
             params = self._video_params({"prompt": prompt, "seconds": sh["seconds"],
                                          "size": "%dx%d" % (w, h)})
@@ -2187,8 +2278,11 @@ class App(WindowCtl):
 
     CLOUD_TRIES = 2         # 同一个号最多两次：第二次前重启那只浏览器
 
-    def _film_cloud_try(self, d, proj, sh, first, fs, worker, total):
-        """一个号跑一段：失败先重启浏览器再试一次。回 (ok, err, fatal)。"""
+    def _film_cloud_try(self, d, proj, sh, refs, fs, worker, total):
+        """一个号跑一段：失败先重启浏览器再试一次。回 (ok, err, fatal)。
+
+        参考图在这一段重试、换号之间保持不变——号只是执行资源，内容不能跟着换。
+        """
         from filmkit import project as prj
         last = ""
         for attempt in range(self.CLOUD_TRIES):
@@ -2196,11 +2290,11 @@ class App(WindowCtl):
                 return False, "已停止", False
             sh["acct_name"] = worker.name
             tail = "" if attempt == 0 else " · 重启浏览器重试"
-            self._log("🎬 第 %d 段 · %s%s：%d 秒 · 云端"
-                      % (sh["i"], worker.name, tail, sh["seconds"]))
+            self._log("🎬 第 %d 段 · %s%s：%d 秒 · 云端 · 参考 %d 张"
+                      % (sh["i"], worker.name, tail, sh["seconds"], len(refs)))
             t1 = time.time()
             try:
-                path = self._film_one(d, proj, sh, first, worker=worker)
+                path = self._film_one(d, proj, sh, refs, worker=worker)
                 sh["file"] = prj.rel(d, path)
                 sh["sec"] = round(time.time() - t1, 1)
                 return True, "", False
@@ -2241,10 +2335,10 @@ class App(WindowCtl):
             prj.save(d, proj)
 
     def _film_cloud_serial(self, d, proj, fs, t0, workers):
-        """接帧模式：参考图是上一段尾帧，只能一段一段来；失败时换号续跑。"""
+        """单号/接帧：一段一段来。接帧的第 2 段起参考图是上一段尾帧 + 固定参考图。"""
         from filmkit import project as prj
         total = len(proj["shots"])
-        last_ref = prj.abs_path(d, proj.get("first") or "")
+        last_ref = ""      # 第 1 段用固定参考池；尾帧只从第 2 段起接
         fail_run = 0
         for sh in proj["shots"]:
             if self._film_should_stop():
@@ -2261,9 +2355,12 @@ class App(WindowCtl):
             sh["state"] = "run"
             sh["err"] = ""
             fs["current"] = sh["i"]
+            refs = prj.refs_for(proj, sh, last_ref)
+            how = ("接帧串行" if str(proj.get("mode")) == "chain"
+                   else "单号串行 · 参考 %d 张" % len(refs))
             self._film_cloud_state(d, proj, fs, t0,
-                                   "第 %d/%d 段 · 云端串行（%d 个号待命）"
-                                   % (sh["i"], total, len(workers)))
+                                   "第 %d/%d 段 · 云端%s（%d 个号待命）"
+                                   % (sh["i"], total, how, len(workers)))
             tried, ok, fatal, last = set(), False, False, ""
             while not self._film_should_stop():
                 w = next((x for x in workers
@@ -2272,8 +2369,7 @@ class App(WindowCtl):
                     break
                 tried.add(w.aid)
                 w.busy = True
-                ok, last, fatal = self._film_cloud_try(
-                    d, proj, sh, last_ref, fs, w, total)
+                ok, last, fatal = self._film_cloud_try(d, proj, sh, refs, fs, w, total)
                 w.busy = False
                 if ok or fatal or self._film_should_stop():
                     break
@@ -2401,8 +2497,7 @@ class App(WindowCtl):
                                            "云端 %d 个号并行 · 已完成 %d/%d"
                                            % (cap, fs.get("done") or 0, total))
                     ok, last, fatal = self._film_cloud_try(
-                        d, proj, sh, prj.abs_path(d, proj.get("first") or ""),
-                        fs, w, total)
+                        d, proj, sh, prj.refs_for(proj, sh), fs, w, total)
                     if self._film_should_stop():
                         sh["state"] = "wait"
                         return
@@ -2480,7 +2575,7 @@ class App(WindowCtl):
         self._film_cloud_state(d, proj, fs, t0)
 
     def _film_cloud_run(self, d, proj, fs, t0):
-        """云端成片：接帧串行、逐镜并行；失败重启浏览器再试，二次失败换号。"""
+        """云端成片：单号串行（可接帧）、多号并行（逐镜）；失败重启浏览器再试，二次失败换号。"""
         pool = self._film_pool()
         rows = pool.accounts()
         if not rows:
@@ -2490,15 +2585,20 @@ class App(WindowCtl):
         if pref:
             rows.sort(key=lambda a: 0 if a["id"] == pref else 1)
         workers = pool.workers(rows)
+        single = str(proj.get("acct_mode") or "single") != "multi"
         if str(proj.get("mode")) == "chain":
-            self._log("☁️ 云端成片：接帧串行 · %d 个号待命（失败自动换号）"
-                      % len(workers))
+            self._log("☁️ 云端成片：接帧串行 · %d 张参考图 · %d 个号待命（失败自动换号）"
+                      % (len(proj.get("refs") or []), len(workers)))
+            self._film_cloud_serial(d, proj, fs, t0, workers)
+        elif single:
+            self._log("☁️ 云端成片：单号串行 · %d 张参考图 · %d 个号待命（失败自动换号）"
+                      % (len(proj.get("refs") or []), len(workers)))
             self._film_cloud_serial(d, proj, fs, t0, workers)
         else:
             cap = min(4, len(workers),
                       int((self.cfg.get("cloud") or {}).get("parallel") or 3))
-            self._log("☁️ 云端成片：逐镜并行 · %d 个号（最多同时 %d 个，每号一只浏览器）"
-                      % (len(workers), max(1, cap)))
+            self._log("☁️ 云端成片：多号并行 · %d 张参考图 · %d 个号（最多同时 %d 个）"
+                      % (len(proj.get("refs") or []), len(workers), max(1, cap)))
             self._film_cloud_parallel(d, proj, fs, t0, workers)
 
     def _film_run(self, d, proj):
@@ -2514,12 +2614,14 @@ class App(WindowCtl):
         cloud = str(proj.get("exec")) == "cloud"
         self._film_cloud = cloud
         fail_run = 0
-        last_ref = prj.abs_path(d, proj.get("first") or "")
+        last_ref = ""
         try:
             if cloud:
                 self._cloud_gen.set()
             else:
                 self._ensure_engine("moss")
+                if len(proj.get("refs") or []) > 1:
+                    self._log("· 本地 H3 只取第 1 张参考图；多图引用请走云端")
                 self._film_step("拉起 H3 引擎…")
                 mgr = self._get_moss()
                 if not mgr.alive():
@@ -2560,7 +2662,7 @@ class App(WindowCtl):
                 ok = False
                 last = ""
                 fatal = False
-                first = last_ref
+                refs = prj.refs_for(proj, sh, last_ref)
                 for attempt in range(retry + 1):
                     if self._film_should_stop():
                         break
@@ -2570,7 +2672,7 @@ class App(WindowCtl):
                         label, sh["seconds"], "云端" if cloud else "本地"))
                     t1 = time.time()
                     try:
-                        path = self._film_one(d, proj, sh, first)
+                        path = self._film_one(d, proj, sh, refs)
                         if not cloud and self._film_should_stop():
                             # 本地半路停下：这一段的文件可能是残的，丢掉重出，别当已完成
                             try:
@@ -2771,6 +2873,8 @@ class App(WindowCtl):
             if chk["err"]:
                 raise FilmError(chk["err"])
             d, proj = self._film_new(f, shots, title, chk)
+            if chk.get("note"):
+                self._log("· " + chk["note"])
         except Exception as e:
             self._release(lane)
             msg = str(e) if isinstance(e, FilmError) else self._ai_err(e)
@@ -2782,9 +2886,12 @@ class App(WindowCtl):
         self._film_dir = d
         self.st["film"] = self._film_view(proj, state="running", phase="出片",
                                           status="准备中…")
-        self._log("🎬 成片开跑：%s · %d 段 × %d 秒 · %s"
+        how = ("多号并行" if proj.get("acct_mode") == "multi"
+               else ("接帧" if proj.get("mode") == "chain" else "逐镜"))
+        self._log("🎬 成片开跑：%s · %d 段 × %d 秒 · %s · %s · 参考图 %d 张"
                   % (proj["title"], len(shots), shot,
-                     "云端" if chk["exec"] == "cloud" else "本地"))
+                     "云端" if chk["exec"] == "cloud" else "本地", how,
+                     len(proj.get("refs") or [])))
         self._thread = threading.Thread(target=self._film_run, args=(d, proj), daemon=True)
         self._thread.start()
         lo = len(shots) * (6 if chk["exec"] == "cloud" else 4)
@@ -2877,6 +2984,12 @@ class App(WindowCtl):
         chk = self._film_precheck(proj, len(proj["shots"]), base_dir=d)
         if chk["err"]:
             return {"ok": False, "msg": chk["err"]}
+        # 预检可能把「多号 + 接帧」降成逐镜：落回工程，续跑才不会再走串行
+        proj["mode"] = chk["mode"]
+        proj["ref_mode"] = chk["ref_mode"]
+        proj["acct_mode"] = chk["acct_mode"]
+        if chk.get("note"):
+            self._log("· " + chk["note"])
         # 先占位、写好 view 再起线程：_film_run 第一句就读 st.film，
         # 反过来写的话线程可能先拿到旧的 idle 视图，之后又被这里覆盖，界面就不动了
         lane = "cloud" if str(proj.get("exec") or "local") == "cloud" else "gpu"

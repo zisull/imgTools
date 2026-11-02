@@ -489,7 +489,7 @@ def test_write_selfcheck():
                        "subfolder": "", "storage": "input", "audio_trim": ""}]}
     good = {"mode": "reference", "fps": 24, "seconds": 5, "resolution": "480P",
             "media": 1, "slots": 1, "gallery": 1,
-            "media0": {"filename": "new.png", "storage": "input"},
+            "media0": {"filename": "new.png", "ordinal": 1, "storage": "input"},
             "prompt": spec["prompt"]}
 
     def gen(check, bad=None, editor=True):
@@ -498,9 +498,9 @@ def test_write_selfcheck():
             {"bad": bad or [], "check": check, "editor": editor})
         return g
 
-    def run(check, **kw):
+    def run(check, spec_=None, **kw):
         g = gen(check, **kw)
-        return g._write(None, "f", {"main": 389, "out": 325}, spec, 5, size, True)
+        return g._write(None, "f", {"main": 389, "out": 325}, spec_ or spec, 5, size)
 
     assert run(dict(good))                       # 全对：不该抛
     for label, bad in (
@@ -525,7 +525,33 @@ def test_write_selfcheck():
             assert str(e), label
         else:
             raise AssertionError("自检没拦住：%s" % label)
+
+    # 多图：逐条比对文件名/序号，且 @编号必须真变成 chip
+    spec2 = {"prompt": "@1 和 @2", "chips": 2,
+             "media": [{"filename": "a.png", "ordinal": 1, "storage": "input"},
+                       {"filename": "b.png", "ordinal": 2, "storage": "input"}]}
+    good2 = {"mode": "reference", "fps": 24, "seconds": 5, "resolution": "480P",
+             "media": 2, "slots": 2, "gallery": 2, "chips": 2, "prompt": "",
+             "mediaAll": [{"filename": "a.png", "ordinal": 1, "storage": "input"},
+                          {"filename": "b.png", "ordinal": 2, "storage": "input"}]}
+    assert run(dict(good2), spec2)
+    for label, bad in (
+        ("第二张还是旧图", dict(good2, mediaAll=[
+            good2["mediaAll"][0],
+            {"filename": "old.png", "ordinal": 2, "storage": "input"}])),
+        ("序号不连续", dict(good2, mediaAll=[
+            good2["mediaAll"][0],
+            {"filename": "b.png", "ordinal": 3, "storage": "input"}])),
+        ("chip 少了", dict(good2, chips=1)),
+    ):
+        try:
+            run(dict(bad), spec2)
+        except cg.CloudError as e:
+            assert str(e), label
+        else:
+            raise AssertionError("多图自检没拦住：%s" % label)
     print("  ✓ 提交前自检：缺证据即失败，槽位/媒体/提示词/档位/fps/时长/模式逐项拦得住")
+    print("  ✓ 多图自检：逐张比对文件名/序号，chip 少了当场停")
 
 
 def test_media_item():
@@ -541,7 +567,41 @@ def test_media_item():
         "media_type": "image", "ordinal": 1, "filename": "a.png",
         "subfolder": "", "storage": "input", "audio_trim": ""}
     assert g.media_item("a.png", "sub")["subfolder"] == "sub"
-    print("  ✓ 媒体条目：storage=input、audio_trim 空、字段不随旧模板漂")
+    assert g.media_item("b.png", "", 3)["ordinal"] == 3
+    print("  ✓ 媒体条目：storage=input、audio_trim 空、序号连续、字段不随旧模板漂")
+
+
+def test_mention():
+    """编号引用必须是 chip DOM：纯文本 @1 在编辑器序列化时只是普通文字。"""
+    from cloudkit import mention as mn
+    media = [
+        {"ordinal": 1, "filename": "a.png"},
+        {"ordinal": 2, "filename": "b c.png"},
+    ]
+    assert mn.normalize("@图1 和 [2] 还有 @3") == "@1 和 @2 还有 @3"
+    assert mn.ref_numbers("@1 @2") == [1, 2]
+    try:
+        mn.ref_numbers("@3", 2)
+        out = False
+    except ValueError:
+        out = True
+    assert out, "越界编号必须报错"
+    assert mn.render_prompt("一只猫", media[:1]) == (None, 0), "单图无编号走纯文本老路"
+    html, n = mn.render_prompt("一只猫", media)
+    assert n == 2 and html.count('class="h3-mention-chip"') == 2, (n, html[:80])
+    html, n = mn.render_prompt("@2 走到门口", media)
+    assert n == 1 and 'data-ordinal="2"' in html and "@图2" in html, html[:120]
+    assert 'data-token="@Image2"' in html and 'data-tag="&lt;Picture 2&gt;"' in html
+    assert "src=\"/view?filename=b c.png&amp;type=input\"" in html, html[:200]
+    html, n = mn.render_prompt("@2 <b>别当真</b>", media)
+    assert "&lt;b&gt;别当真&lt;/b&gt;" in html, html
+    try:
+        mn.render_prompt("@3", media)
+        out = False
+    except ValueError:
+        out = True
+    assert out, "引用没有的那张必须报错"
+    print("  ✓ 编号引用：@1/@图2/[1] 三种写法 → chip，多图自动补号，越界当场报错")
 
 
 def test_platform_state():
@@ -883,6 +943,7 @@ def main():
         test_load_local_wf,
         test_write_selfcheck,
         test_media_item,
+        test_mention,
         test_platform_state,
         test_browser_selfheal,
         test_account_browsers,

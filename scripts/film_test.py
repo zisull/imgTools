@@ -57,6 +57,9 @@ class FakeAI:
     def has_key(self, cfg):
         return True
 
+    def _scrub(self, text, key=""):
+        return str(text)
+
 
 class FakeMgr:
     def alive(self):
@@ -147,6 +150,31 @@ def main():
        and [x["prompt"] for x in rows] == ["A", "B", "C"]
        and [x["seconds"] for x in rows] == [15, 5, 15],
        [x["seconds"] for x in rows])
+    rows2 = prj.norm_shots([{"prompt": "A", "refs": [2, "3", 0, 99, 2]}], 15)
+    ok("段级参考编号去重并夹在 1..4", rows2[0]["refs"] == [2, 3], rows2[0]["refs"])
+
+    # ---------------- 参考图池 / 编号 / 接帧插尾帧 ----------------
+    p = {"refs": ["refs/001.png", "refs/002.png", "refs/003.png"],
+         "mode": "shot", "ref_mode": "same"}
+    ok("project_refs 保留顺序", prj.project_refs(p) == p["refs"])
+    ok("旧工程只有 first 时折成一张",
+       prj.project_refs({"first": "a.png"}) == ["a.png"])
+    ok("同一张：每段都 @1", prj.refs_for(p, {"i": 2}) == ["refs/001.png"])
+    p["ref_mode"] = "seq"
+    ok("按序：第 2 段 @2", prj.refs_for(p, {"i": 2}) == ["refs/002.png"])
+    ok("按序：第 4 段绕回 @1", prj.refs_for(p, {"i": 4}) == ["refs/001.png"])
+    p["ref_mode"] = "all"
+    ok("全带：每段都带全池", prj.refs_for(p, {"i": 3}) == p["refs"])
+    ok("段级 refs 只在池里挑且去重",
+       prj.refs_for(p, {"i": 1, "refs": [3, 9, 3]}) == ["refs/003.png"])
+    p["mode"], p["ref_mode"] = "chain", "same"
+    ok("接帧第 1 段不塞尾帧",
+       prj.refs_for(p, {"i": 1}, "prev.jpg") == ["refs/001.png"])
+    ok("接帧第 2 段：尾帧排 @1",
+       prj.refs_for(p, {"i": 2}, "prev.jpg") == ["prev.jpg", "refs/001.png"])
+    p4 = {"refs": ["a", "b", "c", "d"], "mode": "chain", "ref_mode": "all"}
+    ok("接帧不超 4 张：尾帧占掉一个号位",
+       prj.refs_for(p4, {"i": 2}, "prev.jpg") == ["prev.jpg", "a", "b", "c"])
 
     # ---------------- film_plan ----------------
     real_ai = a._ai
@@ -190,7 +218,9 @@ def main():
     _pre = a._film_precheck
     a._film_precheck = lambda f, count, base_dir="": {
         "err": "", "exec": "local", "width": 160, "height": 288,
-        "first": "", "acct": "", "acct_name": "", "wf": "", "count": count}
+        "first": "", "acct": "", "acct_name": "", "wf": "", "count": count,
+        "refs": [], "ref_mode": "same", "acct_mode": "single", "note": "",
+        "mode": "chain" if str(f.get("mode")) == "chain" else "shot"}
 
     r = a.film_start({"shots": [{"prompt": "p%d" % i} for i in range(41)],
                       "story": "少女走进雨夜的旧书店，店主抬头，她认出了他。",
@@ -215,8 +245,8 @@ def main():
     fr1 = prj.abs_path(d, proj["shots"][0].get("frame") or "")
     ok("每段都抽了尾帧", os.path.isfile(fr1), fr1)
     ok("接帧：第 2 段拿第 1 段尾帧当参考",
-       len(made) == 3 and made[0][1] == "" and made[1][1] == fr1
-       and made[2][1] == prj.abs_path(d, proj["shots"][1].get("frame") or ""),
+       len(made) == 3 and made[0][1] == [] and made[1][1] == [fr1]
+       and made[2][1] == [prj.abs_path(d, proj["shots"][1].get("frame") or "")],
        made)
     ok("成片进画廊根目录并记账",
        any(x.get("film") for x in (a.film_list().get("items") or []))
@@ -240,7 +270,8 @@ def main():
     fr1b = prj.abs_path(d, proj["shots"][0].get("frame") or "")
     ok("续跑只重出第 2 段", [x[0] for x in made] == [2], made)
     ok("续跑接帧不退回工程首帧",
-       made and made[0][1] == fr1b and made[0][1] != prj.abs_path(d, proj.get("first") or ""),
+       made and made[0][1] == [fr1b]
+       and made[0][1] != [prj.abs_path(d, proj.get("first") or "")],
        made)
 
     # ---------------- 重出：逐镜只作废目标段，接帧连带下游 ----------------
@@ -311,7 +342,10 @@ def main():
 
     a._film_precheck = lambda f, count, base_dir="": {
         "err": "", "exec": "cloud", "width": 160, "height": 288,
-        "first": "", "acct": "", "acct_name": "自动分配", "wf": "", "count": count}
+        "first": "", "acct": "", "acct_name": "自动分配", "wf": "", "count": count,
+        "refs": [], "ref_mode": "same",
+        "acct_mode": "multi" if str(f.get("acct_mode")) == "multi" else "single",
+        "note": "", "mode": "chain" if str(f.get("mode")) == "chain" else "shot"}
 
     lock = threading.Lock()
     calls, firsts = {}, {}
@@ -334,14 +368,15 @@ def main():
 
     a._film_one = cloud_one
 
-    def cloud_start(pool, n, mode="shot"):
+    def cloud_start(pool, n, mode="shot", acct_mode="single"):
         calls.clear()
         firsts.clear()
         a._filmpool = pool
         return a.film_start({
             "shots": [{"prompt": "云端第 %d 段" % i} for i in range(1, n + 1)],
             "story": "少女走进雨夜的旧书店，店主抬头，她认出了他。",
-            "total": n * 15, "shot": 15, "exec": "cloud", "mode": mode})
+            "total": n * 15, "shot": 15, "exec": "cloud", "mode": mode,
+            "acct_mode": acct_mode})
 
     fail_ids.clear()
     fail_ids.add("A")
@@ -349,7 +384,7 @@ def main():
     slow_ids.clear()
     slow_ids.add("B")
     pool = FakePool([("A", "A号"), ("B", "B号")])
-    r = cloud_start(pool, 3)
+    r = cloud_start(pool, 3, acct_mode="multi")
     ok("云端逐镜：起得来", r.get("ok"), r.get("msg"))
     ok("云端逐镜：跑完并合成", wait_cloud(a, 90))
     fs = a.st.get("film") or {}
@@ -367,6 +402,24 @@ def main():
     ok("并行数按可用号算，跑完把池收干净",
        (+fs.get("parallel") or 0) == 2 and pool.closed == 1,
        (fs.get("parallel"), pool.closed))
+
+    # 多号逐镜：每段不带尾帧，两个号同时领活
+    fail_ids.clear()
+    slow_ids.clear()
+    pool = FakePool([("A", "A号"), ("B", "B号")])
+    r = cloud_start(pool, 4, acct_mode="multi")
+    ok("多号逐镜：起得来", r.get("ok") and r.get("exec") == "cloud", r.get("msg"))
+    ok("多号逐镜：跑完", wait_cloud(a, 90))
+    fs = a.st.get("film") or {}
+    proj = prj.load(a._film_dir)
+    used = set(aid for (aid, _i) in calls)
+    ok("多号逐镜：两个号都领到活、四段全成",
+       fs.get("state") == "done" and fs.get("done") == 4
+       and fs.get("parallel") == 2 and used == {"A", "B"}
+       and all(x.get("state") == "done" for x in proj["shots"]),
+       (fs.get("parallel"), sorted(used)))
+    ok("多号逐镜：每段都不等尾帧（参考里没有上一段画面）",
+       all(v == [] for v in firsts.values()), firsts)
 
     # 只有一个号且一直失败：不无限转，老实标失败
     fail_ids.clear()
@@ -412,7 +465,7 @@ def main():
     ok("接帧换号后尾帧仍接得上",
        fs.get("state") == "done" and fs.get("done") == 2
        and all(x.get("acct_name") == "B号" for x in proj["shots"])
-       and firsts.get(("B", 2)) == fr1, (firsts.get(("B", 2)), fr1))
+       and firsts.get(("B", 2)) == [fr1], (firsts.get(("B", 2)), fr1))
 
     # ---------------- film_state / 快照 ----------------
     a.film_resume = type(a).film_resume.__get__(a)   # 还原，给后面真续跑用

@@ -20,6 +20,8 @@ import os
 import re
 import time
 
+from . import mention
+
 WF_URL = "https://www.runninghub.cn/workflow/%s"
 # 本地导出的画布没有平台编号；借平台上的某一页进实例（换图不换实例）。
 # 这一页只是入口，跑的还是灌进去的那张图——和 H3yun 内置的宿主页同一个。
@@ -217,13 +219,24 @@ else bad.push('no:embedded_media_json');
 var text=spec.prompt||'';
 function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;')
   .replace(/>/g,'&gt;').replace(/\\n/g,'<br>');}
+var phtml=String(spec.prompt_html||'');
+var wantChips=parseInt(spec.chips||0,10)||0;
+function fire(el){try{el.dispatchEvent(new w.Event('input',{bubbles:true}));}catch(e){}
+  try{el.dispatchEvent(new w.Event('change',{bubbles:true}));}catch(e){}}
 var ed=d.querySelector('.comfy-multiline-input.h3-prompt-editor')||d.querySelector('.h3-prompt-editor');
 if(ed&&ed.isContentEditable===true){try{ed.focus();}catch(e){}
-  ed.innerHTML=esc(text);
-  try{ed.dispatchEvent(new w.Event('input',{bubbles:true}));}catch(e){}
-  try{ed.dispatchEvent(new w.Event('change',{bubbles:true}));}catch(e){}
-}else if(node.__h3Editor){node.__h3Editor.textContent=text;
-  try{node.__h3Editor.dispatchEvent(new w.Event('input',{bubbles:true}));}catch(e){}
+  ed.innerHTML=phtml||esc(text);
+  // 参考图超过一张时，编号必须以 chip 形式进去：直写 innerHTML 偶尔被编辑器
+  // 拆成纯文字，这时用 template 把节点整体搬一次，再核对 chip 数。
+  if(phtml&&wantChips>0&&ed.querySelectorAll('.h3-mention-chip').length===0){
+    try{var tpl=d.createElement('template');tpl.innerHTML=phtml;
+      ed.innerHTML='';ed.appendChild(tpl.content);}catch(e){}
+  }
+  fire(ed);
+}else if(node.__h3Editor){
+  if(phtml&&typeof node.__h3Editor.innerHTML==='string')node.__h3Editor.innerHTML=phtml;
+  else node.__h3Editor.textContent=text;
+  fire(node.__h3Editor);
 }else if(by.prompt){by.prompt.value=text;}else bad.push('no_prompt_slot');
 // 节点 JS 把「重画媒体画廊」挂在 mode 控件的 callback 上（syncModeWidgets + renderEmbeddedMediaGallery）。
 // 直接给 widget.value 赋值不会触发它——画廊就会停在灌图时那 8 张旧图上，自检也看不见新图。
@@ -239,11 +252,17 @@ function chkOf(inp){
   // 画廊里真填上的槽位：和序列化里的媒体一起看，两个都空才算「参考图没进去」
   var gal=0;try{gal=d.querySelectorAll('.fh-h3-media-slot.has-media').length;}catch(e){}
   var mj=[];try{mj=inp.embedded_media_json?JSON.parse(inp.embedded_media_json):[];}catch(e){}
+  // 多图时逐条核对：文件名/序号/storage 必须与刚上传的那一组一一对应，
+  // 只看 media0 会把「第一张对、后面几张还是旧图」放过去。
+  var mall=[];try{mall=(mj||[]).map(function(x){
+    return {filename:x.filename,ordinal:x.ordinal,storage:x.storage};});}catch(e){}
+  var chips=0;try{chips=d.querySelectorAll('.h3-mention-chip').length;}catch(e){}
   return {prompt:String(inp.prompt||'').slice(0,80),seconds:inp.seconds,fps:inp.fps,
           mode:inp.mode,resolution:inp.resolution,aspect:inp.aspect_ratio,
           width:inp.width,height:inp.height,
           media:(mj&&mj.length)||0,
           media0:(mj&&mj[0])||null,
+          mediaAll:mall,chips:chips,
           slots:nm,gallery:gal};
 }
 function pack(chk){return JSON.stringify({bad:bad,warn:warn,check:chk,editor:!!ed});}
@@ -658,10 +677,10 @@ class CloudH3:
         raise CloudError("浏览器窗口被关掉了：重开也没连上，再点一次开始")
 
     def run(self, p, on_progress=None, should_stop=None):
-        """p：{prompt, seconds, width, height, first, wf, acct}；回本地 mp4 路径。
+        """p：{prompt, seconds, width, height, refs, wf, acct}；回本地 mp4 路径。
 
-        顺序是「开页 → 抄形状 → 传图 → 写节点 → 提交 → 轮询 → 下载」：
-        先开页是因为媒体条目的字段形状要从线上那一条抄，抄完才谈得上写。
+        refs 是参考图列表，顺序即编号（第 1 张 = @1）。p["first"] 是老调用方的
+        单图写法，仍然认。不只一张时必须走 chip 引用，否则模型分不清谁是谁。
         """
         row = self.account(p.get("acct"))
         aid = row["id"]
@@ -669,7 +688,24 @@ class CloudH3:
         kind, src = self.wf_src(p.get("wf"))
         secs = max(5, min(15, int(p.get("seconds") or 5)))
         size = pick_size(int(p.get("width") or 768), int(p.get("height") or 768))
-        first = self._ref(str(p.get("first") or ""))
+        raw = p.get("refs")
+        if isinstance(raw, str):
+            raw = [raw]
+        raw = [x for x in (raw or []) if str(x or "").strip()]
+        if not raw and p.get("first"):
+            raw = [p.get("first")]
+        refs = [self._ref(str(x)) for x in raw]
+        lost = sum(1 for x in refs if not x)
+        if lost:
+            raise CloudError("有 %d 张参考图找不到了：先在界面上重新选一遍" % lost)
+        if not refs:
+            # 这份节点只有「图生/首尾帧」和「参考生视频」两种，没有纯文字模式。
+            # 不给图就交上去，平台会当场判「参考生视频未收到图片或视频」——先在这里说清。
+            raise CloudError("云端这份 H3 工作流按参考生成：先在「参考图」那格选图，"
+                             "纯文字它不接")
+        if len(refs) > mention.MAX_REFS:
+            raise CloudError("参考图最多 %d 张：现在给了 %d 张"
+                             % (mention.MAX_REFS, len(refs)))
         if kind == "file":
             url = self.host_url()
             if not url:
@@ -689,19 +725,22 @@ class CloudH3:
                     ids = self._wait_graph(tab, fid, should_stop)
                 self._wait_editor(tab, fid, should_stop)
                 self._log_shape(tab, fid, ids["main"])
+                self._p(on_progress, should_stop,
+                        "云端：上传参考图（%d 张）…" % len(refs))
                 media = []
-                if not first:
-                    # 这份节点只有「图生/首尾帧」和「参考生视频」两种，没有纯文字模式。
-                    # 不给图就交上去，平台会当场判「参考生视频未收到图片或视频」——先在这里说清。
-                    # 读不到 modeOpts 时也按「必须给图」处理：宁可拦下，也不花积分去换一句平台报错。
-                    raise CloudError("云端这份 H3 工作流按参考生成：先在「参考图」那格选一张图，"
-                                     "纯文字它不接")
-                if first:
-                    self._p(on_progress, should_stop, "云端：上传参考图…")
-                    fn, sub = self.upload(first, state)
-                    media = [self.media_item(fn, sub)]
+                for i, path in enumerate(refs, 1):
+                    fn, sub = self.upload(path, state)
+                    media.append(self.media_item(fn, sub, i))
+                try:
+                    prompt_html, chips = mention.render_prompt(
+                        str(p.get("prompt") or ""), media)
+                except ValueError as e:
+                    raise CloudError(str(e))
                 spec = {
                     "prompt": str(p.get("prompt") or ""),
+                    # 有 chip 时编辑器写 HTML；单图且没写编号时留空，走原来的纯文本通路
+                    "prompt_html": prompt_html or "",
+                    "chips": chips,
                     "media": media,
                     # 画廊预览：H3yun 每段都写这一份；少了它画廊不按新图刷新
                     "preview": {"shown": {"aspect_ratio": size["aspect_ratio"],
@@ -728,7 +767,7 @@ class CloudH3:
                     },
                 }
                 self._p(on_progress, should_stop, "云端：写入参数…")
-                self._write(tab, fid, ids, spec, secs, size, bool(media))
+                self._write(tab, fid, ids, spec, secs, size)
                 base_name = self._filename(tab, fid, ids["out"])
                 self._p(on_progress, should_stop, "云端：提交任务…")
                 hist0 = self.history_count(tab, fid)   # 提交前有几条，之后才知道多没多
@@ -822,18 +861,16 @@ class CloudH3:
         self.has_editor = bool(d.get("editor"))
         return d
 
-    def media_item(self, name, sub):
+    def media_item(self, name, sub, ordinal=1):
         """一条媒体引用，字段固定成 H3yun 实机验证过的那一份。
 
-        为什么不再从线上旧条目抄：`storage` 一旦抄成 "comfyui"、`audio_trim` 抄成非空串，
-        ensureEmbeddedMedia 虽然放行，落到执行节点那边却取不到文件，
-        最后整段被平台判「参考生视频未收到图片或视频」。上传口是 /upload/image + type=input，
-        所以 storage 只能是 "input"。
+        ordinal 从 1 递增，和提示词里的 @1/@2 一一对应；多图时必须连续，
+        否则 By index 会把编号对到别的图上。
         """
-        return {"media_type": "image", "ordinal": 1, "filename": name,
+        return {"media_type": "image", "ordinal": int(ordinal), "filename": name,
                 "subfolder": sub or "", "storage": "input", "audio_trim": ""}
 
-    def _write(self, tab, fid, ids, spec, secs, size, has_media):
+    def _write(self, tab, fid, ids, spec, secs, size):
         raw = self.js(tab, _JS_WRITE, fid, ids["main"], json.dumps(spec, ensure_ascii=False))
         try:
             d = json.loads(raw or "{}")
@@ -845,7 +882,9 @@ class CloudH3:
             self.log("· 控件提醒：%s" % str(x)[:80])
         bad = list(d.get("bad") or [])
         c = d.get("check") or {}
-        want_slots = 1 if has_media else 0
+        mine_media = list(spec.get("media") or [])
+        want_slots = len(mine_media)
+        want_chips = int(spec.get("chips") or 0)
         # 「读不到」不能算过关：以前这里每一项都写成 `not in (None, 期望值)`，
         # 于是自检只要整体失灵就全绿——而它确实失灵过一次（graphToPrompt 回的是 Promise）。
         if c.get("err") or c.get("mode") is None:
@@ -856,17 +895,31 @@ class CloudH3:
         want_mode = "reference"
         if c.get("mode") != want_mode:
             bad.append("mode=%s" % c.get("mode"))
-        # 序列化里的那条媒体必须就是我们刚传的：旧模板的 storage/文件名没换干净，
-        # 节点执行时照样会说「没收到参考」。
-        if has_media:
-            m0 = c.get("media0") if isinstance(c.get("media0"), dict) else {}
-            mine = (spec.get("media") or [{}])[0]
-            if m0 and str(m0.get("filename") or "") != str(mine.get("filename") or ""):
-                bad.append("媒体文件名没换成新图（%s）" % str(m0.get("filename") or "")[:24])
-            if m0 and str(m0.get("storage") or "input") != "input":
-                bad.append("媒体 storage=%s" % m0.get("storage"))
+        # 序列化里的媒体必须逐条对上刚上传的那一组：只比第一张会把
+        # 「后面几张还是旧模板的图」放过去，节点执行时照样串味。
+        if want_slots:
+            got = c.get("mediaAll") if isinstance(c.get("mediaAll"), list) else []
+            if not got:
+                m0 = c.get("media0") if isinstance(c.get("media0"), dict) else {}
+                got = [m0] if m0 else []
+            if len(got) != want_slots:
+                bad.append("序列化里 %d 条媒体（该 %d 条）" % (len(got), want_slots))
+            for i, mine in enumerate(mine_media[:len(got)]):
+                seen = got[i] if isinstance(got[i], dict) else {}
+                if str(seen.get("filename") or "") != str(mine.get("filename") or ""):
+                    bad.append("第 %d 张参考图没换成新图（%s）"
+                               % (i + 1, str(seen.get("filename") or "")[:24]))
+                try:
+                    seen_ord = int(seen.get("ordinal") or 0)
+                except (TypeError, ValueError):
+                    seen_ord = -1
+                if seen_ord != int(mine.get("ordinal") or 0):
+                    bad.append("第 %d 张 ordinal=%s（该 %s）"
+                               % (i + 1, seen.get("ordinal"), mine.get("ordinal")))
+                if str(seen.get("storage") or "input") != "input":
+                    bad.append("第 %d 张 storage=%s" % (i + 1, seen.get("storage")))
         # 画廊是节点自己的账本：序列化对了但画廊空着，说明节点没认这份媒体
-        if has_media and int(c.get("gallery") or 0) < want_slots:
+        if want_slots and int(c.get("gallery") or 0) < want_slots:
             for _ in range(8):
                 time.sleep(0.5)
                 try:
@@ -877,7 +930,13 @@ class CloudH3:
                     c["gallery"] = gal
                     break
             if int(c.get("gallery") or 0) < want_slots:
-                bad.append("画廊里没有参考图（节点没认这份媒体）")
+                bad.append("画廊里只有 %s 张参考图（该 %d 张）"
+                           % (c.get("gallery"), want_slots))
+        # 多图必须把编号以 chip 形式写进编辑器；chip 数只许多不许少。
+        # 少了说明编号被当普通文字，模型不知道第几张图是谁——这一段白跑。
+        if want_chips and int(c.get("chips") or 0) < want_chips:
+            bad.append("提示词里的 @编号没变成引用（chip %s 个，该 %d 个）"
+                       % (c.get("chips"), want_chips))
         if c.get("fps") not in (24, 24.0):
             bad.append("fps=%s（必须是 24，否则出的是 1 帧秒的片）" % c.get("fps"))
         if c.get("seconds") not in (secs, float(secs)):
@@ -892,11 +951,13 @@ class CloudH3:
             bad.append("参考图槽位 %s 个（只该 %s 个）：平台上的旧图没换干净"
                        % (c.get("slots"), want_slots))
         # 提示词这一条最要紧：编辑器没写进去的话，交上去的还是这份工作流原来那段话，
-        # 钱照扣、出的却是别人的片子——所以只认序列化里真出现了我们那句
-        want_text = str(spec.get("prompt") or "").strip()
-        got_text = str(c.get("prompt") or "").strip()
-        if want_text and want_text[:24] not in got_text:
-            bad.append("提示词没进去（序列化里开头是「%s」）" % got_text[:24])
+        # 钱照扣、出的却是别人的片子。有 chip 时序列化里是占位符，按 chip 数判；
+        # 纯文本（单图）仍按开头那段字比对。
+        if not want_chips:
+            want_text = str(spec.get("prompt") or "").strip()
+            got_text = str(c.get("prompt") or "").strip()
+            if want_text and want_text[:24] not in got_text:
+                bad.append("提示词没进去（序列化里开头是「%s」）" % got_text[:24])
         if bad:
             raise CloudError("提交前自检没过：%s" % "、".join(str(x)[:60] for x in bad[:6]))
         # 宽高只提醒不拦：真机量到的是「写进去就原样留着」，万一哪天节点自己又算了一遍，

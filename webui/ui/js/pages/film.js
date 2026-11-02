@@ -16,6 +16,11 @@ C.dimSnap['film.size']=function(p,o){
   const n=NATIVE[o+p];
   return n?{w:n[0],h:n[1]}:C.pDims(p,o);
 };
+/* 多号不能接帧：每段都要等上一段尾帧，并行就落空了。切到多号时顺手把接法收成逐镜，
+   免得界面写着「接帧」、开跑才被降级。 */
+C.segFit['film.acct_mode']=function(val,patch){
+  if(val==='multi')MIC.mset(patch,'film.mode','shot');
+};
 C.segFit['film.exec']=function(val,patch){
   const list=val==='cloud'?C.P_VIDEO_CLOUD:C.P_VIDEO;
   const m=/^(\d+)x(\d+)$/i.exec(String((patch.film||{}).size||''));
@@ -46,7 +51,13 @@ function wfNow(){
   return String(c.workflow||(brief&&brief.wf)||'').trim();
 }
 const isFile=()=>/\.(json|txt)$/i.test(wfNow());
-const firstNow=()=>String(((MIC.s.cfg||{}).film||{}).first||'').trim();
+const refsNow=()=>C.refsOf('film.refs');
+/* 多号只在云端生效；切回本地时接法按原来的看，别把「逐镜」当成用户的选择 */
+function acctMode(){
+  const f=MIC.s.cfg.film||{};
+  return String(f.exec)==='cloud'&&String(f.acct_mode)==='multi'?'multi':'single';
+}
+function effMode(){return acctMode()==='multi'?'shot':String(((MIC.s.cfg||{}).film||{}).mode||'');}
 /* 本地工作流先验结构：和视频页同一个桥，选完就能看出能不能跑 */
 let wfChk=null,wfChkKey='';
 function wfChkHTML(){
@@ -163,13 +174,16 @@ function filmHTML(fs){
       :st==='run'?'出片中':st==='fail'?'失败':st==='skip'?'跳过':'待出';
     const err=st==='fail'&&sh.err?' · '+sh.err:'';
     const who=sh.acct_name?' · '+sh.acct_name:'';
+    const rn=String(sh.ref_note||'');
     const src=sh.frame_abs?(thumbs[sh.frame_abs]||''):'';
     return `<div class="fshot ${st}"${ok?` onclick="MIC.film.openShot(${sh.i})"`:''}`+
-      ` title="${esc((ok?'打开第 '+sh.i+' 段':'第 '+sh.i+' 段 · '+lab)+who+err)}">`+
+      ` title="${esc((ok?'打开第 '+sh.i+' 段':'第 '+sh.i+' 段 · '+lab)+who+err+
+        (rn?' · 参考 '+rn:''))}">`+
       `<div class="fthumb">${sh.frame_abs?`<img${src?` src="${esc(src)}"`:''}`+
         ` data-thumb="${esc(sh.frame_abs)}" alt="">`:
         ic(st==='run'?'refresh':'image','s')}</div>`+
       `<span class="fno">${pad(sh.i)}</span>`+
+      (rn?`<span class="fref">${esc(rn)}</span>`:'')+
       `<span class="fstate ${ok?'ok':(st==='fail'?'er':'')}">${esc(lab+who)}</span>`+
       (ok||st==='fail'?`<button class="fre" title="重出第 ${sh.i} 段"`+
         ` onclick="event.stopPropagation();MIC.film.redo(${sh.i})">${ic('refresh','s')}</button>`:'')+
@@ -214,7 +228,8 @@ function liveSub(){
   const total=+f.total||60,shot=+f.shot||15;
   const n=Math.max(1,Math.min(40,Math.round(total/shot)));
   return (String(f.exec)==='cloud'?'云端':'本地')+' · '+n+' 段 × '+shot+' 秒 · '+
-    (String(f.mode)==='shot'?'逐镜':'接帧');
+    (acctMode()==='multi'?'多号并行'
+      :(String(f.mode)==='shot'?'逐镜':'接帧'));
 }
 function note(icon,text,btn){
   return `<div class="notebar">${ic(icon,'s')}<b>${esc(text)}</b>`+
@@ -228,7 +243,7 @@ function cloudProblem(){
       ? '可用的号都标成「出片失败」了：到「环境管理 → 云端账号」重新登录或换号'
       : '还没有可用的登录号：到「环境管理 → 云端账号」登录并保存';
   if(!wfNow())return '还差一份 H3 工作流：在下面那格填网页上跑通过的地址或本地 .json';
-  if(!firstNow())return '云端按参考生成：先选一张首帧图（本地可纯文字起步）';
+  if(!refsNow().length)return '云端按参考生成：先选一张参考图（本地可纯文字起步）';
   return '';
 }
 function acctSel(f){
@@ -254,6 +269,20 @@ function durChips(){
     `<button class="chip${cur===v?' on':''}" onclick="MIC.film.setDur(${v})">${l}</button>`
   ).join('')+'</div>';
 }
+/* 这一段会带哪几张图：和 refs_for 同一套规则，只是接帧的尾帧要等出片，先标成 @1 */
+function refHint(i){
+  const f=MIC.s.cfg.film||{},refs=C.refsOf('film.refs'),n=refs.length;
+  const rm=String(f.ref_mode||'same');
+  if(effMode()==='chain'&&i>1){
+    if(!n)return '@1=上一段尾帧';
+    const k=rm==='all'?Math.min(n,3):1;
+    return '@1=上一段尾帧'+(k>1?' · @2..@'+(k+1)+'=固定图':' · @2=固定图');
+  }
+  if(!n)return '';
+  if(rm==='seq')return '参考 @'+((i-1)%n+1);
+  if(rm==='all')return '参考 '+refs.map((_,k)=>'@'+(k+1)).join(' ');
+  return '参考 @1';
+}
 function planHTML(){
   if(!plan)return '';
   const rows=plan.shots.map((sh,i)=>
@@ -264,6 +293,7 @@ function planHTML(){
         <textarea class="inp" rows="2" data-shot="${i}"
           oninput="MIC.film.edit(${i},this.value)"
           placeholder="画面描述词">${esc(sh.prompt)}</textarea>
+        ${refHint(i+1)?`<div class="sref">${esc(refHint(i+1))}</div>`:''}
       </div>
       <div class="sact"><span class="mut fine">${+sh.seconds||shotSec()} 秒</span>
         <button class="btn sm gho" onclick="MIC.film.polish(${i})">${ic('wand','s')}润色</button>
@@ -335,18 +365,27 @@ MIC.registerPage('film',{
         C.field('风格',C.txt('film.style','电影感写实'),
           '会追加到每一段的描述后面；留空就不加')+
       '</div>'+
-      C.field(cloud?'首帧（必填）':'首帧（可选）',
-        C.pathrow('film.first',cloud?'选一张图：云端按参考生成，纯文字不接'
-          :'留空=纯文字起步；选一张=全片从这张图开始','file',false,{gal:true}),
-        cloud?'这一份 H3 工作流按参考生成：不填平台会判失败。第 2 段起会改用上一段尾帧'
-             :'接帧模式下全片从这张图开始；不给就用文字直接起第一段')+
+      C.field(cloud?'参考图（1~4 张）':'首帧（可选）',
+        C.refsRow('film.refs',4,
+          cloud?'点「加图」从画廊挑；描述里用 @1 @2 点名第几张'
+               :'本地只认第一张；多图参考走云端'),
+        cloud?'这份工作流按参考生成：不填平台会判失败。接帧时第 2 段起上一段尾帧排 @1，固定参考图顺延'
+             :'接帧模式下全片从第一张开始；不给就用文字直接起第一段')+
       (cloud?'<div class="grid3">'+
         C.field('账号',acctSel(f),'留默认＝按空闲号自动分配；一个号两次没出成会被标记并换号')+
-        wfRow(true)+
-      '</div>':'')+
+        C.field('账号模式',C.seg('film.acct_mode',[['single','单号'],['multi','多号']],true),
+          '多号=每段直接用同一组参考图，空闲号并行出；接帧要等尾帧，只能单号')+
+        C.field('参考',C.seg('film.ref_mode',[['same','同一张'],['seq','按序'],['all','全带']],true),
+          '同一张=每段都用第 1 张；按序=第 i 段用第 i 张轮换；全带=每段带上全部')+
+      '</div>'+wfRow(true):'')+
+      (cloud&&acctMode()==='multi'
+        ?'<div class="hint">多号并行按逐镜跑：每段不等上一段尾帧，画面不承接；要连贯就改单号接帧</div>'
+        :'')+
       C.fold('更专业','cog',
         '<div class="grid3">'+
-          C.field('接法',C.seg('film.mode',[['chain','接帧'],['shot','逐镜']]),
+          C.field('接法',acctMode()==='multi'
+              ?'<span class="mut fine">逐镜 · 多号并行不收尾帧</span>'
+              :C.seg('film.mode',[['chain','接帧'],['shot','逐镜']]),
             '接帧=每段拿上一段尾帧当参考，画面连贯（要 FFmpeg 抽帧）；'+
             '逐镜=每段各自成片，云端会按空闲号并行')+
           C.field('重试',C.num('film.retry','次'),
@@ -379,9 +418,11 @@ MIC.registerPage('film',{
     if(!s.ai_key)
       notes+=note('key','文本 API 未配置：拆分镜与润色用不了，手填分镜仍能出片',
         `<button class="btn sm pri" onclick="MIC.nav.goto('settings')">去设置</button>`);
-    if(String(f.mode)==='chain'&&!s.ffmpeg)
+    if(effMode()==='chain'&&!s.ffmpeg)
       notes+=note('tool','接帧要 FFmpeg 抽尾帧：补上「FFmpeg 静态包」，或把接法改成逐镜',
         `<button class="btn sm pri" onclick="MIC.env.focus('base')">去补齐</button>`);
+    if(!cloud&&refsNow().length>1)
+      notes+=note('image','本地只认第一张参考图：多图参考走云端', '');
     if(cloud&&brief){
       const p=cloudProblem();
       /* 缺依赖/缺号能跳到对应那一格；缺工作流或首帧图就在本页，不用把人支走 */
@@ -483,6 +524,7 @@ MIC.film={
     const f=Object.assign({},MIC.s.cfg.film||{},patch.film||{});
     const cloud=String(f.exec)==='cloud',c=MIC.s.st.cloud||{};
     if(cloud?c.run:MIC.s.st.running)return;
+    if(cloud&&!refsNow().length){MIC.toast('云端按参考生成：先选一张参考图');return;}
     if(cloud&&isFile()&&wfChk&&!wfChk.ok){MIC.toast(wfChk.msg||'这份工作流有问题');return;}
     const rows=this.shots();
     if(plan&&planStale()&&

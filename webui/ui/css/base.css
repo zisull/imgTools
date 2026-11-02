@@ -115,6 +115,29 @@ textarea.inp{height:auto;min-height:92px;padding:9px 11px;line-height:1.7;resize
 .inrow .inp{flex:1}
 .unit{font-size:12.5px;color:var(--fg3);white-space:nowrap}
 
+/* 多图参考：一排缩略图，编号就是描述里 @ 的号；加图格与缩略同高 */
+.refsbox{border:1px dashed var(--line2);border-radius:11px;padding:8px;width:100%;box-sizing:border-box;
+  transition:border-color .12s,background .12s}
+.refsbox.over{border-color:var(--ac);background:var(--ac-soft)}
+.refgrid{display:flex;gap:8px;flex-wrap:wrap}
+.refcell{position:relative;width:86px;height:86px;flex:none;border:1px solid var(--line2);
+  border-radius:10px;overflow:hidden;background:var(--track)}
+.refcell img{display:block;width:100%;height:100%;object-fit:cover}
+.refno{position:absolute;left:4px;bottom:4px;font:11px ui-monospace,Consolas,monospace;color:#fff;
+  background:rgba(0,0,0,.55);padding:0 5px;border-radius:5px}
+.refx{position:absolute;right:3px;top:3px;width:20px;height:20px;padding:0;border:0;border-radius:6px;
+  display:grid;place-items:center;background:rgba(0,0,0,.55);color:#fff;cursor:pointer;opacity:0;
+  transition:opacity .12s}
+.refcell:hover .refx{opacity:1}
+.refx:hover{background:var(--danger)}
+.refadd{width:86px;height:86px;flex:none;display:flex;flex-direction:column;align-items:center;
+  justify-content:center;gap:4px;border:1px dashed var(--line2);border-radius:10px;background:transparent;
+  color:var(--fg3);cursor:pointer;font-size:11.5px;transition:border-color .12s,color .12s}
+.refadd:hover{border-color:var(--ac);color:var(--ac)}
+.refadd .ic{width:18px;height:18px}
+.refbar{display:flex;align-items:center;gap:8px;margin-top:7px;flex-wrap:wrap}
+.refbar .grow{flex:1}
+
 .chk{display:inline-flex;align-items:center;gap:7px;font-size:13px;color:var(--fg2);cursor:pointer;
   user-select:none;height:var(--h-ctl);white-space:nowrap}
 .chk i{width:16px;height:16px;border-radius:5px;border:1.5px solid var(--line2);flex:none;

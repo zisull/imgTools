@@ -83,7 +83,7 @@ function askWfCheck(force){
     if(el)el.innerHTML=wfChkHTML();
   }).catch(e=>{wfChk={ok:false,msg:String(e&&e.message||e)};});
 }
-const firstNow=()=>String(((MIC.s.cfg||{}).video||{}).first||'').trim();
+const refsNow=()=>C.refsOf('video.refs');
 function cloudReady(){return !!brief&&brief.ready&&!!wfNow();}
 function acctName(v){
   const list=(brief&&brief.accts)||[];
@@ -107,7 +107,7 @@ function liveSub(){
     bits.push('云端',acctName(v));
     bits.push(c.run==='video'?'云端出片中 · 平台侧计时'
       :(c.run?'云端成片在跑 · 这段要等'
-        :(!cloudReady()?'差登录或工作流':(!firstNow()?'差参考图':'随时能跑'))));
+        :(!cloudReady()?'差登录或工作流':(!refsNow().length?'差参考图':'随时能跑'))));
     return bits.join(' · ');
   }
   bits.push('4 步');
@@ -155,10 +155,12 @@ MIC.registerPage('video',{
         C.field('宽（px）',C.num('video.cw','1344'),'自动贴到 16 的倍数')+
         C.field('高（px）',C.num('video.ch','768'),'自动贴到 16 的倍数')+
       '</div>':'')+
-      C.field(cloud?'参考图（必填）':'首帧',
-        C.pathrow('video.first',cloud?'选一张图：云端按参考生成，纯文字不接':'留空=文生视频 · 选一张图=从它开始动','file',false,{gal:true}),
-        cloud?'上传到这个号的平台 input 里当首帧/身份参考。这份 H3 工作流只有图生与参考生视频两种模式，不填平台会判失败'
-             :'想接着上一段拍就把那一帧存成图填进来')+
+      C.field(cloud?'参考图（1~4 张）':'首帧',
+        C.refsRow('video.refs',4,
+          cloud?'点「加图」从画廊挑；描述里用 @1 @2 点名第几张'
+               :'留空=文生视频；第一张就是首帧，多图只走云端'),
+        cloud?'上传到这个号平台的 input 里当身份/场景参考。这份 H3 工作流只有图生与参考生视频两种模式，不填平台会判失败'
+             :'想接着上一段拍就把那一帧存成图填进来；本地只认第一张')+
       (cloud?wfRow():'')+
       (cloud?'':C.field('种子',C.seedRow('video.seed'),'开着每次换一版；关掉固定种子可复现'))+
       MIC.runner.action('MIC.video.start()',{
@@ -182,7 +184,7 @@ MIC.registerPage('video',{
         :(cloud&&cloudBusy&&!ownRun
           ?`<div class="notebar">${ic('globe','s')}<b>云端成片在跑：本地这一路照常能用，云端要等它结束</b><span class="grow"></span>`+
             `<button class="btn sm" onclick="MIC.nav.goto('film')">去成片页</button></div>`
-          :(cloud&&brief&&(!cloudReady()||!firstNow())
+          :(cloud&&brief&&(!cloudReady()||!refsNow().length)
             ?`<div class="notebar">${ic('globe','s')}<b>${esc(cloudHint())}</b><span class="grow"></span>`+
               (cloudReady()?'':`<button class="btn sm pri" onclick="MIC.env.focus('cloud')">去处理</button>`)+
               `</div>`
@@ -220,7 +222,7 @@ function cloudHint(){
       ? '可用的号都标成「出片失败」了：到「环境管理 → 云端账号」重新登录或换号'
       : '还没有可用的登录号：到「环境管理 → 云端账号」新建登录并保存';
   if(!wfNow())return '还差一份工作流：在上面那格粘贴网页上跑通过的地址';
-  if(!firstNow())return '云端还差一张参考图：这份工作流按参考生成，纯文字平台会判失败';
+  if(!refsNow().length)return '云端还差一张参考图：这份工作流按参考生成，纯文字平台会判失败';
   return '云端还差一步';
 }
 
@@ -241,6 +243,7 @@ MIC.video={
     const cloud=String(v.exec)==='cloud',c=MIC.s.st.cloud||{};
     if(cloud?c.run:MIC.s.st.running)return;
     if(!String(v.prompt||'').trim()){MIC.toast('先写一句想要什么画面');return;}
+    if(cloud&&!refsNow().length){MIC.toast('云端按参考生成：先选一张参考图');return;}
     if(cloud&&isFile()&&wfChk&&!wfChk.ok){MIC.toast(wfChk.msg||'这份工作流有问题');return;}
     firing=true;
     MIC.api.videoGen(v).then(r=>{

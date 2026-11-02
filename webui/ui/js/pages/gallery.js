@@ -174,12 +174,12 @@ MIC.gal={
         :'参数已回填到「'+where+'」');
     }).catch(()=>MIC.toast('回填失败'));
   },
-  /* 送到视频页当参考图（本地那一路叫首帧）：写进 video.first 再跳过去，照常「开始」。
+  /* 送到视频页当参考图（本地那一路叫首帧）：列表替换成这一张，first 同步，照常「开始」。
      只认图片：成片本身就是 mp4，参考图得先截一张出来。 */
   toVideo(i){
     const it=at(i);
     if(!it||isVid(it)){MIC.toast('成片不能当参考图，先截一张图');return;}
-    MIC.form.commitMany({'video.first':it.file});
+    MIC.form.commitMany({'video.refs':[it.file],'video.first':it.file});
     MIC.nav.goto('video');
     MIC.toast('已设为视频参考图 · 写一句描述就能开拍');
   },

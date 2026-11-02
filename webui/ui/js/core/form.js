@@ -121,6 +121,87 @@ function pathrow(k,ph,pickKind,rr,opts){
     ${o.gal?`<button class="btn" onclick="MIC.picker.open('${k}')">${ic('image','s')}画廊</button>`:''}
     <button class="btn" onclick="MIC.form.pickInto('${k}','${pickKind}')">浏览</button></div>`;
 }
+/* ---------- 多图参考 ----------
+   云端 H3 按参考生成，一份工作流最多吃 4 张图；描述里用 @1 @2 点名第几张。
+   列表不挂 data-k（数组控件写回要走整表替换），变化时一次性写 refs + first：
+   first 保留给本地通道、画廊回填和旧版本读，永远是列表里的第一张。 */
+const REF_MAX=4;
+const refCache={};
+function refsOf(k){
+  const v=MIC.mget(MIC.s.cfg,k);
+  let list=Array.isArray(v)?v:(typeof v==='string'&&v.trim()?[v]:[]);
+  list=list.map(x=>String(x||'').trim()).filter(Boolean);
+  if(!list.length){
+    const first=String(MIC.mget(MIC.s.cfg,k.replace(/\.refs$/,'.first'))||'').trim();
+    if(first)list=[first];
+  }
+  return list;
+}
+function refsSet(k,list){
+  /* 先收下这一屏正在编辑的文字：写回后会整页重画，没 blur 的输入会被画回旧值 */
+  const patch=read();
+  MIC.mset(patch,k,list);
+  const firstKey=k.replace(/\.refs$/,'.first');
+  if(firstKey!==k)MIC.mset(patch,firstKey,list[0]||'');
+  merge(patch);saved(patch);MIC.render();
+}
+function refsAdd(k,p){
+  p=String(p||'').trim();if(!p)return;
+  if(!/\.(png|jpe?g|webp)$/i.test(p)){MIC.toast('参考图只认 png / jpg / webp');return;}
+  const list=refsOf(k);
+  if(list.indexOf(p)>=0){MIC.toast('这张已经在参考里了');return;}
+  if(list.length>=REF_MAX){MIC.toast('参考图最多 '+REF_MAX+' 张');return;}
+  list.push(p);refsSet(k,list);
+}
+function refsDropOne(k,i){
+  const list=refsOf(k);
+  if(i<0||i>=list.length)return;
+  list.splice(i,1);refsSet(k,list);
+}
+function refsPick(k,how){
+  if(refsOf(k).length>=REF_MAX){MIC.toast('参考图最多 '+REF_MAX+' 张');return;}
+  if(how==='file'){
+    MIC.api.pick('file').then(p=>{if(p)refsAdd(k,p);}).catch(()=>{});
+    return;
+  }
+  MIC.picker.open(k,p=>refsAdd(k,p));
+}
+function refsHydrate(){
+  document.querySelectorAll('#view img[data-refthumb]').forEach(im=>{
+    const p=im.dataset.refthumb;if(!p||im.getAttribute('src'))return;
+    if(refCache[p]){im.src=refCache[p];return;}
+    if(im.dataset.want)return;
+    im.dataset.want='1';
+    MIC.api.thumb(p,256).then(r=>{
+      if(!r||!r.ok||!r.url)return;
+      refCache[p]=r.url;
+      if(im.isConnected)im.src=r.url;
+    }).catch(()=>{});
+  });
+}
+/* max 只是给提示文案用，真正上限固定 4：后端的媒体槽与编号引用都是按 4 张做的 */
+function refsRow(k,max,hint){
+  const list=refsOf(k),cap=Math.min(REF_MAX,Math.max(1,parseInt(max,10)||REF_MAX));
+  const cells=list.map((p,i)=>
+    `<div class="refcell" title="${esc(p)}">
+      <img data-refthumb="${esc(p)}" alt="">
+      <span class="refno">@${i+1}</span>
+      <button type="button" class="refx" title="移除这张"
+        onclick="MIC.form.refsDropOne('${esc(k)}',${i})">${ic('close','s')}</button>
+    </div>`).join('');
+  const add=list.length<cap
+    ?`<button type="button" class="refadd" onclick="MIC.form.refsPick('${esc(k)}','gal')">
+        ${ic('plus')}<span>加图</span></button>`:'';
+  setTimeout(refsHydrate,0);
+  return `<div class="refsbox" data-refs="${esc(k)}">
+    <div class="refgrid">${cells}${add}</div>
+    <div class="refbar">
+      <span class="mut fine">${hint||('最多 '+cap+' 张 · 描述里用 @1 @2 点名')}</span>
+      <span class="grow"></span>
+      ${list.length?`<span class="mut fine">${list.length}/${cap}</span>`:''}
+      <button class="btn sm gho" onclick="MIC.form.refsPick('${esc(k)}','file')">${ic('folder','s')}从文件夹选</button>
+    </div></div>`;
+}
 /* 尺寸/画幅下拉：三个出图页各有一份档位表，构件只有一个 sizeSel，
    档位表由各页给（两台模型的可用尺寸本来就不一样）。
    rr=true：选「自定义」要当场多出宽高输入框，选完重画一次。 */
@@ -398,7 +479,9 @@ function dropCands(dt){
   return clean(full).concat(clean(names)).slice(0,8);
 }
 function zones(keep){
-  document.querySelectorAll('.dropz.over').forEach(x=>{if(x!==keep)x.classList.remove('over');});
+  document.querySelectorAll('.dropz.over,[data-refs].over').forEach(x=>{
+    if(x!==keep)x.classList.remove('over');
+  });
 }
 /* 拖放统一出口：先按路径解析；WebView2 只给得出文件名时（拿不到完整路径），
    把字节读成 dataURL 交后端代收落盘，别让「拖了没反应」变成死路。 */
@@ -421,7 +504,7 @@ function resolveDrop(dt,kind){
 document.addEventListener('dragover',e=>{
   if(!e.dataTransfer)return;
   e.preventDefault();
-  const z=e.target.closest?e.target.closest('.dropz'):null;
+  const z=e.target.closest?e.target.closest('.dropz,[data-refs]'):null;
   zones(z);
   if(z)z.classList.add('over');
 });
@@ -429,12 +512,14 @@ document.addEventListener('dragend',()=>zones());
 document.addEventListener('drop',e=>{
   if(!e.dataTransfer)return;
   e.preventDefault();
-  const z=e.target.closest?e.target.closest('.dropz'):null;
+  const z=e.target.closest?e.target.closest('.dropz,[data-refs]'):null;
   zones();
   if(!z)return;
-  const k=z.dataset.into;
+  const refK=z.dataset.refs;
   resolveDrop(e.dataTransfer,z.dataset.drop||'file').then(r=>{
     if(!r||!r.ok){MIC.toast((r&&r.msg)||'没能识别这个文件');return;}
+    if(refK){refsAdd(refK,r.path);return;}
+    const k=z.dataset.into;
     const el=document.querySelector(`#view [data-k="${k}"]`);if(el)el.value=r.path;
     commitPath(k,r.path);
     rrRepaint(el);
@@ -442,7 +527,7 @@ document.addEventListener('drop',e=>{
   }).catch(err=>MIC.toast('识别失败：'+(err&&err.message||err)));
 });
 
-MIC.form={field,card,fold,foldcard,runstat,strow,duo,txt,ta,num,seedRow,sel,chk,sw,seg,pathrow,sizeSel,pSizeSel,lock,read,commit,commitPath,commitMany,pickInto,
+MIC.form={field,card,fold,foldcard,runstat,strow,duo,txt,ta,num,seedRow,sel,chk,sw,seg,pathrow,refsRow,refsOf,refsAdd,refsPick,refsDropOne,refsHydrate,sizeSel,pSizeSel,lock,read,commit,commitPath,commitMany,pickInto,
   applyCfg,dropCands,resolveDrop,a16,pDims,orientOf,pairOf,pOf,P_IMG,P_VIDEO,P_VIDEO_CLOUD,P_ASPECT,P_ORIENT,
   /* 每页可登记的「原生画幅」换算：键是 size 控件绑的配置路径；segFit 是「切完顺手校正」的规则 */
   dimSnap:{},segFit:{},

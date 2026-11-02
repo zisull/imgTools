@@ -106,6 +106,68 @@ def final_path(out_dir, title, tag=""):
     return p
 
 
+def norm_refs(v):
+    """参考图列表：字符串/列表都收，去空、去重、保序。"""
+    if isinstance(v, str):
+        v = [v]
+    out = []
+    for x in (v or []):
+        p = str(x).strip()
+        if p and p not in out:
+            out.append(p)
+    return out
+
+
+def project_refs(proj):
+    """工程里的参考图池。旧工程只有 first：折成一张，行为与以前一致。"""
+    refs = norm_refs((proj or {}).get("refs"))
+    if not refs:
+        refs = norm_refs((proj or {}).get("first"))
+    return refs
+
+
+MAX_REFS = 4      # 云端 H3 的媒体槽与编号引用按 4 张做的
+
+
+def refs_for(proj, sh, prev_frame=""):
+    """这一段该带哪几张参考图（顺序即编号）。
+
+    - 段级 refs（第几张）优先，只在固定池里挑；
+    - 接帧且不是第 1 段：上一段尾帧排第 1，固定参考图按 ref_mode 随后；
+    - ref_mode：same=同一张 / seq=第 i 段第 i 张 / all=全带。
+    接帧时尾帧会占掉一个号位，固定图从尾部截掉，别把 5 张交给只收 4 张的工作流。
+    """
+    pool = project_refs(proj)
+    pick = (sh or {}).get("refs") or []
+    if pool and pick:
+        chosen = []
+        for x in pick:
+            try:
+                n = int(x)
+            except (TypeError, ValueError):
+                continue
+            if 1 <= n <= len(pool) and pool[n - 1] not in chosen:
+                chosen.append(pool[n - 1])
+        if chosen:
+            pool = chosen
+    try:
+        i = int((sh or {}).get("i") or 1)
+    except (TypeError, ValueError):
+        i = 1
+    mode = str(proj.get("ref_mode") or "same")
+    if not pool:
+        picks = []
+    elif mode == "all":
+        picks = list(pool)
+    elif mode == "seq":
+        picks = [pool[(i - 1) % len(pool)]]
+    else:
+        picks = pool[:1]
+    if str(proj.get("mode")) == "chain" and prev_frame and i > 1:
+        return ([prev_frame] + picks)[:MAX_REFS]
+    return picks[:MAX_REFS]
+
+
 def norm_shots(rows, shot_sec=15, limit=40):
     """把界面/模型给的分镜折成统一形状：秒数只认 5/10/15，空描述直接丢掉。"""
     try:
@@ -129,10 +191,19 @@ def norm_shots(rows, shot_sec=15, limit=40):
             sec = shot_sec
         if sec not in (5, 10, 15):
             sec = shot_sec
+        picked = []
+        for x in ((row.get("refs") or []) if isinstance(row.get("refs"), list) else []):
+            try:
+                n = int(x)
+            except (TypeError, ValueError):
+                continue
+            if 1 <= n <= MAX_REFS and n not in picked:
+                picked.append(n)
         out.append({
             "i": len(out) + 1,
             "summary": str(row.get("summary") or "").strip()[:80],
             "prompt": prompt[:600],
+            "refs": picked,
             "seconds": sec,
             "state": "wait",
             "file": "", "frame": "", "sec": 0.0, "err": "",
