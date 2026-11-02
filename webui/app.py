@@ -377,6 +377,7 @@ class App(WindowCtl):
         # 云端出片占着那只共用浏览器（点运行 + 轮询），这期间账号操作一律让路
         self._cloud_gen = threading.Event()
         self._h3cloud = None       # cloudkit.gen.CloudH3：真要用云端才建
+        self._filmpool = None      # cloudkit.pool.CloudPool：云端成片多号并行才建
         # 成片：一条长任务串起 N 段；停止位与普通任务分开，点停止只收当前这一段，
         # 已出的段留在盘上，下次「继续」从断点接着跑。
         self._film_stop = threading.Event()
@@ -898,6 +899,11 @@ class App(WindowCtl):
         if self.moss is not None:
             try:
                 self.moss.stop(wait=4.0)   # 关掉内嵌 ComfyUI 子进程，别留孤儿进程占显存
+            except Exception:
+                pass
+        if self._filmpool is not None:
+            try:
+                self._filmpool.close()          # 成片并行的那些浏览器也一起收掉
             except Exception:
                 pass
         if self._cloudx is not None:
@@ -1951,7 +1957,7 @@ class App(WindowCtl):
             "missing": sum(1 for x in shots if x.get("state") in ("fail", "skip")),
             "merge_ok": bool(proj.get("merge_ok", True)), "msg": "",
             "exec": str(proj.get("exec") or ""), "mode": str(proj.get("mode") or ""),
-            "shots": shots,
+            "parallel": 0, "shots": shots,
         }
         v.update(kw)
         return v
@@ -1999,8 +2005,31 @@ class App(WindowCtl):
             else:
                 try:
                     g = self._cloud_h3()
-                    row = g.account(acct)
-                    acct_id, acct_name = row["id"], row["name"]
+                    # 账号留空＝按空闲自动分配；指定了就先把它排前面，
+                    # 但两次失败会被标 fail 并换别的号，所以这里不锁死单号。
+                    rows = [a for a in g.store.list()
+                            if (g.store.load(a["id"]) or {}).get("cookies")
+                            and str(a.get("state") or "") != "fail"]
+                    if not rows:
+                        bad = [a for a in g.store.list()
+                               if str(a.get("state") or "") == "fail"]
+                        if bad:
+                            raise RuntimeError("可用的号都被标成「出片失败」了：到"
+                                               "「环境管理 → 云端账号」重新登录或换号")
+                        raise RuntimeError("还没有可用的登录账号：到「环境管理 → 云端账号」"
+                                           "新建登录并保存")
+                    if acct:
+                        hit = next((a for a in rows if a["id"] == acct), None)
+                        if hit:
+                            acct_id, acct_name = hit["id"], hit["name"]
+                        else:
+                            old = g.store.get(acct)
+                            if old and str(old.get("state") or "") == "fail":
+                                self._log("☁️ 这个号上次出片失败，已跳过：这次由其它空闲号接")
+                            else:
+                                raise RuntimeError("这个账号还没有保存过登录态")
+                    if not acct_id:
+                        acct_name = "自动分配"
                     kind, src = g.wf_src(wf)
                     if kind == "file":
                         g.check_wf_file(src)
@@ -2075,7 +2104,7 @@ class App(WindowCtl):
             return got
         return ""
 
-    def _film_one(self, d, proj, sh, first):
+    def _film_one(self, d, proj, sh, first, worker=None):
         from filmkit import project as prj
         out = prj.abs_path(d, prj.shot_file(sh["i"]))
         os.makedirs(os.path.dirname(out), exist_ok=True)
@@ -2083,11 +2112,16 @@ class App(WindowCtl):
         h = _to_int(proj.get("height"), 1344, 16, 8192)
         prompt = self._film_prompt(proj, sh)
         if str(proj.get("exec")) == "cloud":
+            # worker 是池里的一格（一个号一只浏览器）；没有就走主窗口那只（单条视频那条路）
+            acct = str(worker.aid if worker is not None else (proj.get("acct") or ""))
+            gen = worker.gen if worker is not None else self._cloud_h3()
+            who = (" · " + worker.name) if worker is not None else ""
             p = {"prompt": prompt, "seconds": sh["seconds"], "width": w, "height": h,
-                 "first": first, "acct": str(proj.get("acct") or ""),
+                 "first": first, "acct": acct,
                  "wf": str(proj.get("workflow") or ""), "out_dir": os.path.dirname(out)}
-            got = self._cloud_h3().run(
-                p, on_progress=lambda m: self._film_step("第 %d 段 · %s" % (sh["i"], m)),
+            got = gen.run(
+                p, on_progress=lambda m: self._film_step(
+                    "第 %d 段%s · %s" % (sh["i"], who, m)),
                 should_stop=self._film_should_stop)
         else:
             mgr = self._get_moss()
@@ -2144,6 +2178,320 @@ class App(WindowCtl):
                       steps=0, seed=_to_int(proj.get("seed"), -1, -1, 10 ** 12),
                       sec=sec, name=os.path.basename(path))
 
+    CLOUD_TRIES = 2         # 同一个号最多两次：第二次前重启那只浏览器
+
+    def _film_cloud_try(self, d, proj, sh, first, fs, worker, total):
+        """一个号跑一段：失败先重启浏览器再试一次。回 (ok, err, fatal)。"""
+        from filmkit import project as prj
+        last = ""
+        for attempt in range(self.CLOUD_TRIES):
+            if self._film_should_stop():
+                return False, "已停止", False
+            sh["acct_name"] = worker.name
+            tail = "" if attempt == 0 else " · 重启浏览器重试"
+            self._log("🎬 第 %d 段 · %s%s：%d 秒 · 云端"
+                      % (sh["i"], worker.name, tail, sh["seconds"]))
+            t1 = time.time()
+            try:
+                path = self._film_one(d, proj, sh, first, worker=worker)
+                sh["file"] = prj.rel(d, path)
+                sh["sec"] = round(time.time() - t1, 1)
+                return True, "", False
+            except Exception as e:
+                last = str(e)[:300]
+                self._log("⚠️ 第 %d 段 · %s 失败：%s"
+                          % (sh["i"], worker.name, last))
+                if self._film_should_stop():
+                    return False, last, False
+                # 工作流本身加载不上：换号也一样，整批停在这里（调用方暂停）
+                if any(k in last for k in self.FILM_WF_FATAL):
+                    return False, last, True
+                if attempt + 1 < self.CLOUD_TRIES:
+                    self._film_step("第 %d 段 · %s 没出成：重启这只浏览器再试一次"
+                                    % (sh["i"], worker.name))
+                    try:
+                        worker.host.restart()
+                    except Exception as re:
+                        from cloudkit.store import brief_error
+                        self._log("⚠️ 重启「%s」的浏览器失败：%s"
+                                  % (worker.name, brief_error(re)))
+                    time.sleep(2.0)
+        return False, last, False
+
+    def _film_cloud_state(self, d, proj, fs, t0, note=""):
+        """并行时多个线程都会改进度：统一在这把锁下落盘，别各写各的。"""
+        from filmkit import project as prj
+        with self._film_lock:
+            fs["done"] = sum(1 for x in proj["shots"] if x.get("state") == "done")
+            fs["missing"] = sum(1 for x in proj["shots"]
+                                if x.get("state") in ("fail", "skip"))
+            fs["elapsed"] = round(time.time() - t0, 1)
+            fs["shots"] = self._film_shots(proj, d)
+            if note:
+                fs["status"] = note[:160]
+            self.st.setdefault("cloud", {})["status"] = fs.get("status") or ""
+            self.st["status"] = fs.get("status") or ""
+            prj.save(d, proj)
+
+    def _film_cloud_serial(self, d, proj, fs, t0, workers):
+        """接帧模式：参考图是上一段尾帧，只能一段一段来；失败时换号续跑。"""
+        from filmkit import project as prj
+        total = len(proj["shots"])
+        last_ref = prj.abs_path(d, proj.get("first") or "")
+        fail_run = 0
+        for sh in proj["shots"]:
+            if self._film_should_stop():
+                break
+            if prj.ok_file(d, sh):
+                sh["state"] = "done"
+                sh["err"] = ""
+                fr = prj.abs_path(d, sh.get("frame") or "")
+                if not fr or not os.path.isfile(fr):
+                    fr = self._film_frame(d, sh) or ""
+                if fr:
+                    last_ref = fr
+                continue
+            sh["state"] = "run"
+            sh["err"] = ""
+            fs["current"] = sh["i"]
+            self._film_cloud_state(d, proj, fs, t0,
+                                   "第 %d/%d 段 · 云端串行（%d 个号待命）"
+                                   % (sh["i"], total, len(workers)))
+            tried, ok, fatal, last = set(), False, False, ""
+            while not self._film_should_stop():
+                w = next((x for x in workers
+                          if not x.bad and x.aid not in tried), None)
+                if w is None:
+                    break
+                tried.add(w.aid)
+                w.busy = True
+                ok, last, fatal = self._film_cloud_try(
+                    d, proj, sh, last_ref, fs, w, total)
+                w.busy = False
+                if ok or fatal or self._film_should_stop():
+                    break
+                self._film_pool().mark_fail(w, last)
+                self._film_cloud_state(d, proj, fs, t0,
+                                       "第 %d 段 · %s 没出成，换下一个号"
+                                       % (sh["i"], w.name))
+            if self._film_should_stop():
+                sh["state"] = "wait"
+                break
+            if ok:
+                sh["state"] = "done"
+                fail_run = 0
+                self._log("✅ 第 %d 段出完（%s）：%s · %.1f 秒"
+                          % (sh["i"], sh.get("acct_name") or "云端",
+                             os.path.basename(sh["file"]), sh["sec"]))
+                fr = self._film_frame(d, sh)
+                if fr:
+                    last_ref = fr
+                else:
+                    self._log("⚠️ 第 %d 段抽不出尾帧：下一段沿用上一张参考图"
+                              % sh["i"])
+            else:
+                sh["state"] = "fail"
+                sh["err"] = last or "没有可用的账号"
+                fail_run += 1
+                self._log("❌ 第 %d 段跳过（不跳号）：%s"
+                          % (sh["i"], sh["err"]))
+                if fatal:
+                    fs["state"] = "paused"
+                    fs["phase"] = "暂停"
+                    fs["msg"] = ("工作流没加载上，已停下：%s。修好工作流后点「继续」，"
+                                 "已经出完的段都留着" % sh["err"][:120])
+                    fs["status"] = "工作流没加载上，已停下"
+                    self._log("⛔ 工作流没加载上：整批停下，不重试")
+                    break
+                if fail_run >= 5:
+                    fs["state"] = "paused"
+                    fs["phase"] = "暂停"
+                    fs["msg"] = ("连续 5 段失败，已暂停：先处理登录/额度/账号，"
+                                 "再点「继续」")
+                    fs["status"] = fs["msg"]
+                    self._log("⛔ 连续 5 段失败，整批暂停")
+                    break
+            self._film_cloud_state(d, proj, fs, t0)
+        return last_ref
+
+    def _film_cloud_parallel(self, d, proj, fs, t0, workers):
+        """逐镜模式：空闲的号自己领下一段，一段最多试两个号。"""
+        from filmkit import project as prj
+        from cloudkit import pool as cp
+        total = len(proj["shots"])
+        cap = max(1, min(cp.MAX_PARALLEL, len(workers),
+                         int((self.cfg.get("cloud") or {}).get("parallel") or 3)))
+        fs["parallel"] = cap
+        pending = []
+        for sh in proj["shots"]:
+            if prj.ok_file(d, sh):
+                sh["state"] = "done"
+                sh["err"] = ""
+            else:
+                pending.append(sh)
+        if not pending:
+            return
+        cond = threading.Condition()
+        sem = threading.Semaphore(cap)
+        state = {"inflight": 0, "fail_run": 0, "abort": False, "fatal": ""}
+        tried = {sh["i"]: set() for sh in pending}
+        alive = set(w.aid for w in workers)
+
+        def pick(w):
+            """挑一段这个号还没试过的；返回 (下标, 段)。"""
+            for i, sh in enumerate(pending):
+                if w.aid not in tried[sh["i"]]:
+                    return i, sh
+            return None
+
+        def take(w):
+            """拿下一段；没有可接的且手上也没人在跑时就退出。"""
+            with cond:
+                while not state["abort"] and not self._film_should_stop():
+                    got = pick(w)
+                    if got is not None:
+                        i, sh = got
+                        pending.pop(i)
+                        tried[sh["i"]].add(w.aid)
+                        state["inflight"] += 1
+                        return sh
+                    if state["inflight"] == 0:
+                        return None
+                    cond.wait(0.5)
+                return None
+
+        def give_back(sh, last):
+            """两次都没出成：标坏号，再把这段交给别的空闲号。"""
+            others = [x for x in workers
+                      if x.aid in alive and x.aid not in tried[sh["i"]]]
+            if others:
+                pending.insert(0, sh)
+                sh["state"] = "wait"
+                sh["err"] = last
+                self._log("↪️ 第 %d 段转给别的号：%s"
+                          % (sh["i"], "、".join(x.name for x in others[:3])))
+            else:
+                sh["state"] = "fail"
+                sh["err"] = last or "没有可用的账号"
+                state["fail_run"] += 1
+                self._log("❌ 第 %d 段跳过（不跳号）：%s" % (sh["i"], sh["err"]))
+            cond.notify_all()
+
+        def work(w):
+            while not state["abort"] and not self._film_should_stop():
+                sem.acquire()
+                sh, got = None, False
+                try:
+                    sh = take(w)
+                    if sh is None:
+                        return
+                    got = True
+                    with self._film_lock:
+                        sh["state"] = "run"
+                        sh["err"] = ""
+                        fs["current"] = sh["i"]
+                    self._film_cloud_state(d, proj, fs, t0,
+                                           "云端 %d 个号并行 · 已完成 %d/%d"
+                                           % (cap, fs.get("done") or 0, total))
+                    ok, last, fatal = self._film_cloud_try(
+                        d, proj, sh, prj.abs_path(d, proj.get("first") or ""),
+                        fs, w, total)
+                    if self._film_should_stop():
+                        sh["state"] = "wait"
+                        return
+                    if fatal:
+                        with self._film_lock:
+                            sh["state"] = "fail"
+                            sh["err"] = last
+                            fs["state"] = "paused"
+                            fs["phase"] = "暂停"
+                            fs["msg"] = ("工作流没加载上，已停下：%s。修好工作流后"
+                                         "点「继续」，已经出完的段都留着" % last[:120])
+                            fs["status"] = "工作流没加载上，已停下"
+                        state["fatal"] = last
+                        state["abort"] = True
+                        self._film_stop.set()       # 让其它号手上那段也收手
+                        self._log("⛔ 工作流没加载上：整批停下，不重试")
+                        return
+                    if ok:
+                        with cond:
+                            state["fail_run"] = 0
+                        with self._film_lock:
+                            sh["state"] = "done"
+                            self._log("✅ 第 %d 段出完（%s）：%s · %.1f 秒"
+                                      % (sh["i"], sh.get("acct_name") or "云端",
+                                         os.path.basename(sh["file"]), sh["sec"]))
+                            fr = self._film_frame(d, sh)
+                            if not fr:
+                                self._log("⚠️ 第 %d 段抽不出尾帧：时间线少张缩略图"
+                                          % sh["i"])
+                        self._film_cloud_state(d, proj, fs, t0)
+                        continue        # 号还活着，接着领下一段
+                    # 这个号两次都没出成：标 fail，并把它从「还能接活」里拿掉
+                    self._film_pool().mark_fail(w, last)
+                    with cond:
+                        alive.discard(w.aid)
+                        give_back(sh, last)
+                        if state["fail_run"] >= 5 and not state["abort"]:
+                            state["abort"] = True
+                            state["fatal"] = "连续 5 段失败"
+                            self._film_stop.set()
+                    self._film_cloud_state(d, proj, fs, t0)
+                    if state["abort"]:
+                        with self._film_lock:
+                            fs["state"] = "paused"
+                            fs["phase"] = "暂停"
+                            fs["msg"] = ("连续 5 段失败，已暂停：先处理登录/额度/账号，"
+                                         "再点「继续」")
+                            fs["status"] = fs["msg"]
+                        self._log("⛔ 连续 5 段失败，整批暂停")
+                    return
+                finally:
+                    if got:
+                        with cond:
+                            state["inflight"] -= 1
+                            cond.notify_all()
+                    sem.release()
+
+        threads = [threading.Thread(target=work, args=(w,), daemon=True,
+                                    name="film-%s" % w.aid) for w in workers]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        # 所有号都试过仍剩下的：老实标失败，不跳号
+        with cond:
+            left = list(pending)
+            pending.clear()
+        for sh in left:
+            if self._film_should_stop() or fs.get("state") == "paused":
+                if sh.get("state") != "done":
+                    sh["state"] = "wait"
+            else:
+                sh["state"] = "fail"
+                sh["err"] = state["fatal"] or "没有空闲的账号能接这一段"
+        self._film_cloud_state(d, proj, fs, t0)
+
+    def _film_cloud_run(self, d, proj, fs, t0):
+        """云端成片：接帧串行、逐镜并行；失败重启浏览器再试，二次失败换号。"""
+        pool = self._film_pool()
+        rows = pool.accounts()
+        if not rows:
+            raise FilmError("没有可用的云端账号：到「环境管理 → 云端账号」登录并保存"
+                            "（标成「出片失败」的号要重新登录或换号）")
+        pref = str(proj.get("acct") or "")
+        if pref:
+            rows.sort(key=lambda a: 0 if a["id"] == pref else 1)
+        workers = pool.workers(rows)
+        if str(proj.get("mode")) == "chain":
+            self._log("☁️ 云端成片：接帧串行 · %d 个号待命（失败自动换号）"
+                      % len(workers))
+            self._film_cloud_serial(d, proj, fs, t0, workers)
+        else:
+            self._log("☁️ 云端成片：逐镜并行 · %d 个号（最多同时 %d 个）"
+                      % (len(workers), min(3, len(workers))))
+            self._film_cloud_parallel(d, proj, fs, t0, workers)
+
     def _film_run(self, d, proj):
         from filmkit import project as prj
         t0 = time.time()
@@ -2170,7 +2518,13 @@ class App(WindowCtl):
                               should_stop=self._film_should_stop)
                 self._film_step("引擎就绪，开始出片")
             total = len(proj.get("shots") or [])
-            for sh in proj["shots"]:
+            if cloud:
+                # 云端自己调度：接帧串行换号、逐镜多号并行；下面那条串行循环只跑本地
+                try:
+                    self._film_cloud_run(d, proj, fs, t0)
+                finally:
+                    self._film_pool_close()   # 出片结束就收浏览器，别拖到合成之后
+            for sh in ([] if cloud else proj["shots"]):
                 if self._film_should_stop():
                     break
                 if prj.ok_file(d, sh):
@@ -2340,6 +2694,8 @@ class App(WindowCtl):
                 c["done"] = fs.get("done") or 0
                 c["total"] = fs.get("total") or 0
             prj.save(d, proj)
+            if cloud:
+                self._film_pool_close()     # 成片并行的浏览器收干净，别在桌面留一排窗口
             self._film_cloud = False
             self._release("cloud" if cloud else "gpu")
 
@@ -2495,10 +2851,12 @@ class App(WindowCtl):
             if sh.get("state") in ("run", "fail"):
                 sh["state"] = "wait"
                 sh["err"] = ""
+                sh["acct_name"] = ""    # 上一次用的号不带到这一轮
             if sh.get("state") == "done" and not prj.ok_file(d, sh):
                 sh["state"] = "wait"
                 sh["file"] = ""
                 sh["frame"] = ""
+                sh["acct_name"] = ""
         all_done = all(prj.ok_file(d, sh) for sh in proj["shots"])
         film = str(proj.get("film") or "")
         if all_done and film and os.path.isfile(film):
@@ -2658,6 +3016,25 @@ class App(WindowCtl):
                                            h["store"], h["host"], log=self._log)
             return self._h3cloud
 
+    def _film_pool(self):
+        """成片并行时每个号一只浏览器；只读档案，不提前起窗口。"""
+        with self._cloud_lock:
+            if self._filmpool is None:
+                from cloudkit import pool as cp
+                h = self._cloudkit()
+                self._filmpool = cp.CloudPool(ROOT, self.cfg.setdefault("cloud", {}),
+                                              h["store"], log=self._log)
+            return self._filmpool
+
+    def _film_pool_close(self):
+        with self._cloud_lock:
+            p, self._filmpool = self._filmpool, None
+        if p is not None:
+            try:
+                p.close()
+            except Exception as e:
+                self._log("⚠️ 关闭成片浏览器池失败：%s" % e)
+
     def cloud_brief(self):
         """视频页那格「云端」要用的一句话实话：有没有号、有没有 DrissionPage、用的哪份工作流。
 
@@ -2665,14 +3042,19 @@ class App(WindowCtl):
         """
         c = self.cfg.setdefault("cloud", {})
         out = {"dp": self._dp_ready(), "accts": [], "wf": str(c.get("workflow") or ""),
-               "busy": bool(self._cloud_gen.is_set())}
+               "busy": bool(self._cloud_gen.is_set()), "failed": 0}
         try:
             from cloudkit import store as cs
             st = cs.AccountStore(ROOT)
             for a in st.list():
                 snap = st.load(a["id"]) or {}
-                if snap.get("cookies"):
-                    out["accts"].append({"id": a["id"], "name": a["name"]})
+                if not snap.get("cookies"):
+                    continue
+                # 出片失败被标 fail 的号不出现在选择器里，等人重新登录/换号
+                if str(a.get("state") or "") == "fail":
+                    out["failed"] += 1
+                    continue
+                out["accts"].append({"id": a["id"], "name": a["name"]})
         except Exception:
             pass
         out["ready"] = bool(out["dp"] and out["accts"])
@@ -2715,12 +3097,21 @@ class App(WindowCtl):
                     "keep": {"on": bool(c.get("keep", True)),
                              "min": int(c.get("keep_min") or 30),
                              "last": 0, "msg": "还没跑过"},
-                    "concurrency": 1, "page": str(c.get("base") or "")}
+                    "concurrency": 1, "parallel": 0, "page": str(c.get("base") or "")}
         h = self._cloudkit()
         keep = h["keep"]
+        accounts = h["store"].list()
+        try:
+            from cloudkit.pool import MAX_PARALLEL
+            healthy = sum(1 for a in accounts
+                          if str(a.get("state") or "") != "fail"
+                          and (h["store"].load(a["id"]) or {}).get("cookies"))
+            parallel = min(MAX_PARALLEL, healthy)
+        except Exception:
+            parallel = 1
         return {
             "ok": True, "dp": True,
-            "accounts": h["store"].list(),
+            "accounts": accounts,
             "browser": {"on": h["host"].alive(), "port": h["host"].port,
                         "base": h["host"].base, "account": h["host"].current},
             "busy": self.st.get("cloud_busy", ""),
@@ -2730,7 +3121,9 @@ class App(WindowCtl):
                      "last": int(keep.last), "msg": keep.last_msg,
                      # 这只窗口现在被谁占着：''=空闲（保活能跑）/ login / gen / hold
                      "purpose": str(h["host"].purpose or "")},
-            "concurrency": 1, "page": h["host"].base,
+            "concurrency": 1,
+            # 成片逐镜时最多几个号同时跑（每个号一只独立浏览器，主窗口仍是 1）
+            "parallel": parallel, "page": h["host"].base,
         }
 
     def _cloud_run(self, label, fn):

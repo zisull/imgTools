@@ -201,7 +201,7 @@ MIC.registerPage('video',{
 function acctSel(v){
   const list=(brief&&brief.accts)||[];
   if(!list.length)return '<span class="mut fine">还没有可用的号 · 到「环境管理 → 云端账号」登录并保存</span>';
-  return C.sel('video.cloud_acct',list.map(a=>({name:a.name,code:a.id})),'默认第一个号');
+  return C.sel('video.cloud_acct',list.map(a=>({name:a.name,code:a.id})),'默认第一个可用号');
 }
 function wfRow(){
   const local=isFile();
@@ -215,7 +215,10 @@ function wfRow(){
 function cloudHint(){
   const b=brief||{};
   if(b.dp===false)return '缺 DrissionPage：到「环境管理 → 基础」补齐后重开软件';
-  if(!(b.accts||[]).length)return '还没有可用的登录号：到「环境管理 → 云端账号」新建登录并保存';
+  if(!(b.accts||[]).length)
+    return (+b.failed||0)
+      ? '可用的号都标成「出片失败」了：到「环境管理 → 云端账号」重新登录或换号'
+      : '还没有可用的登录号：到「环境管理 → 云端账号」新建登录并保存';
   if(!wfNow())return '还差一份工作流：在上面那格粘贴网页上跑通过的地址';
   if(!firstNow())return '云端还差一张参考图：这份工作流按参考生成，纯文字平台会判失败';
   return '云端还差一步';

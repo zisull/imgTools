@@ -437,13 +437,21 @@ class CloudH3:
 
     # ---------- 账号与工作流 ----------
     def account(self, aid=""):
-        rows = [a for a in self.store.list() if (self.store.load(a["id"]) or {}).get("cookies")]
+        # state=fail 是成片里两次都没出成的号：跳过它，直到人重新保存登录态。
+        rows = [a for a in self.store.list()
+                if (self.store.load(a["id"]) or {}).get("cookies")
+                and str(a.get("state") or "") != "fail"]
         if not rows:
-            raise CloudError("还没有可用的登录账号：到「环境管理 → 云端账号」新建登录并保存")
+            raise CloudError("没有可用的登录账号：到「环境管理 → 云端账号」新建登录并保存"
+                             "（标成「出片失败」的号要重新登录或换号）")
         if aid:
             for a in rows:
                 if a["id"] == aid:
                     return a
+            other = self.store.get(aid)
+            if other and str(other.get("state") or "") == "fail":
+                raise CloudError("这个号上次出片失败已被跳过：到「环境管理 → 云端账号」"
+                                 "重新登录保存，或换一个号")
             raise CloudError("这个账号还没有保存过登录态")
         return rows[0]
 

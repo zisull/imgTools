@@ -12,6 +12,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import traceback
 
@@ -69,6 +70,15 @@ def wait_idle(a, timeout=60):
     t0 = time.time()
     while time.time() - t0 < timeout:
         if not a.st.get("running"):
+            return True
+        time.sleep(0.05)
+    return False
+
+
+def wait_cloud(a, timeout=60):
+    t0 = time.time()
+    while time.time() - t0 < timeout:
+        if not (a.st.get("cloud") or {}).get("run"):
             return True
         time.sleep(0.05)
     return False
@@ -265,6 +275,144 @@ def main():
        and os.path.isfile(files_before[0])
        and all(x["state"] == "wait" and x["file"] == ""
                for x in proj3["shots"][1:]), r)
+
+    # ---------------- 云端多号：失败重启一次、两次换号、无号才标失败 ----------------
+    class FakeHost:
+        def __init__(self):
+            self.restarts = 0
+
+        def restart(self):
+            self.restarts += 1
+
+    class FakeWorker:
+        def __init__(self, aid, name):
+            self.aid, self.name = aid, name
+            self.host = FakeHost()
+            self.bad = self.busy = False
+
+    class FakePool:
+        def __init__(self, names):
+            self.rows = [{"id": k, "name": v} for k, v in names]
+            self.map = {k: FakeWorker(k, v) for k, v in names}
+            self.marked, self.closed = [], 0
+
+        def accounts(self):
+            return list(self.rows)
+
+        def workers(self, rows):
+            return [self.map[x["id"]] for x in rows]
+
+        def mark_fail(self, w, reason):
+            w.bad = True
+            self.marked.append((w.aid, str(reason)))
+
+        def close(self):
+            self.closed += 1
+
+    a._film_precheck = lambda f, count, base_dir="": {
+        "err": "", "exec": "cloud", "width": 160, "height": 288,
+        "first": "", "acct": "", "acct_name": "自动分配", "wf": "", "count": count}
+
+    lock = threading.Lock()
+    calls, firsts = {}, {}
+    fail_ids, fatal_ids, slow_ids = set(), set(), set()
+
+    def cloud_one(d, proj, sh, first, worker=None):
+        with lock:
+            key = (worker.aid, sh["i"])
+            calls[key] = calls.get(key, 0) + 1
+            firsts[key] = first
+        if worker.aid in fatal_ids:
+            raise RuntimeError("云端前端没能加载这份工作流（测试）")
+        if worker.aid in fail_ids:
+            raise RuntimeError("平台判失败：测试")
+        if worker.aid in slow_ids:
+            time.sleep(0.08)       # 让坏号先领到活，验证「两次失败再换号」
+        p = prj.abs_path(d, prj.shot_file(sh["i"]))
+        make_clip(ff, p, "0x778899")
+        return p
+
+    a._film_one = cloud_one
+
+    def cloud_start(pool, n, mode="shot"):
+        calls.clear()
+        firsts.clear()
+        a._filmpool = pool
+        return a.film_start({
+            "shots": [{"prompt": "云端第 %d 段" % i} for i in range(1, n + 1)],
+            "story": "少女走进雨夜的旧书店，店主抬头，她认出了他。",
+            "total": n * 15, "shot": 15, "exec": "cloud", "mode": mode})
+
+    fail_ids.clear()
+    fail_ids.add("A")
+    fatal_ids.clear()
+    slow_ids.clear()
+    slow_ids.add("B")
+    pool = FakePool([("A", "A号"), ("B", "B号")])
+    r = cloud_start(pool, 3)
+    ok("云端逐镜：起得来", r.get("ok"), r.get("msg"))
+    ok("云端逐镜：跑完并合成", wait_cloud(a, 90))
+    fs = a.st.get("film") or {}
+    proj = prj.load(a._film_dir)
+    a_calls = [v for (aid, _), v in calls.items() if aid == "A"]
+    ok("坏号两次失败后转给别的号，三段都出完",
+       fs.get("state") == "done" and fs.get("done") == 3
+       and bool(fs.get("film")) and os.path.isfile(fs["film"])
+       and all(x.get("state") == "done" and x.get("acct_name") == "B号"
+               for x in proj["shots"]), fs.get("status"))
+    ok("A 号每次都是试满两次、重启一次后才换号",
+       a_calls and all(x == 2 for x in a_calls)
+       and pool.map["A"].host.restarts == len(a_calls)
+       and pool.map["A"].bad and pool.marked, (a_calls, pool.map["A"].host.restarts))
+    ok("并行数按可用号算，跑完把池收干净",
+       (+fs.get("parallel") or 0) == 2 and pool.closed == 1,
+       (fs.get("parallel"), pool.closed))
+
+    # 只有一个号且一直失败：不无限转，老实标失败
+    fail_ids.clear()
+    fail_ids.add("A")
+    slow_ids.clear()
+    pool = FakePool([("A", "A号")])
+    r = cloud_start(pool, 2)
+    ok("云端单号：起得来", r.get("ok"), r.get("msg"))
+    ok("云端单号：跑完", wait_cloud(a, 60))
+    fs = a.st.get("film") or {}
+    proj = prj.load(a._film_dir)
+    ok("没有别的号可换：两段都标失败、不合成",
+       fs.get("state") == "failed" and fs.get("done") == 0
+       and fs.get("missing") == 2 and not fs.get("film")
+       and all(x.get("state") == "fail" for x in proj["shots"]),
+       "%s / %s" % (fs.get("state"), fs.get("missing")))
+    ok("单号失败也标了账号", pool.marked and pool.map["A"].bad)
+
+    # 工作流加载不上：换号也没用，整批暂停而不是把号标坏
+    fail_ids.clear()
+    fatal_ids.clear()
+    fatal_ids.add("A")
+    pool = FakePool([("A", "A号")])
+    r = cloud_start(pool, 2)
+    ok("云端致命错：起得来", r.get("ok"), r.get("msg"))
+    ok("云端致命错：跑完", wait_cloud(a, 60))
+    fs = a.st.get("film") or {}
+    ok("工作流致命错整批暂停，不标坏号",
+       fs.get("state") == "paused" and "工作流" in str(fs.get("msg") or "")
+       and not pool.marked, (fs.get("state"), fs.get("msg")))
+
+    # 接帧：串行换号，第二段仍接第一段尾帧
+    fail_ids.clear()
+    fatal_ids.clear()
+    fail_ids.add("A")
+    pool = FakePool([("A", "A号"), ("B", "B号")])
+    r = cloud_start(pool, 2, mode="chain")
+    ok("云端接帧：起得来", r.get("ok"), r.get("msg"))
+    ok("云端接帧：跑完", wait_cloud(a, 90))
+    fs = a.st.get("film") or {}
+    proj = prj.load(a._film_dir)
+    fr1 = prj.abs_path(a._film_dir, proj["shots"][0].get("frame") or "")
+    ok("接帧换号后尾帧仍接得上",
+       fs.get("state") == "done" and fs.get("done") == 2
+       and all(x.get("acct_name") == "B号" for x in proj["shots"])
+       and firsts.get(("B", 2)) == fr1, (firsts.get(("B", 2)), fr1))
 
     # ---------------- film_state / 快照 ----------------
     a.film_resume = type(a).film_resume.__get__(a)   # 还原，给后面真续跑用

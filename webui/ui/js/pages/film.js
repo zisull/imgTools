@@ -144,8 +144,9 @@ function phaseText(fs){
 }
 function sigFilm(fs){
   return [fs.state,fs.phase,fs.done,fs.total,fs.current,fs.film,
-          fs.merge_ok,fs.msg,
-          (fs.shots||[]).map(s=>[s.i,s.state,s.sec,s.file_abs,s.frame_abs].join(',')).join('|')
+          fs.merge_ok,fs.msg,fs.parallel,
+          (fs.shots||[]).map(s=>[s.i,s.state,s.sec,s.file_abs,s.frame_abs,s.acct_name]
+            .join(',')).join('|')
          ].join('~');
 }
 function filmHTML(fs){
@@ -161,14 +162,15 @@ function filmHTML(fs){
     const lab=ok?(sec?sec.toFixed(1)+' 秒':'完成')
       :st==='run'?'出片中':st==='fail'?'失败':st==='skip'?'跳过':'待出';
     const err=st==='fail'&&sh.err?' · '+sh.err:'';
+    const who=sh.acct_name?' · '+sh.acct_name:'';
     const src=sh.frame_abs?(thumbs[sh.frame_abs]||''):'';
     return `<div class="fshot ${st}"${ok?` onclick="MIC.film.openShot(${sh.i})"`:''}`+
-      ` title="${esc((ok?'打开第 '+sh.i+' 段':'第 '+sh.i+' 段 · '+lab)+err)}">`+
+      ` title="${esc((ok?'打开第 '+sh.i+' 段':'第 '+sh.i+' 段 · '+lab)+who+err)}">`+
       `<div class="fthumb">${sh.frame_abs?`<img${src?` src="${esc(src)}"`:''}`+
         ` data-thumb="${esc(sh.frame_abs)}" alt="">`:
         ic(st==='run'?'refresh':'image','s')}</div>`+
       `<span class="fno">${pad(sh.i)}</span>`+
-      `<span class="fstate ${ok?'ok':(st==='fail'?'er':'')}">${esc(lab)}</span>`+
+      `<span class="fstate ${ok?'ok':(st==='fail'?'er':'')}">${esc(lab+who)}</span>`+
       (ok||st==='fail'?`<button class="fre" title="重出第 ${sh.i} 段"`+
         ` onclick="event.stopPropagation();MIC.film.redo(${sh.i})">${ic('refresh','s')}</button>`:'')+
       `</div>`;
@@ -207,7 +209,8 @@ function paint(el){
 function liveSub(){
   const f=MIC.s.cfg.film||{},fs=MIC.s.st.film||{};
   if(fs.state==='running'||fs.state==='planning')
-    return (fs.phase||'出片')+' · '+(+fs.done||0)+'/'+(+fs.total||0);
+    return (fs.phase||'出片')+' · '+(+fs.done||0)+'/'+(+fs.total||0)+
+      ((+fs.parallel)>1?' · '+(+fs.parallel)+' 号并行':'');
   const total=+f.total||60,shot=+f.shot||15;
   const n=Math.max(1,Math.min(40,Math.round(total/shot)));
   return (String(f.exec)==='cloud'?'云端':'本地')+' · '+n+' 段 × '+shot+' 秒 · '+
@@ -220,7 +223,10 @@ function note(icon,text,btn){
 function cloudProblem(){
   const b=brief;if(!b)return '';
   if(b.dp===false)return '缺 DrissionPage：到「环境管理 → 基础」补齐后重开软件';
-  if(!(b.accts||[]).length)return '还没有可用的登录号：到「环境管理 → 云端账号」登录并保存';
+  if(!(b.accts||[]).length)
+    return (+b.failed||0)
+      ? '可用的号都标成「出片失败」了：到「环境管理 → 云端账号」重新登录或换号'
+      : '还没有可用的登录号：到「环境管理 → 云端账号」登录并保存';
   if(!wfNow())return '还差一份 H3 工作流：在下面那格填网页上跑通过的地址或本地 .json';
   if(!firstNow())return '云端按参考生成：先选一张首帧图（本地可纯文字起步）';
   return '';
@@ -229,7 +235,7 @@ function acctSel(f){
   const list=(brief&&brief.accts)||[];
   if(!list.length)
     return '<span class="mut fine">还没有可用的号 · 到「环境管理 → 云端账号」登录并保存</span>';
-  return C.sel('film.acct',list.map(a=>({name:a.name,code:a.id})),'默认第一个号');
+  return C.sel('film.acct',list.map(a=>({name:a.name,code:a.id})),'自动分配（按空闲号）');
 }
 function wfRow(cloud){
   const local=isFile();
@@ -335,14 +341,16 @@ MIC.registerPage('film',{
         cloud?'这一份 H3 工作流按参考生成：不填平台会判失败。第 2 段起会改用上一段尾帧'
              :'接帧模式下全片从这张图开始；不给就用文字直接起第一段')+
       (cloud?'<div class="grid3">'+
-        C.field('账号',acctSel(f),'用哪个号的登录态出片；留默认＝档案里第一个可用的号')+
+        C.field('账号',acctSel(f),'留默认＝按空闲号自动分配；一个号两次没出成会被标记并换号')+
         wfRow(true)+
       '</div>':'')+
       C.fold('更专业','cog',
         '<div class="grid3">'+
           C.field('接法',C.seg('film.mode',[['chain','接帧'],['shot','逐镜']]),
-            '接帧=每段拿上一段尾帧当参考，画面连贯（要 FFmpeg 抽帧）；逐镜=每段各自成片')+
-          C.field('重试',C.num('film.retry','次'),'单段失败自动重试；连续 5 段失败会暂停整批')+
+            '接帧=每段拿上一段尾帧当参考，画面连贯（要 FFmpeg 抽帧）；'+
+            '逐镜=每段各自成片，云端会按空闲号并行')+
+          C.field('重试',C.num('film.retry','次'),
+            '本机：单段失败重试次数；云端固定每个号试 2 次（失败先重启浏览器）再换号')+
           C.field('种子',C.seedRow('film.seed'),'随机=每段新种子；固定=同参数可复现')+
         '</div>','接法 · 重试 · 种子')+
       planHTML();

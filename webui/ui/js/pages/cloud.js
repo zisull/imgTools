@@ -1,6 +1,6 @@
-/* pages/cloud.js —— 云端账号：一只浏览器登录一次，命名存成档案，之后换号只换数据
-   多账号不是多开浏览器：调试端口只认一个进程，user-data-dir 也是启动参数。
-   这里做的是「一个浏览器 + 多份 cookies/localStorage 快照」，换号时整份替换；
+/* pages/cloud.js —— 云端账号：登录一次存成档案，之后换号只换数据
+   登录/看平台仍用主窗口那只（一个浏览器 + 多份 cookies/localStorage 快照）；
+   成片逐镜要并行时，每个号各起一只独立浏览器（不同端口/profile），跑完就收。
    保活按账号轮着访问平台（并发固定 1），浏览器只管登录，生成仍走协议。 */
 (function(){
 const MIC=window.MIC=window.MIC||{};
@@ -17,6 +17,7 @@ const STATE={
   pending:{dot:'',txt:'等待登录'},
   new:{dot:'',txt:'还没保存登录态'},
   error:{dot:'bad',txt:'上次检查出错'},
+  fail:{dot:'bad',txt:'出片失败 · 需重新登录或换号'},
 };
 
 function byId(id){return (data&&data.accounts||[]).filter(a=>a.id===id)[0]||{};}
@@ -33,7 +34,7 @@ function stamp(ts){
 function acctSub(a){
   const s=STATE[a.state]||STATE.new;
   const bits=[s.txt];
-  if(a.state==='ok'||a.state==='unknown'||a.state==='expired'){
+  if(a.state==='ok'||a.state==='unknown'||a.state==='expired'||a.state==='fail'){
     if(a.detail)bits.push(a.detail);
     if(a.last_check)bits.push('检查于 '+stamp(a.last_check));
   }
@@ -47,7 +48,9 @@ function liveSub(){
   const busy=MIC.s.st.cloud_busy;
   if(busy)return busy+'…';
   const on=data&&data.browser&&data.browser.on;
-  return n+' 个账号 · '+(on?'浏览器已连':'浏览器未启动')+' · 并发 1';
+  const par=+(data&&data.parallel)||0;
+  return n+' 个账号 · '+(on?'浏览器已连':'浏览器未启动')+
+    (par>1?' · 成片可 '+par+' 号并行':' · 并发 1');
 }
 
 function row(a){
@@ -85,7 +88,7 @@ function browserCard(){
       C.strow('保活',`<span class="mut">${esc(k.on?'每 '+(k.min||30)+' 分钟':'关')}${k.msg?' · '+esc(k.msg):''}</span>`)+
       /* 这只窗口现在归谁用：保活看到非「空闲」就让路，登录/出片期间不会被人换号 */
       C.strow('当前用途',`<span class="mut">${esc(BUSY_TXT[k.purpose]||'空闲')}</span>`)+
-      C.strow('并发',`<span class="mut">1 · 多账号轮流，不并行换号</span>`)+
+      C.strow('并发',`<span class="mut">单条视频 1 个号；成片逐镜最多 ${+(data&&data.parallel)||1} 个号并行（每号一只浏览器）</span>`)+
     '</div>'+
     '<div class="btnrow" style="margin-top:10px">'+
       `<button class="btn sm pri" onclick="MIC.cloud.start()"${busy||on||noDp?' disabled':''}>打开平台</button>`+

@@ -108,13 +108,15 @@ def login_state(tab):
 
 
 class BrowserHost:
-    def __init__(self, root, cfg=None, log=None):
+    def __init__(self, root, cfg=None, log=None, port=None, profile=None):
         self.root = root
         self.cfg = cfg if isinstance(cfg, dict) else {}
         self.log = log or (lambda *_: None)
-        self.port = int(self.cfg.get("port") or 9333)
+        # 端口与 user-data-dir 都是 Chromium 的启动参数，一个进程一套。
+        # 成片要多个号同时跑时，每个号各给一只（见 pool.py），主窗口仍用默认那套。
+        self.port = int(port or self.cfg.get("port") or 9333)
         self.base = str(self.cfg.get("base") or "https://www.runninghub.cn").rstrip("/")
-        self.profile = os.path.join(cloud_dir(root), "browser")
+        self.profile = str(profile or "").strip() or os.path.join(cloud_dir(root), "browser")
         self.domains = [str(s).lstrip(".").lower()
                         for s in (self.cfg.get("domains") or ["runninghub.cn"]) if s]
         self._b = None
@@ -204,7 +206,7 @@ class BrowserHost:
             self.current = ""
             self.purpose = ""
 
-    def close(self):
+    def close(self, force=False):
         with self._lock:
             b, self._b = self._b, None
             self.current = ""
@@ -212,9 +214,27 @@ class BrowserHost:
             if b is None:
                 return
             try:
-                b.quit(timeout=5, force=False)
+                b.quit(timeout=5, force=bool(force))
             except Exception:
                 pass
+
+    def restart(self):
+        """把这只调试浏览器整个关掉，下一次 browser() 再拉起一只干净的。
+
+        页面卡死、登录态被平台踢掉时，reset() 只丢连接仍会接回同一个坏进程；
+        成片「失败重试一次」要的是新进程，所以这里连进程一起收掉。
+        """
+        with self._lock:
+            b, self._b = self._b, None
+            self.current = ""
+            self.purpose = ""
+            if b is not None:
+                try:
+                    b.quit(timeout=5, force=True)
+                except Exception:
+                    pass
+            time.sleep(0.8)     # 等端口上的旧进程退干净，别让新连接又挂回它
+        return self.browser()
 
     def occupied(self):
         """这只浏览器被人占着（登录 / 云端出片）＝保活必须让路。"""
