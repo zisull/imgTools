@@ -338,7 +338,7 @@ function pickInto(k,kind){
     rrRepaint(el);
   }).catch(()=>{});
 }
-/* data-rr 的格子改完要整页重画：工作流填成本地文件时，「宿主页」那格得当场长出来 */
+/* data-rr 的格子改完要整页重画：工作流填成本地文件时，那一格的说明要当场换掉 */
 function rrRepaint(el){if(el&&el.dataset&&el.dataset.rr)MIC.render();}
 /* 事件委托：文本/下拉 change 即存；勾选/开关/分段 click 即存 */
 document.addEventListener('change',e=>{

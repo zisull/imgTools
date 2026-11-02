@@ -60,10 +60,10 @@ function wfNow(){
   const c=(MIC.s.cfg&&MIC.s.cfg.cloud)||{};
   return String(c.workflow||(brief&&brief.wf)||'').trim();
 }
-/* 本地导出的那份（.json/.txt）没有平台工作流编号，得借一个「宿主页」进同一台实例 */
+/* 本地导出的那份（.json/.txt）没有平台工作流编号：开页时自动借一页 H3 画布，不再要人填宿主页 */
 const isFile=()=>/\.(json|txt)$/i.test(wfNow());
-const hostNow=()=>String(((MIC.s.cfg||{}).cloud||{}).wf_host||'').trim();
-function cloudReady(){return !!brief&&brief.ready&&!!wfNow()&&(!isFile()||!!hostNow());}
+const firstNow=()=>String(((MIC.s.cfg||{}).video||{}).first||'').trim();
+function cloudReady(){return !!brief&&brief.ready&&!!wfNow();}
 function acctName(v){
   const list=(brief&&brief.accts)||[];
   const hit=list.filter(a=>a.id===v.cloud_acct)[0]||list[0];
@@ -84,7 +84,8 @@ function liveSub(){
   const bits=[String(v.seconds||5)+' 秒',dimText(v)];
   if(String(v.exec)==='cloud'){
     bits.push('云端',acctName(v));
-    bits.push(s.running==='video'?'平台侧计时':(cloudReady()?'随时能跑':'差登录或工作流'));
+    bits.push(s.running==='video'?'平台侧计时'
+      :(!cloudReady()?'差登录或工作流':(!firstNow()?'差参考图':'随时能跑')));
     return bits.join(' · ');
   }
   bits.push('4 步');
@@ -121,8 +122,9 @@ MIC.registerPage('video',{
         C.field('宽（px）',C.num('video.cw','1344'),'自动贴到 16 的倍数')+
         C.field('高（px）',C.num('video.ch','768'),'自动贴到 16 的倍数')+
       '</div>':'')+
-      C.field(cloud?'参考图':'首帧',C.pathrow('video.first','留空=文生视频 · 选一张图=从它开始动','file'),
-        cloud?'上传到这个号的平台 input 里，当首帧参考；不传就纯文字出片'
+      C.field(cloud?'参考图（必填）':'首帧',
+        C.pathrow('video.first',cloud?'选一张图：云端按参考生成，纯文字不接':'留空=文生视频 · 选一张图=从它开始动','file'),
+        cloud?'上传到这个号的平台 input 里当首帧/身份参考。这份 H3 工作流只有图生与参考生视频两种模式，不填平台会判失败'
              :'想接着上一段拍就把那一帧存成图填进来')+
       (cloud?wfRow():'')+
       (cloud?'':C.field('种子',C.seedRow('video.seed'),'开着每次换一版；关掉固定种子可复现'))+
@@ -140,9 +142,10 @@ MIC.registerPage('video',{
       :(!cloud&&todo
         ?`<div class="notebar">${ic('db','s')}<b>H3 环境还差 ${todo} 项</b><span class="grow"></span>`+
           `<button class="btn sm pri" onclick="MIC.nav.goto('env_h3')">去补齐</button></div>`
-        :(cloud&&brief&&!cloudReady()
+        :(cloud&&brief&&(!cloudReady()||!firstNow())
           ?`<div class="notebar">${ic('globe','s')}<b>${esc(cloudHint())}</b><span class="grow"></span>`+
-            `<button class="btn sm pri" onclick="MIC.nav.goto('cloud')">去处理</button></div>`
+            (cloudReady()?'':`<button class="btn sm pri" onclick="MIC.nav.goto('cloud')">去处理</button>`)+
+            `</div>`
           :''));
     return note+C.duo(
       C.card('生成参数','film',C.lock(run,shared)),
@@ -152,8 +155,8 @@ MIC.registerPage('video',{
 
 /* 云端两格：账号从档案里列（只列存过登录态的），工作流是这一路唯一必填的平台参数。
    工作流绑在 cloud.workflow：以后视频以外还有云端活用时，它是环境那一条，不是任务那一条。
-   填本地导出的 .json 也行：托管前端能把图灌进页面，只是导出的文件里不带工作流编号，
-   所以还要一个「宿主页」——借哪个平台页进那台实例（换图不换实例）。 */
+   填本地导出的 .json 也行：托管前端能把图灌进页面；导出的文件不带平台编号，
+   开跑时软件自己借一页已知能开的 H3 画布进去（换图不换实例），不用再填宿主页。 */
 function acctSel(v){
   const list=(brief&&brief.accts)||[];
   if(!list.length)return '<span class="mut fine">还没有可用的号 · 到「H3云端」页登录并保存</span>';
@@ -164,17 +167,15 @@ function wfRow(){
   return C.field('工作流',
       C.pathrow('cloud.workflow',local?'本地导出的工作流（.json）':'网页上跑通过的 H3 工作流地址或 ID','file',true),
     '粘贴浏览器里那份能出片的 H3yun 工作流地址，或把「导出工作流」存下来的 .json 拖进来。'+
-    (wfNow()?'':' 现在还没填，填了云端这条路才算通。'))+
-    (local?C.field('宿主页',C.txt('cloud.wf_host','借哪一页进那台实例：粘一个平台上打得开的工作流地址','',true),
-      '导出文件里只有画布，不带工作流编号——本地这份要借平台上的某一页跑。'+
-      (hostNow()?'':'现在还空着，云端开不了工。')):'');
+    (local?' 本地文件开跑时自己借平台页面，不用再填别的。':'')+
+    (wfNow()?'':' 现在还没填，填了云端这条路才算通。'));
 }
 function cloudHint(){
   const b=brief||{};
   if(b.dp===false)return '缺 DrissionPage：到「环境 → 基础」补齐后重开软件';
   if(!(b.accts||[]).length)return '还没有可用的登录号：到「H3云端」页新建登录并保存';
   if(!wfNow())return '还差一份工作流：在上面那格粘贴网页上跑通过的地址';
-  if(isFile()&&!hostNow())return '本地工作流还差一个宿主页：填一个平台上打得开的工作流地址';
+  if(!firstNow())return '云端还差一张参考图：这份工作流按参考生成，纯文字平台会判失败';
   return '云端还差一步';
 }
 

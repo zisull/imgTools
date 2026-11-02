@@ -912,6 +912,7 @@ PROBE = {
   const sub=()=>((document.querySelector('#view .psub')||{}).textContent||'').trim();
   const k=q=>document.querySelector('#view [data-k="'+q+'"]');
   const vtx=()=>((document.querySelector('#view')||{}).textContent||'');
+  const tips=()=>[].slice.call(document.querySelectorAll('#view label.tip')).map(x=>x.title||'').join(' ');
   const btns=()=>[].slice.call(document.querySelectorAll('#view button')).map(b=>b.textContent.trim());
   const ta=()=>k('video.prompt');
   const ori=()=>document.querySelector('#view [data-ori="video.size"]');
@@ -982,7 +983,15 @@ PROBE = {
     k('cloud.workflow').value='https://www.runninghub.cn/workflow/2103759530927673346';
     k('cloud.workflow').dispatchEvent(new Event('change',{bubbles:true}));
     await wait(500);
-    ok('粘好工作流：提醒收走，副标题改成「随时能跑」',
+    ok('粘好工作流：先报缺参考图（这份 H3 工作流没有纯文字模式）',
+       /差参考图/.test(sub())&&/还差一张参考图/.test((document.querySelector('#view .notebar')||{}).textContent),
+       sub()+' | '+((document.querySelector('#view .notebar')||{}).textContent||''));
+    k('video.first').value='C:/x/ref.png';
+    k('video.first').dispatchEvent(new Event('change',{bubbles:true}));
+    await wait(300);
+    MIC.render();
+    await wait(300);
+    ok('补上参考图：提醒收走，副标题改成「随时能跑」',
        !document.querySelector('#view .notebar')&&/随时能跑/.test(sub()), sub());
     cap.got=null;
     ta().value='一只猫推开木门，镜头缓慢推进';
@@ -1010,17 +1019,13 @@ PROBE = {
     await wait(400);
     ok('再切回云端：这个数本来就在云端档位表里，原样留着',
        String(MIC.s.cfg.video.size)==='1344x768', String(MIC.s.cfg.video.size));
-    /* 本地工作流文件：填 .json 当场多出「宿主页」那一格 */
+    /* 本地工作流文件：填 .json 不再多要宿主页，开跑时软件自己去平台借页面 */
     k('cloud.workflow').value='C:/x/h3.json';
     k('cloud.workflow').dispatchEvent(new Event('change',{bubbles:true}));
     await wait(500);
-    ok('填本地 .json：当场多出「宿主页」那格，并说清为什么要它',
-       !!k('cloud.wf_host')&&/宿主页/.test(vtx())&&!!document.querySelector('#view .notebar'), '');
-    k('cloud.wf_host').value='https://www.runninghub.cn/workflow/2103759530927673346';
-    k('cloud.wf_host').dispatchEvent(new Event('change',{bubbles:true}));
-    await wait(500);
-    ok('补上宿主页：提醒收走，云端这条路算通',
-       !document.querySelector('#view .notebar')&&/随时能跑/.test(sub()), sub());
+    ok('填本地 .json：不多要宿主页，提示里讲清开跑时自己借平台页面',
+       !k('cloud.wf_host')&&/借平台页面/.test(tips())&&!document.querySelector('#view .notebar'), '');
+    ok('本地 .json 也算备齐：副标题直接写「随时能跑」', /随时能跑/.test(sub()), sub());
     await click(segBtn('local'));
     ok('切回本地：步数那格（Turbo 4 步）与种子都回来，工作流格子收走',
        /Turbo 固定/.test(vtx())&&!!document.querySelector('#view .seedw')&&!k('cloud.workflow'),'');

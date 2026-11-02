@@ -21,9 +21,11 @@ import re
 import time
 
 WF_URL = "https://www.runninghub.cn/workflow/%s"
+# 本地导出的画布没有平台编号；借平台上的某一页进实例（换图不换实例）。
+# 这一页只是入口，跑的还是灌进去的那张图——和 H3yun 内置的宿主页同一个。
+HOST_WF_FALLBACK = WF_URL % "2103759530927673346"
 MAIN_TYPE = "FeiHouEasyH3RH"
 OUT_TYPE = "VHS_VideoCombine"
-MODE_I2V = "I2V or First/Last Frame"
 MODE_REF = "Reference-to-video"
 # 云端只放开这三档画幅：界面上横/方/竖已经是全集，其它画幅留给「自定义宽高」
 RATIO_BY_ORIENT = {"h": "16:9", "s": "1:1", "v": "9:16"}
@@ -70,42 +72,78 @@ try{a.loadGraphData(g,true,false,'local.json');}
 catch(e){return JSON.stringify({err:'loadGraphData 报错：'+(e&&e.message)});}
 return JSON.stringify({ok:1,nodes:((a.graph||{})._nodes||[]).length});
 """
+# 自动找宿主页那套（列表页点卡片 → 作品页 → 运行）依赖平台 SPA 的路由，
+# 实测客户端跳转偶尔只落空壳、按钮不挂出来——不如内置一页稳，整段去掉。
 # 写之前先看一眼：主节点现在的控件名与值、媒体那一份的真实形状（拿它当模板）
 _JS_INSPECT = """
 var f=document.getElementById(arguments[0]);
 var node=f.contentWindow.app.graph.getNodeById(arguments[1]);
 if(!node)return JSON.stringify({err:'no_node'});
 var w={};(node.widgets||[]).forEach(function(x){w[x.name]=String(x.value===undefined?'':x.value).slice(0,120);});
+var mo=[];try{(node.widgets||[]).forEach(function(x){
+  if(x.name==='mode'&&x.options&&x.options.values)mo=x.options.values.slice(0,8);});}catch(e){}
 var m=null;try{m=node.properties.feihou_h3_embedded_media;}catch(e){}
 if(typeof m==='string'){try{m=JSON.parse(m);}catch(e){m=null;}}
-return JSON.stringify({type:node.type,editor:!!node.__h3Editor,widgets:w,
+return JSON.stringify({type:node.type,editor:!!node.__h3Editor,widgets:w,modeOpts:mo,
   media:(m&&m.length)?Object.keys(m[0]):[],media0:(m&&m[0])?m[0]:null});
 """
 # 一次写完：普通控件 + 提示词编辑器 + 媒体属性；顺手做自检，不合格就别点运行
 _JS_WRITE = """
 var fid=arguments[0],nid=arguments[1],spec=JSON.parse(arguments[2]);
-var w=document.getElementById(fid).contentWindow, g=w.app.graph;
+var f=document.getElementById(fid);
+if(!f||!f.contentWindow)return JSON.stringify({err:'no_frame'});
+var w=f.contentWindow, d=f.contentDocument||w.document, g=w.app.graph;
 var node=g.getNodeById(nid);
 if(!node)return JSON.stringify({err:'no_node'});
 var by={};(node.widgets||[]).forEach(function(x){by[x.name]=x;});
+// 这些是新版节点才有的控件：老工作流里没有就跳过，不能因为缺一颗就整段不跑
+var opt={ref_image_size:1,reference_mention_mode:1,prompt_optimizer_enabled:1,
+         low_vram_streamed_attention:1,reference_text_only:1,audio_duration_auto:1};
+var warn=[];
+// 照 H3yun 的做法直接写值：它的下拉显示的是中文标签，值仍收英文口径；
+// 拿 options.values 先卡一道会把能跑的值误判成非法。选项表不认只记一条，
+// 真正的对错交给后面的序列化自检（那才是节点实际提交的东西）。
 function setv(k,v){var x=by[k];if(!x)return 'no:'+k;
-  if(x.type==='combo'||x.options&&x.options.values){
-    if(x.options.values.indexOf(v)<0)return 'opt:'+k+':'+v;
-    if(x.setOption)x.setOption(v);else x.value=v;
-  }else x.value=v;
-  x.value=v;g.setNodeDirty?g.setNodeDirty(node):0;return '';}
+  var vals=x.options&&x.options.values;
+  if(Array.isArray(vals)&&vals.indexOf(v)<0)warn.push('opt:'+k+':'+v);
+  try{if(x.setOption)x.setOption(v);else x.value=v;}catch(e){x.value=v;}
+  x.value=v;
+  g.setNodeDirty?g.setNodeDirty(node):0;return '';}
 var bad=[];
-Object.keys(spec.widgets||{}).forEach(function(k){var r=setv(k,spec.widgets[k]);if(r)bad.push(r);});
-// 媒体：形状照线上那一条抄，值换成我们刚上传的文件
+Object.keys(spec.widgets||{}).forEach(function(k){
+  var r=setv(k,spec.widgets[k]);
+  if(r){if(opt[k])warn.push(r);else bad.push(r);}});
+// 媒体三条一起写（H3yun 实机那套，跑了整部短剧）：
+//   · 属性必须是**数组**，节点自己的 ensureEmbeddedMedia 只认数组；
+//   · 条目只留 media_type/ordinal/filename/subfolder/storage/audio_trim，
+//     storage 固定 "input"、audio_trim 固定空串——从线上旧条目抄会把 comfyui/裁切区间带进来；
+//   · minimax_h3_virtual_media_links 必须清空，否则上一份工作流的旧图会被当成参考。
+// 少写 production_preview 时画廊不刷新，节点也可能按旧预览判定「没有参考」。
 var media=spec.media||[];
-try{node.properties.feihou_h3_embedded_media=JSON.stringify(media);}catch(e){bad.push('prop_media');}
+node.properties=node.properties||{};
+try{node.properties.feihou_h3_embedded_media=media;}catch(e){bad.push('prop_media');}
+try{node.properties.minimax_h3_virtual_media_links=[];}catch(e){warn.push('prop_links');}
+try{node.properties.feihou_h3_production_preview=spec.preview||{};}catch(e){warn.push('prop_preview');}
 if(by.embedded_media_json)by.embedded_media_json.value=JSON.stringify(media);
-// 提示词：编辑器是真源，控件是它的副本——只改控件等于没改
+else bad.push('no:embedded_media_json');
+// 提示词：编辑器是真源，控件是它的副本——只改控件等于没改。
+// 编辑器在 iframe 里，事件也必须用 iframe 自己的 Event：顶层 window 的 InputEvent
+// 跨进 iframe 后节点那边未必认，编辑器不会把文本同步回控件与序列化数据。
 var text=spec.prompt||'';
-var ed=node.__h3Editor;
-if(ed){ed.textContent=text;
-  try{ed.dispatchEvent(new InputEvent('input',{bubbles:true}));}catch(e){}
+function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;')
+  .replace(/>/g,'&gt;').replace(/\\n/g,'<br>');}
+var ed=d.querySelector('.comfy-multiline-input.h3-prompt-editor')||d.querySelector('.h3-prompt-editor');
+if(ed&&ed.isContentEditable===true){try{ed.focus();}catch(e){}
+  ed.innerHTML=esc(text);
+  try{ed.dispatchEvent(new w.Event('input',{bubbles:true}));}catch(e){}
+  try{ed.dispatchEvent(new w.Event('change',{bubbles:true}));}catch(e){}
+}else if(node.__h3Editor){node.__h3Editor.textContent=text;
+  try{node.__h3Editor.dispatchEvent(new w.Event('input',{bubbles:true}));}catch(e){}
 }else if(by.prompt){by.prompt.value=text;}else bad.push('no_prompt_slot');
+// 节点 JS 把「重画媒体画廊」挂在 mode 控件的 callback 上（syncModeWidgets + renderEmbeddedMediaGallery）。
+// 直接给 widget.value 赋值不会触发它——画廊就会停在灌图时那 8 张旧图上，自检也看不见新图。
+// 手动调一次回调，等于模拟用户重新选了一次模式；不改任何值。
+try{if(by.mode&&typeof by.mode.callback==='function')by.mode.callback(by.mode.value);}catch(e){}
 g.setDirtyCanvas&&g.setDirtyCanvas(true,true);
 // 自检：拿即将提交的序列化结果比对，不合规就报出来，宁可停下也不出废片
 // 新版 ComfyUI 的 graphToPrompt() 回的是 Promise：不 then 就取到 undefined，
@@ -113,13 +151,17 @@ g.setDirtyCanvas&&g.setDirtyCanvas(true,true);
 function chkOf(inp){
   inp=inp||{};
   var nm=0;Object.keys(inp).forEach(function(k){if(/^media_\\d+$/.test(k)&&inp[k])nm++;});
+  // 画廊里真填上的槽位：和序列化里的媒体一起看，两个都空才算「参考图没进去」
+  var gal=0;try{gal=d.querySelectorAll('.fh-h3-media-slot.has-media').length;}catch(e){}
+  var mj=[];try{mj=inp.embedded_media_json?JSON.parse(inp.embedded_media_json):[];}catch(e){}
   return {prompt:String(inp.prompt||'').slice(0,80),seconds:inp.seconds,fps:inp.fps,
           mode:inp.mode,resolution:inp.resolution,aspect:inp.aspect_ratio,
           width:inp.width,height:inp.height,
-          media:inp.embedded_media_json?JSON.parse(inp.embedded_media_json).length:0,
-          slots:nm};
+          media:(mj&&mj.length)||0,
+          media0:(mj&&mj[0])||null,
+          slots:nm,gallery:gal};
 }
-function pack(chk){return JSON.stringify({bad:bad,check:chk,editor:!!ed});}
+function pack(chk){return JSON.stringify({bad:bad,warn:warn,check:chk,editor:!!ed});}
 var p=null;
 try{
   p=(w.app.graphToPrompt&&w.app.graphToPrompt())||(w.graphToPrompt&&w.graphToPrompt());
@@ -130,6 +172,24 @@ if(p&&p.then){
   },function(e){return pack({err:String(e&&e.message||e).slice(0,100)});});
 }
 return pack(chkOf((p&&p.output&&p.output[String(nid)]||{}).inputs));
+"""
+# 提示词编辑器就绪没：节点比画布晚一步挂编辑器（H3yun 也是重试等它）。
+# 编辑器没挂好就只写控件的话，graphToPrompt 会用编辑器里的旧文案再覆盖回去——
+# 自检当时看是过的，提交出去的却是工作流原来那段长故事板。
+_JS_EDITOR = """
+var f=document.getElementById(arguments[0]);
+if(!f||!f.contentWindow)return 0;
+var d=f.contentDocument||f.contentWindow.document;
+var ed=d.querySelector('.comfy-multiline-input.h3-prompt-editor')||d.querySelector('.h3-prompt-editor');
+return (ed&&ed.isContentEditable===true)?1:0;
+"""
+# 节点媒体画廊实际填了几格：.has-media 是节点自己挂的类，空槽不会挂。
+# 序列化里的媒体对了但这里还是 0，说明节点没认这份媒体——别急着提交。
+_JS_GALLERY = """
+var f=document.getElementById(arguments[0]);
+if(!f||!f.contentWindow)return 0;
+var d=f.contentDocument||f.contentWindow.document;
+return d.querySelectorAll('.fh-h3-media-slot.has-media').length;
 """
 # 输出节点：文件名 + 公开下载地址
 _JS_RESULT = """
@@ -145,20 +205,35 @@ var o={};
   }});
 return JSON.stringify(o);
 """
-# 顶层页的运行按钮：三档（Lite/Standard、Lite/Plus、Ultra），H3yun 用的是 Plus 那颗
+# 顶层页的运行按钮：三档（Lite/Standard、Lite/Plus、Ultra），H3yun 用的是 Plus 那颗。
+# 平台在任务跑着时会把后两档的 .plus-tags 收起来、按钮置灰，所以标签只当第一线索：
+# 标签找不到就按固定顺序认（从左到右 Standard / Plus / Ultra），并且**不点禁用按钮**——
+# 以前匹配不到就落到第一颗，等于把 Plus 悄悄降成 Standard。
 _JS_EXEC = """
-var tag=arguments[0];
+var tag=(arguments[0]||'').toLowerCase();
 var bs=[].slice.call(document.querySelectorAll('.execute-btn-wrap button'));
 if(!bs.length)return 'no_btn';
-var hit=null;
-bs.forEach(function(b){
+/* 平台只给第一颗挂 .plus-tags；后两档只有「运行」两个字。
+   按固定顺序补名：左 Standard / 中 Plus / 右 Ultra。 */
+function lab(b,i){
   var t=(b.querySelector('.plus-tags')||{}).textContent||'';
-  if(!hit&&tag&&t.indexOf(tag)>=0)hit=b;
-});
-hit=hit||bs[0];
-var lab=(hit.textContent||'').trim().slice(0,40);
+  if(t)return t.replace(/\\s+/g,' ').trim().slice(0,40);
+  if(i===bs.length-1&&bs.length>1&&/ultra/.test(String(b.className)))return 'Ultra';
+  if(bs.length>=2)return ['Lite/Standard','Lite/Plus','Ultra'][Math.min(i,2)];
+  return (b.textContent||'').replace(/\\s+/g,' ').trim().slice(0,40);
+}
+var pick=-1;
+bs.forEach(function(b,i){
+  if(pick<0&&tag&&lab(b,i).toLowerCase().indexOf(tag)>=0)pick=i;});
+if(pick<0&&tag){
+  pick=tag.indexOf('ultra')>=0?bs.length-1:(bs.length>=2?1:0);
+}
+if(pick<0)pick=0;
+var hit=bs[pick];
+if(hit.disabled||hit.getAttribute('disabled')!==null)return 'btn_disabled '+lab(hit,pick);
+var out='clicked '+lab(hit,pick);
 hit.click();
-return 'clicked '+lab;
+return out;
 """
 _JS_EXEC_STATE = """
 var bs=[].slice.call(document.querySelectorAll('.execute-btn-wrap button'));
@@ -208,6 +283,27 @@ return Promise.all([get('queue'),get('history')]).then(function(rs){
 """
 
 
+# 平台自己的任务列表：当前任务（.rh-task-item）和历史（.history-item）都在会话页上，
+# 每条带 taskid 和状态文字（生成中 04:02 / 任务失败）。GET /history 在这套实例上一直是 0，
+# 只有这张列表能看见「我们这段到底排上没有、跑到哪、是不是已经判失败了」。
+# 只读 DOM，不点任何按钮。
+_JS_TASKS = """
+function clean(e){if(!e)return '';
+  var c=e.cloneNode(true);
+  [].slice.call(c.querySelectorAll('svg,script,style')).forEach(function(x){x.remove();});
+  return (c.textContent||'').replace(/\\s+/g,' ').trim().slice(0,120);}
+function one(e){
+  var id=clean(e.querySelector('.rh-task-id,.history-id')).match(/\\d+/)||[''];
+  var st=e.querySelector('.rh-task-status,[class*=history-status]');
+  var d=e.querySelector('.history-bottom-info');
+  return {id:id[0],s:clean(st||e.querySelector('.task-status-running')),d:clean(d)};
+}
+return JSON.stringify({
+  cur:[].slice.call(document.querySelectorAll('.workflow-result-wrap .rh-task-item')).slice(0,6).map(one),
+  his:[].slice.call(document.querySelectorAll('.rh-task-history .history-item')).slice(0,8).map(one)});
+"""
+
+
 def pick_size(w, h):
     """把界面的 WxH 翻成云端那四件套：档位标签 + 画幅 + 宽 + 高。
 
@@ -243,7 +339,6 @@ class CloudH3:
         self.poll_min = max(2, int(self.cfg.get("poll_sec") or 5))
         self.timeout = max(60, int(self.cfg.get("gen_timeout") or 1800))
         self.tag = str(self.cfg.get("exec_tag") or "Plus")
-        self.media_tpl = None
         self.has_editor = False
         self.wf_title = ""
 
@@ -292,17 +387,19 @@ class CloudH3:
         return ("remote", s)
 
     def host_url(self):
-        """本地那份借哪一页进去：托管 ComfyUI 只能从某个平台工作流页打开。
+        """本地那份借哪一页进去：手动覆盖 → 平台默认 → 内置那一页。
 
         换的是画布上那张图，跑它的还是那台实例——「换图不换实例」。
+        内置页只是入口，谁都借得到；真跑的一定是灌进去的本地画布。
         """
-        for cand in (self.cfg.get("wf_host"), self.cfg.get("default_wf")):
+        for cand in (self.cfg.get("wf_host"), self.cfg.get("default_wf"),
+                     HOST_WF_FALLBACK):
             s = str(cand or "").strip()
             m = re.search(r"workflow/(\d+)", s)
             wid = m.group(1) if m else (s if s.isdigit() else "")
             if wid:
                 return WF_URL % wid
-        raise CloudError("本地那份工作流要知道用哪一页跑：再填一个平台上打得开的工作流地址（宿主页）")
+        return ""
 
     # ---------- 灌本地工作流 ----------
     def load_local_wf(self, tab, fid, path, stop, limit=30):
@@ -324,6 +421,20 @@ class CloudH3:
         if not (isinstance(g, dict) and (g.get("nodes") or [])):
             raise CloudError("这份 JSON 里没有画布：要平台「导出工作流」存下来的那种（带 nodes）——"
                              "不是 API 格式、也不是节点清单")
+        # comfyUI.html 是「先到壳、后挂 app」：实测 iframe 已在，loadGraphData 先是对象、
+        # 两三秒后才变成函数、再几秒才把图挂上。等它挂好再灌，别拿「壳到了」当「编辑器好了」。
+        for _ in range(40):
+            if stop and stop():
+                raise CloudError("已停止")
+            ready = self.js(tab,
+                            "var f=document.getElementById(arguments[0]);"
+                            "var a=f&&f.contentWindow&&f.contentWindow.app;"
+                            "return !!(a&&typeof a.loadGraphData==='function');", fid)
+            if ready:
+                break
+            time.sleep(0.5)
+        else:
+            raise CloudError("云端编辑器还没挂好：等不到 loadGraphData，重开这段再试")
         try:
             d = json.loads(self.js(tab, _JS_LOAD_WF, fid, txt) or "{}")
         except ValueError:
@@ -396,14 +507,22 @@ class CloudH3:
         aid = row["id"]
         state = self.store.load(aid)
         kind, src = self.wf_src(p.get("wf"))
-        url = self.host_url() if kind == "file" else self.wf_url(src)
         secs = max(5, min(15, int(p.get("seconds") or 5)))
         size = pick_size(int(p.get("width") or 768), int(p.get("height") or 768))
         first = self._ref(str(p.get("first") or ""))
         with self.host.lock:
             self.host.purpose = "gen"            # 这段期间保活别换号，否则中途掉登录
             try:
+                if getattr(self.host, "current", aid) != aid:
+                    # 选了号就得真换过去：这只浏览器是共用的，不能拿上一个号的登录态跑
+                    self.host.apply(state, aid=aid)
                 tab = self.host.tab()
+                if kind == "file":
+                    url = self.host_url()
+                    if not url:
+                        raise CloudError("本地工作流缺一个平台入口页：填一份网页工作流地址当兜底")
+                else:
+                    url = self.wf_url(src)
                 tab.get(url)
                 fid = self._wait_frame(tab, should_stop)
                 if kind == "file":
@@ -412,8 +531,15 @@ class CloudH3:
                     ids = self.load_local_wf(tab, fid, src, should_stop)
                 else:
                     ids = self._wait_graph(tab, fid, should_stop)
+                self._wait_editor(tab, fid, should_stop)
                 self._log_shape(tab, fid, ids["main"])
                 media = []
+                if not first:
+                    # 这份节点只有「图生/首尾帧」和「参考生视频」两种，没有纯文字模式。
+                    # 不给图就交上去，平台会当场判「参考生视频未收到图片或视频」——先在这里说清。
+                    # 读不到 modeOpts 时也按「必须给图」处理：宁可拦下，也不花积分去换一句平台报错。
+                    raise CloudError("云端这份 H3 工作流按参考生成：先在「参考图」那格选一张图，"
+                                     "纯文字它不接")
                 if first:
                     self._p(on_progress, should_stop, "云端：上传参考图…")
                     fn, sub = self.upload(first, state)
@@ -421,12 +547,24 @@ class CloudH3:
                 spec = {
                     "prompt": str(p.get("prompt") or ""),
                     "media": media,
+                    # 画廊预览：H3yun 每段都写这一份；少了它画廊不按新图刷新
+                    "preview": {"shown": {"aspect_ratio": size["aspect_ratio"],
+                                          "fps": 24, "resolution": size["resolution"]},
+                                "fallback": {"aspect_ratio": size["aspect_ratio"], "fps": 24}},
                     "widgets": {
-                        "mode": MODE_I2V if media else MODE_REF,
+                        # 有图就走「参考生视频」：节点的参考模式才认 embedded_media 清单。
+                        # 之前切到 I2V/首尾帧，序列化里 mode=image，但节点执行时按参考槽取图，
+                        # 拿不到就把整段判成「参考生视频未收到图片或视频」——这是那条报错的来源。
+                        "mode": MODE_REF,
                         "seconds": secs,
                         "fps": 24,
                         "audio_duration_auto": "Off",
+                        "ref_image_size": "640",
+                        "reference_mention_mode": "By index",
+                        # 节点自带的提示词扩写会再去请求一次 LLM，SSL 一抖整段就废；H3yun 默认关
+                        "prompt_optimizer_enabled": False,
                         "reference_text_only": not bool(media),
+                        "low_vram_streamed_attention": False,
                         "resolution": size["resolution"],
                         "aspect_ratio": size["aspect_ratio"],
                         "width": size["width"],
@@ -438,9 +576,11 @@ class CloudH3:
                 base_name = self._filename(tab, fid, ids["out"])
                 self._p(on_progress, should_stop, "云端：提交任务…")
                 hist0 = self.history_count(tab, fid)   # 提交前有几条，之后才知道多没多
-                self._submit(tab)
+                known = self.known_task_ids(tab)      # 提交前任务列表上已有的，几秒后才多出我们这条
+                hit = self._submit(tab, should_stop)
+                self._p(on_progress, should_stop, "云端：已提交（%s）" % hit.replace("clicked ", "").strip())
                 cos, fname = self._wait_result(tab, fid, ids["out"], base_name,
-                                               on_progress, should_stop, hist0)
+                                               on_progress, should_stop, hist0, known)
             finally:
                 self.host.purpose = ""
         self._p(on_progress, should_stop, "云端：下载成片…")
@@ -487,11 +627,26 @@ class CloudH3:
             time.sleep(3)
         raise CloudError("图加载完但没找到 H3 主节点/输出节点：这份工作流不是 H3 成片图")
 
-    def _log_shape(self, tab, fid, main):
-        """把线上媒体条目的字段抄下来当模板：缺 key 的写法会被 ensureEmbeddedMedia 丢掉。
+    def _wait_editor(self, tab, fid, stop, limit=20):
+        """等提示词编辑器挂好再写。等不到也只是记一条——有的工作流版本可能真没有编辑器。"""
+        t0 = time.time()
+        while time.time() - t0 < limit:
+            if stop and stop():
+                raise CloudError("已停止")
+            try:
+                if self.js(tab, _JS_EDITOR, fid):
+                    return True
+            except Exception:
+                pass
+            time.sleep(0.5)
+        self.log("· 等 %d 秒也没挂出提示词编辑器：改走控件/节点编辑器兜底" % limit)
+        return False
 
-        storage/audio_trim 这些键的取值是平台自己的约定，不猜——
-        那份工作流里既然已经有一条媒体，就照它那一条的形状填新值。
+    def _log_shape(self, tab, fid, main):
+        """看一眼前置条件：节点类型、模式选项、编辑器在不在。
+
+        媒体条目的字段不再从旧条目抄（见 media_item）——旧图那一条的 storage/裁切区间
+        可能属于另一个实例，抄过来正是「节点说没收到参考」的来源。
         """
         try:
             d = json.loads(self.js(tab, _JS_INSPECT, fid, main) or "{}")
@@ -499,18 +654,19 @@ class CloudH3:
             d = {}
         if d.get("err"):
             raise CloudError("读不到主节点：%s" % d["err"])
-        self.media_tpl = d.get("media0") if isinstance(d.get("media0"), dict) else None
         self.has_editor = bool(d.get("editor"))
         return d
 
     def media_item(self, name, sub):
-        """一条媒体引用：有模板就抄模板换文件名，没有就按线上常见形状给最小的一份。"""
-        item = dict(self.media_tpl or {"media_type": "image", "ordinal": 1,
-                                       "filename": "", "subfolder": "",
-                                       "storage": "comfyui", "audio_trim": "00:00-00:00"})
-        item.update({"media_type": "image", "ordinal": 1, "filename": name,
-                     "subfolder": sub})
-        return item
+        """一条媒体引用，字段固定成 H3yun 实机验证过的那一份。
+
+        为什么不再从线上旧条目抄：`storage` 一旦抄成 "comfyui"、`audio_trim` 抄成非空串，
+        ensureEmbeddedMedia 虽然放行，落到执行节点那边却取不到文件，
+        最后整段被平台判「参考生视频未收到图片或视频」。上传口是 /upload/image + type=input，
+        所以 storage 只能是 "input"。
+        """
+        return {"media_type": "image", "ordinal": 1, "filename": name,
+                "subfolder": sub or "", "storage": "input", "audio_trim": ""}
 
     def _write(self, tab, fid, ids, spec, secs, size, has_media):
         raw = self.js(tab, _JS_WRITE, fid, ids["main"], json.dumps(spec, ensure_ascii=False))
@@ -520,6 +676,8 @@ class CloudH3:
             raise CloudError("写入节点的返回读不懂：%s" % str(raw)[:160])
         if d.get("err"):
             raise CloudError("写入主节点失败：%s" % d["err"])
+        for x in (d.get("warn") or []):
+            self.log("· 控件提醒：%s" % str(x)[:80])
         bad = list(d.get("bad") or [])
         c = d.get("check") or {}
         want_slots = 1 if has_media else 0
@@ -528,11 +686,33 @@ class CloudH3:
         if c.get("err") or c.get("mode") is None:
             raise CloudError("提交前自检读不到序列化结果（%s）：不敢盲提交"
                              % str(c.get("err") or "序列化里没值")[:80])
-        # 线上实测：mode 控件「I2V or First/Last Frame」序列化后是 image，
-        # 「Reference-to-video」是 reference，所以有参考图走前者
-        want_mode = "image" if has_media else "reference"
+        # 线上实测：mode 控件「Reference-to-video」序列化后是 reference。
+        # 有图时固定走参考模式——这和 H3yun 线上跑通整部短剧的口径一致。
+        want_mode = "reference"
         if c.get("mode") != want_mode:
             bad.append("mode=%s" % c.get("mode"))
+        # 序列化里的那条媒体必须就是我们刚传的：旧模板的 storage/文件名没换干净，
+        # 节点执行时照样会说「没收到参考」。
+        if has_media:
+            m0 = c.get("media0") if isinstance(c.get("media0"), dict) else {}
+            mine = (spec.get("media") or [{}])[0]
+            if m0 and str(m0.get("filename") or "") != str(mine.get("filename") or ""):
+                bad.append("媒体文件名没换成新图（%s）" % str(m0.get("filename") or "")[:24])
+            if m0 and str(m0.get("storage") or "input") != "input":
+                bad.append("媒体 storage=%s" % m0.get("storage"))
+        # 画廊是节点自己的账本：序列化对了但画廊空着，说明节点没认这份媒体
+        if has_media and int(c.get("gallery") or 0) < want_slots:
+            for _ in range(8):
+                time.sleep(0.5)
+                try:
+                    gal = int(self.js(tab, _JS_GALLERY, fid) or 0)
+                except Exception:
+                    gal = 0
+                if gal >= want_slots:
+                    c["gallery"] = gal
+                    break
+            if int(c.get("gallery") or 0) < want_slots:
+                bad.append("画廊里没有参考图（节点没认这份媒体）")
         if c.get("fps") not in (24, 24.0):
             bad.append("fps=%s（必须是 24，否则出的是 1 帧秒的片）" % c.get("fps"))
         if c.get("seconds") not in (secs, float(secs)):
@@ -570,11 +750,25 @@ class CloudH3:
         except ValueError:
             return ""
 
-    def _submit(self, tab):
-        r = str(self.js(tab, _JS_EXEC, self.tag) or "")
-        if r.startswith("no_btn"):
-            raise CloudError("页面上找不到运行按钮：这份工作流可能没权限跑，或页面还没加载完")
-        return r
+    def _submit(self, tab, stop=None, limit=40):
+        """找到运行按钮再点：平台页是 SPA，按钮比画布晚挂出来。
+
+        实测本地图灌进去、参考图上完，页面上那颗按钮还在慢慢渲染——
+        一次读不到就报「没权限」是假话，等一会儿它自己就出来了。
+        """
+        t0 = time.time()
+        last = ""
+        while time.time() - t0 < limit:
+            if stop and stop():
+                raise CloudError("已停止：还没点提交")
+            last = str(self.js(tab, _JS_EXEC, self.tag) or "")
+            if last.startswith("clicked"):
+                return last
+            time.sleep(2)
+        if last.startswith("btn_disabled"):
+            raise CloudError("运行按钮一直是禁用的：这个号上还有任务在跑，等它完再点"
+                             "（没替你点「继续运行」，那条跑的不是这次写的参数）")
+        raise CloudError("页面上找不到运行按钮：等 %d 秒也没挂出来（这份工作流可能没权限跑）" % limit)
 
     def history_count(self, tab, fid):
         """平台上现在有几条历史——提交前后各读一次，多出来的那条才是我们这段。
@@ -586,14 +780,48 @@ class CloudH3:
         except Exception:
             return 0
 
-    def platform_state(self, tab, fid, waited, hist0=0):
+    def task_entries(self, tab):
+        """平台任务列表：当前在跑的与最近的几条历史。读不到回空表（不猜）。"""
+        try:
+            raw = self.js(tab, _JS_TASKS)
+            d = json.loads(raw) if raw else {}
+            return d if isinstance(d, dict) else {}
+        except Exception:
+            return {}
+
+    def known_task_ids(self, tab):
+        """提交前已经在那张列表上的 taskid：之后多出来的那条才是我们这段。"""
+        d = self.task_entries(tab)
+        ids = set()
+        for k in ("cur", "his"):
+            for x in d.get(k) or []:
+                if x.get("id"):
+                    ids.add(str(x["id"]))
+        return ids
+
+    def platform_state(self, tab, fid, waited, hist0=0, known=None):
         """平台上这一段到底到哪一步了——一句话，读不到就回空串（绝不编一个）。
 
         时间波动很大（实测同参数一段 353 秒出片、一段排到二十分钟没动），
         只报「已等 N 秒」人分不清排队/在跑/已失败，所以去问平台自己：
-        页面内存里那份队列看排没排、GET /history 的条数看这条落没落。
-        hist0 = 提交那一刻的历史条数，用来认出「刚多出来的那一条」是不是我们这段。
+        任务列表那一栏（最准，平台自己写的状态）、页面内存里的队列、GET /history 的条数。
+        hist0 = 提交那一刻的历史条数；known = 提交前列表上已有的 taskid——
+        两者都只用来认出「刚多出来的那一条」是不是我们这段。
         """
+        # 先看任务列表：它直接写着「生成中 04:02」「任务失败」，比队列更有信息量。
+        # 提交后新出现的那个 taskid 就是我们这一段；匹配不到就退回旧口径，不去猜别的任务。
+        tasks = self.task_entries(tab) if known is not None else {}
+        cand = list(tasks.get("cur") or []) + list(tasks.get("his") or [])[:1]
+        for x in cand:
+            if not x.get("id") or str(x["id"]) in (known or ()):
+                continue
+            st = str(x.get("s") or "")
+            det = str(x.get("d") or "")
+            if "失败" in st:
+                return ("平台判失败：" + (det or "任务列表把它标成失败，点开那一条看节点报错")
+                        + " · taskid " + str(x["id"]))
+            if st:
+                return "平台上这一段：" + st + " · taskid " + str(x["id"])
         try:
             raw = self.js(tab, _JS_PROGRESS, fid)
             if not raw:
@@ -641,7 +869,7 @@ class CloudH3:
             return "平台上查不到这段任务" + btn + "：可能在它自己的池子里排队"
         return ""
 
-    def _wait_result(self, tab, fid, out, base_name, cb, stop, hist0=0):
+    def _wait_result(self, tab, fid, out, base_name, cb, stop, hist0=0, known=None):
         t0 = time.time()
         seen = ""
         where = ""
@@ -663,7 +891,10 @@ class CloudH3:
                 # 这句只针对「刚看到的那个新文件名」：输出节点一清掉，
                 # 继续挂着就成了一句没根据的抱怨
                 seen = ""
-            where = self.platform_state(tab, fid, int(time.time() - t0), hist0)
+            where = self.platform_state(tab, fid, int(time.time() - t0), hist0, known)
+            # 平台自己把它标成失败了：再等下去也只是等超时，当场收手把原因带出去
+            if "平台判失败" in where:
+                raise CloudError(where)
             if cb:
                 waited = int(time.time() - t0)
                 left = int(self.timeout - waited)

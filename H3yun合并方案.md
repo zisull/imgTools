@@ -398,8 +398,35 @@ P0/P1 之间不并行：队列没有分镜表就是「批量版生图页」，�
 两条都是用户提的：云端能不能用本地工作流文件；云端长宽是不是无所谓、能不能到 2K。答案都是能，且都是量出来的：
 
 - **本地工作流文件能灌进去**。平台页面里的托管 ComfyUI 前端有 `app.loadGraphData(graph, true, false, name)`（`app.serialize()` 不存在，第一版探针就栽在这上面）。往返实测：`app.graph.serialize()` 导出 **65,605 字节 / 23 个节点 / 33 条连线**，灌回去还是 23 个节点，主节点（`FeiHouEasyH3RH`）与输出节点（`VHS_VideoCombine`）按类型都认得出——**主节点 id 未必还是 389、输出节点也未必还是 325**，所以认节点一律按 `class_type`。
-- **导出的文件里没有工作流编号**（只有一个随机 uuid）：托管实例是按页给的，本地那份只能借一个「宿主页」进去，进去之后再把画布换成你这份——「换图不换实例」。所以界面在填了 `.json` 时会多要一格宿主页，没填就直说，不等到点开始才报。
+- **导出的文件里没有工作流编号**（只有一个随机 uuid）：托管实例是按页给的，本地那份只能借一页进去，进去之后再把画布换成你这份——「换图不换实例」。借哪一页不用人填：默认用 H3yun 内置的那一页（`workflow/2103759530927673346`），`wf_host` / `default_wf` 想换再说。第一版试过翻平台列表找一张能开的 H3 页，但 SPA 点卡片的跳转时灵时不灵、有时只剩一个空壳，所以退回「一支已知能开的页」这个更稳的做法。
+- H3yun（`D:\AI\H3yun`）的参照：`config.py` 把 `WORKFLOW_ID = "2103759530927673346"` 和 `WORKFLOW_URL = …/workflow/<id>?source=workspace` 直接钉死，`workflow.py` 在浏览器里按索引写控件再点运行——这也印证了「借一页进实例」是这套托管前端的正路，而不是去找协议口。
+- 灌画布前要等编辑器挂好：iframe 的 `comfyUI.html` 先到，`app.loadGraphData` 一开始是对象、约 2 秒后才是函数、`app.graph` 约 4 秒、23 个节点约 8 秒。`load_local_wf` 最多等 20 秒确认 `typeof loadGraphData === 'function'` 再灌，否则会撞上「这份前端没有 loadGraphData 的口」。
 - 我们自己那份 `webui/moss/workflow_h3.json` 是 **API 格式**（`{"1": {class_type…}}`），不是画布，灌不进去；`load_local_wf` 会拦下并说清「要带 nodes 的那种」。
 - **尺寸：档位是标签，宽高才是命令**。4 档清晰度 × 8 种画幅全扫一遍，序列化里的 `width/height` 始终是 432×768；直接写隐藏的 `width/height` 则原样生效（1920×1080 / 2560×1440 / 3072×1728 / 3840×2160 都留得住），且写完宽高再改画幅也不会被盖回去。平台自己的 `resolution` 档到 1080P + Custom、`aspect_ratio` 八种，但都不影响出片尺寸。
 - 因此云端档位表放到 **480P…1440P（2K）**：2K 就是短边 1440（2560×1440），是官方上限；本地仍停在 768（权重原生档），两条路各用各的表，换通道时界面自动把超出的尺寸收进当前那档的档位表。
 - 代价与边界：高分辨率段没做过真机成片（每段扣积分），界面不给「预计几分钟」的假数；1080 不是 16 的倍数，界面上如实写 1920×1088。
+
+### 13.8 参考生视频的三处硬伤与任务列表（2026-11-02 真机）
+
+用户拿 `H3修改为艾特工作流_fixed.json` 实测时，平台报「Reference-to-video received no image/video references」。顺着这条错误挖出三处，全部在本机复现并修掉：
+
+- **媒体属性必须是数组，不能是字符串**。`node.properties.feihou_h3_embedded_media` 在导出 JSON 里是数组；第一版写成了 `JSON.stringify(media)` 的字符串，节点自己的 `ensureEmbeddedMedia()` 只认数组，字符串被静默当成「没有媒体」——提交前自检读到 `media=0、槽位 0 个`，平台那边就是「没收到参考」。现在按线上那一条的形状写数组，同时清掉 `minimax_h3_virtual_media_links`，并把同一份数组写进隐藏的 `embedded_media_json`。
+- **这份节点没有纯文字模式**。`mode` 只有两档：`I2V or First/Last Frame`、`Reference-to-video`；`reference_text_only` 只是「参考素材仅走文本编码（实验）」，不是文生视频。不给图就提交，平台必然判「参考生视频未收到图片/视频」。现在两处一起拦：界面把云端那格写成「参考图（必填）」并进提醒；`run()` 读回 `modeOpts` 后，发现没有任何含 `text` 的模式又没给图，就在提交前直接说清「先在参考图那格选一张图」。
+- **运行按钮比画布晚挂出来**。平台页是 SPA，`loadGraphData` 完成后 `.execute-btn-wrap button` 还要再等若干秒（实测第一次找时 `no_btn`）。`_submit` 改成每 2 秒重找、最多 40 秒，找到再点；一次性的 `querySelector` 会把「还没渲染」误报成「这份工作流没权限跑」。
+- **任务列表是唯一能看见「排上没、跑到哪、失没失败」的地方**。这套实例的 `GET /history` 恒为 0 条，页面内存里的队列也常常是空壳；但会话页 DOM 里有 `.workflow-result-wrap .rh-task-item`（当前任务）和 `.rh-task-history .history-item`（历史），每条都带 `taskid:` 和状态文字（`生成中 04:02` / `任务失败`）。新增 `_JS_TASKS` 只读这两栏：提交前记下已有 taskid，提交后新冒出来的那条就是这一段；读到「失败」当场收手并把 taskid 带进错误，读到「生成中」就如实报，不再把「队列里查不到」说成「可能在排队」。`/history` 与队列仍保留作备份。
+- 失败详情（节点报错原文）不在这两栏里——历史条目底部那个 `.history-bottom-info` 是空的；平台把它留在任务详情的节点报错里，所以软件只负责把 taskid 和「已判失败」带出来，不编造原因。
+
+### 13.9 参考注入改成 H3yun 的实机口径（2026-11-02）
+
+§13.8 修完后平台上仍报「参考生视频未收到图片或视频」。把 H3yun 的 `workflow.py` 逐行对照，发现我们和他的写法有四处不同——他的那套在线上跑完整部短剧，所以这里不再自创，全部照他的口径重写：
+
+- **模式一直是「Reference-to-video」**。我们之前有图就切到 `I2V or First/Last Frame`，以为「首帧」更直接；H3yun 线上跑通整部短剧用的是参考模式，参考清单也只在参考模式下被节点当作「参考」使用。现在有图固定走参考模式，序列化里的 `mode` 也按 `reference` 自检。
+- **媒体条目字段固定，不再从线上旧图抄**。H3yun 写的是 `{media_type, ordinal, filename, subfolder:"", storage:"input", audio_trim:""}`。之前从线上旧条目抄模板，会把 `storage:"comfyui"`、非空的 `audio_trim` 带进来；前端放行、执行端却取不到文件。上传口本来就是 `/upload/image` + `type=input`，`storage` 只能是 `"input"`。
+- **补写 `feihou_h3_production_preview`**（`shown` / `fallback` 两段宽高、fps、档位）。H3yun 每段都写，是它线上固定的口径；我们照抄，不靠猜。
+- **提示词写 iframe 里的编辑器 DOM，事件也用 iframe 自己的 `Event`**。之前用顶层 window 的 `InputEvent` 往 iframe 里派发，编辑器未必认，文本就没同步回控件和序列化数据；现在照 H3yun：`focus → innerHTML（转义 + <br>）→ input/change → setDirtyCanvas`，编辑器不存在才退回 `node.__h3Editor` 或控件。
+- **真源是 `properties`，不是隐藏控件**。节点 JS 的 `graphToPrompt` 包装会用 `ensureEmbeddedMedia(node)` 重新生成 `embedded_media_json`，并把 `media_1…media_9` 一并重建成「参考模式保留全部、非参考模式只留前两张图」；隐藏控件里写什么都只是副本。所以属性数组必须是最终那份。
+- **画廊要手动催一次重画**。节点的「重画媒体画廊」挂在 `mode` 控件的 `callback` 上（`syncModeWidgets + renderEmbeddedMediaGallery`）；程序化改 `widget.value` 不触发回调，画廊会停在灌图时那批旧图上。写完后显式调一次 `mode.callback(mode.value)`，等于模拟用户重选模式，不改值。
+- **提交前多看两处证据**：序列化里的第一条媒体必须是刚传的文件名、`storage` 必须是 `input`；画廊 `.fh-h3-media-slot.has-media` 必须填上（给 4 秒渲染）。任何一项对不上就停在提交前，不花积分去换一句平台报错。
+- 新增控件按「有就写、没有就跳过」处理：`ref_image_size=640`、`reference_mention_mode=By index`、`prompt_optimizer_enabled=False`（节点自带扩写会再请求 LLM，SSL 一抖整段就废）、`low_vram_streamed_attention=False`。老工作流缺这几颗也不至于整段跑不起来，只在日志里记一条。
+
+**真机验证（2026-11-02）**：只灌图写节点、不点运行的探针读回 `mode=reference`、`media0` 就是刚上传的文件名、`storage=input`、`slots=1`、`gallery=1`、`editor=true`，提示词与 1344×768 全对。随后 15 秒 Plus 的 1344×768（taskid 2117252271875252225）提交成功，平台从排队第 3 位跑到 43 分钟被判「任务超时」；换 H3yun 实际用的短边档 848×480 Plus（taskid 2117263739618287617）后，20 秒提交、280.4 秒出片，文件 `tkhd` 864×480、`mvhd` 15.08 秒、3.8 MB。注意：我们界面的「P=短边」在 16:9 下 768P＝1344×768，比 H3yun 的 `768P/16:9`＝768×432 重约 3 倍——同标称档位但算力不是一个量级，等片时间要按像素数估，不能按标签估。

@@ -75,22 +75,30 @@ def mp4_size(path):
 
 
 def main():
-    args = [x for x in sys.argv[1:] if not x.startswith("--")]
-    seconds = args[0] if len(args) > 0 else "5"
-    size = args[1] if len(args) > 1 else "848x480"
-    wf = DEFAULT_WF
-    if "--wf" in sys.argv:
-        wf = sys.argv[sys.argv.index("--wf") + 1]
+    import argparse
+    ap = argparse.ArgumentParser()
+    ap.add_argument("seconds", nargs="?", default="5")
+    ap.add_argument("size", nargs="?", default="848x480")
+    ap.add_argument("--wf", default=DEFAULT_WF,
+                    help="平台工作流地址/ID，或本地「导出工作流」存下来的 .json")
+    ap.add_argument("--prompt", default="一只猫推开木门，阳光落在地板上，镜头缓慢推进")
+    ap.add_argument("--first", default="",
+                    help="首帧/参考图：云端这份 H3 工作流按参考生成，得给一张图")
+    args = ap.parse_args()
+    seconds, size, wf, prompt = args.seconds, args.size, args.wf, args.prompt
 
     from app import App
     a = App()
+    # 平台池子排起来没准头（实测 5 秒段也能排到十几分钟）；冒烟宁可多等，
+    # 不要把「还在平台那边跑」误报成失败。界面上的默认仍是 30 分钟。
+    a.cfg.setdefault("cloud", {})["gen_timeout"] = 3600
     before = set()
     out_dir = os.path.join(ROOT, str((a.cfg.get("console") or {}).get("output_dir") or "outputs"))
     if os.path.isdir(out_dir):
         before = {x for x in os.listdir(out_dir) if x.lower().endswith(".mp4")}
 
     t0 = time.time()
-    r = a.video_gen({"prompt": "一只猫推开木门，阳光落在地板上，镜头缓慢推进",
+    r = a.video_gen({"prompt": prompt, "first": args.first,
                      "seconds": seconds, "size": size, "exec": "cloud",
                      "cloud_wf": wf, "cloud_acct": ""})
     print("· 发起：%s" % ("ok · 号「%s」· 界面写 %s" % (r.get("acct"), size)
@@ -98,7 +106,7 @@ def main():
     if not r.get("ok"):
         return 1
     last = ""
-    while a.st.get("running") and time.time() - t0 < 2400:
+    while a.st.get("running") and time.time() - t0 < 3700:
         s = str(a.st.get("status") or "")
         if s != last:
             print("  [%4ds] %s" % (int(time.time() - t0), s))

@@ -388,18 +388,15 @@ def test_wf_src():
     except cg.CloudError as e:
         assert "找不到" in str(e), str(e)
 
-    # 宿主页：能认整段地址里的编号、也认纯数字；没填就说清楚要补什么
-    g.cfg = {"wf_host": "https://www.runninghub.cn/ai-detail/1/workflow/777"}
+    # 宿主页：手动覆盖 → 平台默认 → 内置页；内置页保证「只给本地文件也能跑」
+    g.cfg = {"wf_host": "https://www.runninghub.cn/ai-detail/1/workflow/777",
+             "default_wf": cg.WF_URL % "999"}
     assert g.host_url() == cg.WF_URL % "777", g.host_url()
-    g.cfg = {"wf_host": "888"}
+    g.cfg = {"wf_host": "", "default_wf": "888"}
     assert g.host_url() == cg.WF_URL % "888", g.host_url()
     g.cfg = {"workflow": p}
-    try:
-        g.host_url()
-        raise AssertionError("没填宿主页却没报错")
-    except cg.CloudError as e:
-        assert "宿主页" in str(e), str(e)
-    print("  ✓ 云端工作流：平台地址 / 本地 .json / 宿主页三态，缺了各说一句话")
+    assert g.host_url() == cg.HOST_WF_FALLBACK, g.host_url()
+    print("  ✓ 云端工作流：平台地址 / 本地 .json 借用内置页 / 手动覆盖仍优先")
 
 
 def test_load_local_wf():
@@ -450,9 +447,14 @@ def test_write_selfcheck():
     """
     from cloudkit import gen as cg
     size = cg.pick_size(848, 480)
-    spec = {"prompt": "一只猫推开木门，阳光落在地板上", "media": [1]}
-    good = {"mode": "image", "fps": 24, "seconds": 5, "resolution": "480P",
-            "media": 1, "slots": 1, "prompt": spec["prompt"]}
+    # 媒体条目要和 media_item() 同形：filename 是刚传上去的那一张，storage 只能是 input
+    spec = {"prompt": "一只猫推开木门，阳光落在地板上",
+            "media": [{"media_type": "image", "ordinal": 1, "filename": "new.png",
+                       "subfolder": "", "storage": "input", "audio_trim": ""}]}
+    good = {"mode": "reference", "fps": 24, "seconds": 5, "resolution": "480P",
+            "media": 1, "slots": 1, "gallery": 1,
+            "media0": {"filename": "new.png", "storage": "input"},
+            "prompt": spec["prompt"]}
 
     def gen(check, bad=None, editor=True):
         g = cg.CloudH3(TMP, {}, None, None)
@@ -474,7 +476,12 @@ def test_write_selfcheck():
         ("档位不对", dict(good, resolution="768P")),
         ("fps 不对", dict(good, fps=1)),
         ("时长不对", dict(good, seconds=15)),
-        ("模式不对", dict(good, mode="reference")),
+        # 有参考图必须走 reference：切到 image 就是平台那条「参考生视频未收到图片」
+        ("模式不对", dict(good, mode="image")),
+        # 从线上旧条目抄来的 storage 会让执行节点取不到文件
+        ("storage 抄旧了", dict(good, media0={"filename": "new.png", "storage": "comfyui"})),
+        ("媒体没换成新图", dict(good, media0={"filename": "old.png", "storage": "input"})),
+        ("画廊没认", dict(good, gallery=0)),
     ):
         try:
             run(dict(bad))
@@ -483,6 +490,22 @@ def test_write_selfcheck():
         else:
             raise AssertionError("自检没拦住：%s" % label)
     print("  ✓ 提交前自检：缺证据即失败，槽位/媒体/提示词/档位/fps/时长/模式逐项拦得住")
+
+
+def test_media_item():
+    """媒体条目的形状锁死成 H3yun 实机那一份。
+
+    storage 只能是 input（上传口就是 /upload/image + type=input），audio_trim 必须是空串；
+    从线上旧条目抄模板会把 comfyui / 裁切区间带进来，节点执行时取不到文件，
+    平台就回那句「参考生视频未收到图片或视频」。
+    """
+    from cloudkit import gen as cg
+    g = cg.CloudH3(TMP, {}, None, None)
+    assert g.media_item("a.png", "") == {
+        "media_type": "image", "ordinal": 1, "filename": "a.png",
+        "subfolder": "", "storage": "input", "audio_trim": ""}
+    assert g.media_item("a.png", "sub")["subfolder"] == "sub"
+    print("  ✓ 媒体条目：storage=input、audio_trim 空、字段不随旧模板漂")
 
 
 def test_platform_state():
@@ -538,6 +561,32 @@ def test_platform_state():
     assert "输出节点还没刷新" in g(okd).platform_state(None, "f", 300, 1), "跑完没刷新没认出来"
     run = '{"http":{"run":0,"pend":0,"keys":["q"]},"h":{"n":2,"last":{"id":"b","s":"running"}}}'
     assert "平台已经收下这段" in g(run).platform_state(None, "f", 300, 1), "收下没跑完没认出来"
+
+    # 任务列表那一栏：平台自己写着「生成中 04:02」「任务失败」，比队列更直接。
+    # 只认提交后新冒出来的 taskid（提交前那份 known 里的旧账一律不算）。
+    def gt(tasks, prog="{}"):
+        x = cg.CloudH3(TMP, {}, None, None)
+        x.js = lambda tab, script, *a: tasks if script == cg._JS_TASKS else prog
+        return x
+    live = '{"cur":[{"id":"111","s":"生成中 04:02","d":""}],"his":[]}'
+    s = gt(live).platform_state(None, "f", 30, 0, known={"222"})
+    assert "生成中 04:02" in s and "111" in s, "任务列表里在跑没读出来：%r" % s
+    dead = '{"cur":[],"his":[{"id":"333","s":"任务失败","d":""}]}'
+    s = gt(dead).platform_state(None, "f", 30, 0, known={"222"})
+    assert "平台判失败" in s and "333" in s, "任务列表里的失败没读出来：%r" % s
+    # 失败那条是提交前就在的旧账：不许算到这一段头上
+    assert gt(dead).platform_state(None, "f", 30, 0, known={"333"}) == "", "把旧失败算成了这段的"
+    # 读到失败时 _wait_result 当场收手，不干等到超时
+    x = gt(dead)
+    x.poll_min = 0.01
+    x.timeout = 5
+    t0 = time.time()
+    try:
+        x._wait_result(None, "f", "out", "base", None, None, 0, {"222"})
+        raise AssertionError("失败没抛错")
+    except cg.CloudError as e:
+        assert "平台判失败" in str(e), str(e)
+    assert time.time() - t0 < 3, "失败时还在干等"
     print("  ✓ 云端状态：在跑/排队/查不到/报错/跑完没刷新五种说实话，读不到就留空不编")
 
     # 超时那句也要带「看见了什么」：光说等超时，人不知道该怪排队还是怪取回
@@ -594,6 +643,7 @@ def main():
         test_wf_src,
         test_load_local_wf,
         test_write_selfcheck,
+        test_media_item,
         test_platform_state,
         test_bridge_without_dp,
     ]

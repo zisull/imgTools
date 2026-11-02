@@ -1550,7 +1550,8 @@ class App(WindowCtl):
             return {"ok": False, "msg": "云端还没备好：%s" % e}
         try:
             kind, src = g.wf_src(str(v.get("cloud_wf") or ""))
-            wf = g.host_url() if kind == "file" else g.wf_url(src)
+            # 本地文件没有平台编号：宿主页到开页时再自动借，这里只校验远端地址
+            wf = g.wf_url(src) if kind != "file" else ""
         except Exception as e:
             return {"ok": False, "msg": "%s" % e}
         if not self._launch("video", lambda: self._do_video_cloud(v)):
@@ -1580,8 +1581,8 @@ class App(WindowCtl):
                  "wf": str(v.get("cloud_wf") or ""),
                  "out_dir": out_dir}
             if (v.get("first") and not p["first"]):
-                # 和那条「静默变成文生视频」的旧坑同一个道理：说破，别让人以为参考图进去了
-                self._log("⚠️ 参考图不在了：%s · 这一段只按文字出片"
+                # 云端这份工作流没有纯文字模式：图不在了就当场说清，别让人以为还能出片
+                self._log("⚠️ 参考图不在了：%s · 云端这份工作流必须有图，这一段会直接停下"
                           % os.path.basename(str(v.get("first"))))
             path = self._cloud_h3().run(p, on_progress=self._cloud_step,
                                         should_stop=self._stop.is_set)
