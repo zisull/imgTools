@@ -22,6 +22,9 @@ const STATE={
 function byId(id){return (data&&data.accounts||[]).filter(a=>a.id===id)[0]||{};}
 /* 浏览器这只窗口当下被谁占着（后端 host.purpose）：保活见到非空闲就让路 */
 const BUSY_TXT={login:'登录页开着',gen:'云端出片中',hold:'有人在用'};
+/* 云端出片占着同一只浏览器：这期间登录/换号/关浏览器都会把正在跑的号顶掉 */
+function runBusy(){return !!((MIC.s.st.cloud||{}).run);}
+function locked(){return !!MIC.s.st.cloud_busy||runBusy();}
 function stamp(ts){
   const n=Number(ts)||0;if(!n)return '';
   const d=new Date(n*1000),p=x=>String(x).padStart(2,'0');
@@ -40,6 +43,7 @@ function acctSub(a){
 }
 function liveSub(){
   const n=(data&&data.accounts||[]).length;
+  if(runBusy())return '云端任务在跑 · 账号先别动';
   const busy=MIC.s.st.cloud_busy;
   if(busy)return busy+'…';
   const on=data&&data.browser&&data.browser.on;
@@ -48,8 +52,7 @@ function liveSub(){
 
 function row(a){
   const s=STATE[a.state]||STATE.new;
-  const busy=!!MIC.s.st.cloud_busy;
-  const off=busy||(data&&data.dp===false);   // 缺浏览器依赖时登录/保存点不动，档案仍可改名/备份
+  const off=locked()||(data&&data.dp===false);   // 缺浏览器依赖或出片中：登录/保存点不动，档案仍可改名/备份
   return `<div class="mrow">
     <span class="dot ${s.dot}"></span>
     <div class="minfo"><b>${esc(a.name)}</b><span class="mut fine">${esc(acctSub(a))}</span></div>
@@ -64,14 +67,14 @@ function createRow(){
   return `<div class="inrow">
       <input id="cloudNewName" class="inp" placeholder="给这次登录起个名（如 主号）"
         onkeydown="if(event.key==='Enter')MIC.cloud.create()">
-      <button class="btn pri" onclick="MIC.cloud.create()"${MIC.s.st.cloud_busy?' disabled':''}>新建登录</button>
+      <button class="btn pri" onclick="MIC.cloud.create()"${locked()?' disabled':''}>新建登录</button>
     </div>
     <div class="mut fine" style="margin-top:6px">点开后在新窗口里登录；登录完回到这里点「保存」，这个号就留下了。</div>`;
 }
 
 function browserCard(){
   const d=data||{}, b=d.browser||{}, k=d.keep||{};
-  const busy=MIC.s.st.cloud_busy;
+  const busy=locked();
   const cur=byId(b.account);
   const on=!!b.on, noDp=d.dp===false;
   return C.card('浏览器','globe',
@@ -101,19 +104,24 @@ function page(){
   }
   const warn=d.dp?'':
     `<div class="notebar">${ic('tool','s')}<b>缺 DrissionPage</b>`+
-    `<span class="grow"></span><button class="btn sm pri" onclick="MIC.nav.goto('env_base')">去基础环境补</button></div>`;
+    `<span class="grow"></span><button class="btn sm pri" onclick="MIC.env.focus('base')">去基础补</button></div>`;
+  /* 出片占着这只浏览器：登录/换号/关窗口都先把话说明白，别让人点了才发现弹回来一句忙 */
+  const run=runBusy()?`<div class="notebar">${ic('refresh','s')}
+      <b>云端任务在跑 · 登录、换号、关浏览器先等它结束</b>
+      <span class="grow"></span><button class="btn sm gho" onclick="MIC.nav.goto('${
+        (MIC.s.st.cloud||{}).run==='film'?'film':'video'}')">去看进度</button></div>`:'';
   const rows=(d.accounts||[]).map(row).join('')||
     `<div class="empty">还没有账号 · 上面起个名点「新建登录」</div>`;
   const msg=busy?`<div class="status" style="margin-bottom:8px">${C.strow('进行中',
       `<span class="dot run"></span><span>${esc(busy)}</span>`)}</div>`:
     (d.msg?`<div class="mut fine" style="margin-bottom:8px">${esc(d.msg)}</div>`:'');
-  return warn+C.duo(
+  return warn+run+C.duo(
     C.card('账号','globe',msg+createRow()+`<div style="margin-top:10px">${rows}</div>`),
     browserCard());
 }
 
 MIC.registerPage('cloud',{
-  title:'H3 云端',sub:liveSub,icon:'globe',
+  title:'云端账号',sub:liveSub,icon:'globe',
   render(){return page();},
 });
 
@@ -124,6 +132,7 @@ function refresh(){
     if(r){data=r;last=Date.now();}
   }).catch(()=>{}).then(()=>{
     loading=false;
+    if(!onPage())return;
     const a=document.activeElement;
     const typing=a&&/^(INPUT|TEXTAREA)$/.test(a.tagName)&&a.closest&&a.closest('#view');
     if(!typing)MIC.render();
@@ -135,9 +144,15 @@ function after(r,msg){
   refresh();
   setTimeout(refresh,1200);
 }
-/* 云端操作是后台线程：busy 期间隔一会儿再读一次，收尾那一刻账号表自己补上 */
+/* 云端操作是后台线程：busy 期间隔一会儿再读一次，收尾那一刻账号表自己补上。
+   这页现在挂在「环境管理 → 云端账号」里，页面键是 env，看子页停在不在这一格。 */
+function onPage(){
+  if(!MIC.nav)return false;
+  const p=MIC.nav.pageOf();
+  return p==='cloud'||(p==='env'&&MIC.env&&MIC.env.tabId()==='cloud');
+}
 setInterval(()=>{
-  if(!MIC.nav||MIC.nav.pageOf()!=='cloud')return;
+  if(!onPage())return;
   if(loading)return;
   if(MIC.s.st.cloud_busy||Date.now()-last>6000)refresh();
 },1500);
@@ -145,6 +160,10 @@ setInterval(()=>{
 MIC.cloud={
   get data(){return data;},
   refresh,
+  render:page,
+  mount(){
+    if(!data||Date.now()-last>6000)refresh();
+  },
   create(){
     const el=MIC.$('cloudNewName');
     const name=el?el.value.trim():'';

@@ -370,7 +370,7 @@ def main():
     store = cs.AccountStore(ROOT)
     accts = store.list()
     if not accts:
-        print("账号库里没有一个号：先到软件「H3云端」页新建登录并保存")
+        print("账号库里没有一个号：先到软件「环境管理 → 云端账号」新建登录并保存")
         return 1
     aid = a.acct or accts[0]["id"]
     row = [x for x in accts if x["id"] == aid][0]

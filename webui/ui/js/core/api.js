@@ -46,7 +46,7 @@ MIC.api={
   loadModel:()=>call('load_model'),
   unloadModel:()=>call('unload_model'),
   startGen:p=>call('start_gen',p),
-  stop:key=>call('stop',key||'gen'),
+  stop:(key,lane)=>call('stop',key||'gen',lane||''),
   /* 引擎切换与 Moss 档位：同一时间只激活一个生图引擎；档位是 Moss 的显存分时复用 */
   setEngine:n=>call('set_engine',n),
   mossSetTier:t=>call('moss_set_tier',t),
@@ -89,6 +89,8 @@ MIC.api={
   /* 视频页云端那一格要的一句话实话（有几个号、缺不缺 DrissionPage、用的哪份工作流）：
      只读档案，绝不为「看一眼」拉起浏览器 */
   cloudBrief:()=>call('cloud_brief'),
+  /* 选完工作流先验结构：只读本地 JSON，不拉浏览器 */
+  cloudCheckWf:p=>call('cloud_check_wf',p||''),
   cloudNew:n=>call('cloud_new',n||''),
   cloudLogin:id=>call('cloud_login',id||''),
   cloudSave:(id,n)=>call('cloud_save',id||'',n||''),

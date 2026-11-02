@@ -27,8 +27,8 @@ function start(key,payload){
     MIC.render();
   }).catch(e=>{firing=false;MIC.toast('启动失败：'+(e.message||e));});
 }
-function stop(key){
-  MIC.api.stop(key||MIC.s.st.running).then(r=>{
+function stop(key,lane){
+  MIC.api.stop(key||MIC.s.st.running,lane).then(r=>{
     if(!r||!r.ok)MIC.toast((r&&r.msg)||'没有运行中的任务');
   }).catch(()=>{});
 }
@@ -89,13 +89,20 @@ MIC.runner.modelNote=function(run){
 };
 
 /* 主操作行：开始按钮在参数卡末尾（锁外面——运行中「停止」必须点得动）。
-   按当前引擎决定发哪一块：千问发 gen.*，Moss 发 moss.* 并带上 engine 让后端走 ComfyUI。 */
-MIC.runner.action=function(startCall){
-  const run=!!MIC.s.st.running,ic=MIC.ic;
-  const key=MIC.s.st.engine==='moss'?'moss':'gen';
-  return run
-    ? '<div class="actrow"><button class="btn pri big" onclick="MIC.runner.stop(\'gen\')">'+ic('stop','s')+'停止</button><span class="mut fine">参数已锁定</span></div>'
-    : '<div class="actrow"><button class="btn pri big" data-start title="Ctrl+Enter" '+
+   按当前引擎决定发哪一块：千问发 gen.*，Moss 发 moss.* 并带上 engine 让后端走 ComfyUI。
+   opts.lane='cloud' 时只看云端那一路：云端成片在跑，视频页也不该变成它的停止键；
+   opts.run 让页面按「我自己这一条」覆盖运行态（成片在跑 ≠ 视频在跑）。 */
+MIC.runner.action=function(startCall,opts){
+  const o=opts||{},ic=MIC.ic;
+  const lane=o.lane==='cloud'?'cloud':'';
+  const run=o.run!=null?!!o.run:(lane?!!(MIC.s.st.cloud||{}).run:!!MIC.s.st.running);
+  const key=o.key||(MIC.s.st.engine==='moss'?'moss':'gen');
+  if(run)
+    return '<div class="actrow"><button class="btn pri big" onclick="MIC.runner.stop(\''+key+'\',\''+lane+'\')">'+ic('stop','s')+'停止</button><span class="mut fine">参数已锁定</span></div>';
+  if(o.disabled)
+    return '<div class="actrow"><button class="btn pri big" disabled title="'+MIC.esc(o.why||'')+'">'+ic('play','s')+'开始生成</button>'+
+      '<span class="mut fine">'+MIC.esc(o.why||'等它结束')+'</span></div>';
+  return '<div class="actrow"><button class="btn pri big" data-start title="Ctrl+Enter" '+
       'onclick="'+(startCall||('MIC.runner.start(\''+key+'\')'))+'">'+ic('play','s')+'开始生成</button>'+
       '<span class="mut fine">Ctrl+Enter</span></div>';
 };
@@ -107,14 +114,16 @@ MIC.runner.action=function(startCall){
    预览并进同一张卡：以前「运行」「成图预览」两张卡上下摞着，多一层壳就多一截空；
    现在一道虚线隔开，配合 .duo 双栏整块吸在右栏。 */
 MIC.runner.runCard=function(runNote,opts){
-  const s=MIC.s.st, run=!!s.running, C=MIC.form, ic=MIC.ic;
-  const o=opts||{};
+  const s=MIC.s.st,o=opts||{},C=MIC.form,ic=MIC.ic;
+  const lane=o.lane==='cloud'?'cloud':'';
+  const attr=lane?' data-lane="cloud"':'';
+  const run=o.run!=null?!!o.run:(lane?!!(s.cloud||{}).run:!!s.running);
   const statusBody=
     '<div class="status">'+
-      C.strow('任务状态','<span class="dot '+(run?'run':'')+'" data-role="dot"></span><span data-role="st"></span>')+
-      C.strow('进度','<div class="prog"><i data-role="prog"></i></div><span class="mut fine" data-role="pgtext"></span>')+
+      C.strow('任务状态','<span class="dot '+(run?'run':'')+'" data-role="dot"'+attr+'></span><span data-role="st"'+attr+'></span>')+
+      C.strow('进度','<div class="prog"><i data-role="prog"'+attr+'></i></div><span class="mut fine" data-role="pgtext"'+attr+'></span>')+
       (o.rows||'')+
-      C.strow('本轮结果','<span class="mut" data-role="result">'+(runNote||'就绪后开始')+'</span>')+'</div>'+
+      C.strow('本轮结果','<span class="mut" data-role="result"'+attr+'>'+(runNote||'就绪后开始')+'</span>')+'</div>'+
     '<div class="btnrow">'+(o.btns||'')+
       '<button class="btn" onclick="MIC.gen.openDir()">'+ic('folder','s')+'打开输出目录</button>'+
     '</div>'+

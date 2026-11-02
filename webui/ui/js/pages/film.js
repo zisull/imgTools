@@ -47,6 +47,26 @@ function wfNow(){
 }
 const isFile=()=>/\.(json|txt)$/i.test(wfNow());
 const firstNow=()=>String(((MIC.s.cfg||{}).film||{}).first||'').trim();
+/* 本地工作流先验结构：和视频页同一个桥，选完就能看出能不能跑 */
+let wfChk=null,wfChkKey='';
+function wfChkHTML(){
+  if(!isFile())return '';
+  if(!wfChk)return '<span class="mut fine">正在检查这份工作流…</span>';
+  return '<span class="'+(wfChk.ok?'mut fine':'bad')+'">'+
+    (wfChk.ok?'✓ ':'✗ ')+esc(wfChk.msg||'')+'</span>';
+}
+function askWfCheck(force){
+  const p=wfNow();
+  if(!isFile()||!p){wfChk=null;wfChkKey='';return;}
+  if(!force&&wfChkKey===p)return;
+  wfChkKey=p;wfChk=null;
+  MIC.api.cloudCheckWf(p).then(r=>{
+    if(wfNow()!==p)return;
+    wfChk=r||{ok:false,msg:'没回话'};
+    const el=document.querySelector('#view [data-role="wfchk"]');
+    if(el)el.innerHTML=wfChkHTML();
+  }).catch(e=>{wfChk={ok:false,msg:String(e&&e.message||e)};});
+}
 
 /* ---------- 最近工程 ---------- */
 let projects=[],listBusy=false,listAt=0;
@@ -199,8 +219,8 @@ function note(icon,text,btn){
 }
 function cloudProblem(){
   const b=brief;if(!b)return '';
-  if(b.dp===false)return '缺 DrissionPage：到「环境 → 基础」补齐后重开软件';
-  if(!(b.accts||[]).length)return '还没有可用的登录号：到「H3云端」页登录并保存';
+  if(b.dp===false)return '缺 DrissionPage：到「环境管理 → 基础」补齐后重开软件';
+  if(!(b.accts||[]).length)return '还没有可用的登录号：到「环境管理 → 云端账号」登录并保存';
   if(!wfNow())return '还差一份 H3 工作流：在下面那格填网页上跑通过的地址或本地 .json';
   if(!firstNow())return '云端按参考生成：先选一张首帧图（本地可纯文字起步）';
   return '';
@@ -208,14 +228,15 @@ function cloudProblem(){
 function acctSel(f){
   const list=(brief&&brief.accts)||[];
   if(!list.length)
-    return '<span class="mut fine">还没有可用的号 · 到「H3云端」页登录并保存</span>';
+    return '<span class="mut fine">还没有可用的号 · 到「环境管理 → 云端账号」登录并保存</span>';
   return C.sel('film.acct',list.map(a=>({name:a.name,code:a.id})),'默认第一个号');
 }
 function wfRow(cloud){
   const local=isFile();
   return C.field('工作流',
     C.pathrow('cloud.workflow',local?'本地导出的工作流（.json）':
-      '网页上跑通过的 H3 工作流地址或 ID','file',true),
+      '网页上跑通过的 H3 工作流地址或 ID','file',true)+
+    (local?'<div data-role="wfchk" style="margin-top:4px">'+wfChkHTML()+'</div>':''),
     '和视频页共用同一份：粘地址，或把「导出工作流」存下的 .json 拖进来。本地文件开跑时自己借平台页面。'+
     (wfNow()?'':' 现在还没填，云端这条路不算通。'));
 }
@@ -268,9 +289,15 @@ function projectsHTML(){
 MIC.registerPage('film',{
   title:'剧本成片',sub:liveSub,icon:'film',
   render(){
-    const s=MIC.s.st,f=MIC.s.cfg.film||{},fs=s.film||{};
-    const busy=!!s.running,cloud=String(f.exec)==='cloud';
+    const s=MIC.s.st,f=MIC.s.cfg.film||{},fs=s.film||{},c=s.cloud||{};
+    const cloud=String(f.exec)==='cloud';
+    /* 任务位按通道算：云端成片在跑只锁云端这条路，本地生图/本地成片照常；
+       反过来本地占着卡，也不该把云端这条锁死。 */
+    const ownRun=cloud?c.run==='film':!!s.running;
+    const cloudBusy=!!c.run;
+    const busy=ownRun;
     if(cloud&&!briefing)askBrief();
+    if(cloud&&isFile())askWfCheck();
     if(!listAt)askList();
 
     const total=+f.total||60,shot=+f.shot||15;
@@ -320,17 +347,24 @@ MIC.registerPage('film',{
         '</div>','接法 · 重试 · 种子')+
       planHTML();
 
-    const act='<div class="actrow">'+
-      (busy?'':`<button class="btn gho" onclick="MIC.film.plan()">${ic('wand','s')}AI 拆分镜</button>`)+
-      (s.running==='film'
-        ?`<button class="btn pri big" onclick="MIC.film.stop()">${ic('stop','s')}停止</button>`+
-         '<span class="mut fine">当前段收尾后停，已出的段都留着</span>'
-        :(busy
-          ?'<span class="mut fine">合成中，等它结束…</span>'
-          :`<button class="btn pri big" data-start onclick="MIC.film.start()">${ic('play','s')}开始成片</button>`+
-           `<span class="mut fine">${n} 段 · 约 ${Math.max(1,Math.round(n*(cloud?6:4)))}~`+
-           `${Math.max(2,Math.round(n*10))} 分钟</span>`))+
-      '</div>';
+    const runKey=s.running==='film'||c.run==='film';
+    let act='<div class="actrow">'+
+      (busy?'':`<button class="btn gho" onclick="MIC.film.plan()">${ic('wand','s')}AI 拆分镜</button>`);
+    if(runKey)
+      act+=`<button class="btn pri big" onclick="MIC.film.stop()">${ic('stop','s')}停止</button>`+
+        '<span class="mut fine">当前段收尾后停，已出的段都留着</span>';
+    else if(s.running==='film_merge')
+      act+='<span class="mut fine">合成中，等它结束…</span>';
+    else if(busy)
+      act+=`<span class="mut fine">${cloud?'云端':'本机'}有任务在跑，等它结束…</span>`;
+    else if(cloud&&cloudBusy)
+      act+=`<button class="btn pri big" disabled title="云端视频在跑">${ic('play','s')}开始成片</button>`+
+        '<span class="mut fine">云端视频在跑，等它结束或先停掉</span>';
+    else
+      act+=`<button class="btn pri big" data-start onclick="MIC.film.start()">${ic('play','s')}开始成片</button>`+
+        `<span class="mut fine">${n} 段 · 约 ${Math.max(1,Math.round(n*(cloud?6:4)))}~`+
+        `${Math.max(2,Math.round(n*10))} 分钟</span>`;
+    act+='</div>';
 
     /* 缺什么就在这一页说：Key、FFmpeg、云端登录/工作流各一条 */
     let notes='';
@@ -339,14 +373,17 @@ MIC.registerPage('film',{
         `<button class="btn sm pri" onclick="MIC.nav.goto('settings')">去设置</button>`);
     if(String(f.mode)==='chain'&&!s.ffmpeg)
       notes+=note('tool','接帧要 FFmpeg 抽尾帧：补上「FFmpeg 静态包」，或把接法改成逐镜',
-        `<button class="btn sm pri" onclick="MIC.nav.goto('env_base')">去补齐</button>`);
+        `<button class="btn sm pri" onclick="MIC.env.focus('base')">去补齐</button>`);
     if(cloud&&brief){
       const p=cloudProblem();
-      if(p)notes+=note('globe',p,`<button class="btn sm pri" onclick="MIC.nav.goto('cloud')">去处理</button>`);
+      /* 缺依赖/缺号能跳到对应那一格；缺工作流或首帧图就在本页，不用把人支走 */
+      const to=brief.dp===false?'base':(!(brief.accts||[]).length?'cloud':'');
+      if(p)notes+=note('globe',p,to?
+        `<button class="btn sm pri" onclick="MIC.env.focus('${to}')">去处理</button>`:'');
     }
 
     let acts='';
-    if(s.running==='film'){
+    if(runKey){
       acts=`<button class="btn" onclick="MIC.film.stop()">${ic('stop','s')}停止</button>`;
     }else if(s.running==='film_merge'){
       acts='<span class="mut fine">合成中…</span>';
@@ -433,9 +470,12 @@ MIC.film={
       prompt:sh.prompt||'',seconds:+sh.seconds||shotSec()}));
   },
   start(){
-    if(firing||MIC.s.st.running)return;
+    if(firing)return;
     const patch=MIC.form.commit();
     const f=Object.assign({},MIC.s.cfg.film||{},patch.film||{});
+    const cloud=String(f.exec)==='cloud',c=MIC.s.st.cloud||{};
+    if(cloud?c.run:MIC.s.st.running)return;
+    if(cloud&&isFile()&&wfChk&&!wfChk.ok){MIC.toast(wfChk.msg||'这份工作流有问题');return;}
     const rows=this.shots();
     if(plan&&planStale()&&
        !confirm('剧情或时长改过，当前分镜还是上一版拆的。继续用这份分镜出片？'))return;
@@ -449,9 +489,17 @@ MIC.film={
     firing=true;
     MIC.api.filmStart(Object.assign({shots:rows,title:plan?plan.title:''},f)).then(r=>{
       firing=false;
-      if(!padOk(r)){toastErr(r,'成片没起来');return;}
-      MIC.s.st.running='film';
-      MIC.s.st.status='准备中…';
+      if(!padOk(r)){
+        if(String(f.exec)==='cloud'&&isFile())askWfCheck(true);
+        toastErr(r,'成片没起来');return;
+      }
+      if(String(r.exec)==='cloud')
+        MIC.s.st.cloud=Object.assign({},MIC.s.st.cloud||{},{run:'film',task:'成片',
+          status:'准备中…',done:0,total:r.shots||rows.length,elapsed:0,last_fail:''});
+      else{
+        MIC.s.st.running='film';
+        MIC.s.st.status='准备中…';
+      }
       askList(true);
       MIC.toast('开始 · '+(r.shots||rows.length)+' 段 · 预计 '+(r.estimate||'—'));
       MIC.render();
@@ -464,12 +512,18 @@ MIC.film={
     }).catch(()=>MIC.toast('停止失败'));
   },
   resume(dir){
-    if(MIC.s.st.running)return;
+    const cloud=String(((MIC.s.st.film||{}).exec))==='cloud';
+    if(cloud?((MIC.s.st.cloud||{}).run):MIC.s.st.running)return;
     MIC.toast('继续中…');
     MIC.api.filmResume(dir||'').then(r=>{
       if(!padOk(r)){toastErr(r,'没能继续');return;}
       if(r.msg)MIC.toast(r.msg);
-      if(!r.film)MIC.s.st.running='film';
+      if(!r.film){
+        if(String(r.exec)==='cloud')
+          MIC.s.st.cloud=Object.assign({},MIC.s.st.cloud||{},{run:'film',task:'成片',
+            status:'准备中…',done:0,total:0,elapsed:0,last_fail:''});
+        else MIC.s.st.running='film';
+      }
       askList(true);
       MIC.render();
     }).catch(e=>MIC.toast('继续失败：'+(e&&e.message||e)));
@@ -493,7 +547,10 @@ MIC.film={
     if(!confirm(msg))return;
     MIC.api.filmRedo(i,chain).then(r=>{
       if(!padOk(r)){toastErr(r,'没能重出');return;}
-      MIC.s.st.running='film';
+      if(String(r.exec||fs.exec)==='cloud')
+        MIC.s.st.cloud=Object.assign({},MIC.s.st.cloud||{},{run:'film',task:'成片',
+          status:'准备中…',done:0,total:0,elapsed:0,last_fail:''});
+      else MIC.s.st.running='film';
       if(r.msg)MIC.toast(r.msg);
       askList(true);
       MIC.render();

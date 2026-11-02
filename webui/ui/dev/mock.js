@@ -3,7 +3,7 @@
 (function(){
 const cfg={
   app_title:'Qwen 生图控制台',theme:'tide',mode:'dark',layout:'tree',sidebar_min:false,
-  notify:true,last_tab:'t_gen',nav_ver:11,open:{},welcomed:true,
+  notify:true,last_tab:'t_gen',nav_ver:12,open:{},welcomed:true,env_tab:'base',
   /* 环境开关：关掉的那路后端不体检、界面不显示（env_check 先按这份过滤） */
   env_on:{base:true,qwen:true,moss:true,h3:true},
   console:{model_dir:'D:/AI/Qwen-Image-2.1/envs/qwen/models/Qwen-Image-2.1-Turbo',
@@ -34,20 +34,15 @@ const cfg={
          domains:['runninghub.cn'],keep:true,keep_min:30,concurrency:1,
          workflow:'',exec_tag:'Plus',poll_sec:5,gen_timeout:1800},
   nav:[
-    {id:'g_out',type:'group',name:'出图',icon:'flower',children:[
+    {id:'g_out',type:'group',name:'创作',icon:'flower',children:[
       {id:'t_gen',type:'tab',name:'文生图',icon:'flower',page:'t2i'},
       {id:'t_edit',type:'tab',name:'图像编辑',icon:'wand',page:'edit'},
       {id:'t_inp',type:'tab',name:'局部重绘',icon:'brush',page:'inpaint'},
       {id:'t_vid',type:'tab',name:'视频生成',icon:'film',page:'video'},
       {id:'t_film',type:'tab',name:'剧本成片',icon:'play',page:'film'}]},
-    {id:'g_env',type:'group',name:'环境',icon:'db',children:[
-      {id:'t_envb',type:'tab',name:'基础环境',icon:'db',page:'env_base'},
-      {id:'t_envq',type:'tab',name:'千问环境',icon:'flower',page:'env_qwen'},
-      {id:'t_envm',type:'tab',name:'Moss 环境',icon:'wave',page:'env_moss'},
-      {id:'t_envh',type:'tab',name:'H3 视频',icon:'film',page:'env_h3'}]},
     {id:'g_sys',type:'group',name:'系统',icon:'cog',children:[
+      {id:'t_env',type:'tab',name:'环境管理',icon:'db',page:'env'},
       {id:'t_gal',type:'tab',name:'作品画廊',icon:'image',page:'gallery'},
-      {id:'t_cloud',type:'tab',name:'H3 云端',icon:'globe',page:'cloud'},
       {id:'t_log',type:'tab',name:'运行日志',icon:'hist',page:'logs'},
       {id:'t_set',type:'tab',name:'全局设置',icon:'cog',page:'settings'}]},
   ],
@@ -62,6 +57,8 @@ const st={running:null,status:'就绪',done:0,total:0,
   env_on:{base:true,qwen:true,moss:true,h3:true},env_todo_by:{},
   engine:'qwen',moss_tier:'daily',moss_installed:false,comfyui_on:false,comfyui_loaded:false,comfyui_url:'',
   cloud_busy:'',cloud_msg:'',ffmpeg:true,ai_key:false,
+  /* 云端任务单独一条线：和 st.running 互不覆盖，界面靠它演示「云端在跑本地照常出图」 */
+  cloud:{run:null,task:'',status:'',done:0,total:0,t_start:0,elapsed:0,last_fail:''},
   film:{state:'idle',phase:'',status:'',id:'',title:'',dir:'',total:0,done:0,current:0,
         elapsed:0,film:'',err:'',shots:[],missing:0,merge_ok:true,msg:'',exec:'',mode:''}};
 
@@ -202,6 +199,7 @@ function finishGen(){
   L('── 结束 ──');
 }
 function advance(){
+  advanceCloud();
   if(st.running==='load'){
     if(st.engine==='moss'){
       mossLoadTick++;
@@ -255,22 +253,8 @@ function advance(){
   /* 成片：每两轮走完一段，界面上的时间线能看见「跑完 → 下一段」 */
   if(st.running==='film'){
     const fs=st.film;
-    fs.elapsed=+(fs.elapsed+0.8).toFixed(1);
-    if(FILM.tick++%2===0){
-      const cur=fs.shots.filter(s=>s.state==='run')[0];
-      if(cur){
-        cur.state='done';cur.sec=8.4;
-        cur.frame_abs='D:/AI/Qwen-Image-2.1/outputs/films/demo/frames/'+
-          String(cur.i).padStart(3,'0')+'.jpg';
-        fs.done++;
-      }
-      const nxt=fs.shots.filter(s=>s.state==='wait')[0];
-      if(nxt){
-        nxt.state='run';fs.current=nxt.i;
-        fs.status='第 '+nxt.i+'/'+fs.total+' 段 · '+(fs.exec==='cloud'?'云端':'本地')+'出片中';
-      }
-      if(fs.done>=fs.total)finishFilm();
-    }
+    filmStep(fs);
+    if(fs.done>=fs.total)finishFilm();
     return;
   }
   if(st.running==='film_merge')finishFilm();
@@ -289,7 +273,7 @@ function finishVideo(){
                sec:+(70+Math.random()*40).toFixed(1),fav:0,video:true});
   if(GAL.length>60)GAL.length=60;
   st.img_count=GAL.length;st.last_image=file;st.last_sec=96.5;
-  st.running=null;st.status='✅ 完成 · '+name;
+  if(st.running==='video'){st.running=null;st.status='✅ 完成 · '+name;}
   L('✅ 已保存：'+file+' · 96.5 秒');
   L('── 结束 ──');
 }
@@ -303,12 +287,51 @@ function finishFilm(){
   const file=(cfg.console.output_dir+'/'+name).replace(/\\/g,'/');
   fs.state='done';fs.phase='完成';fs.status='✅ 成片完成';fs.film=file;fs.current=0;
   fs.shots.forEach(function(s){if(s.state==='run')s.state='done';});
-  fs.done=fs.total;st.running=null;st.status='✅ 成片完成';
+  fs.done=fs.total;
+  if(st.running==='film'){st.running=null;st.status='✅ 成片完成';}
   GAL.unshift({file:file,name:name,t:stamp(),size:(fs.width||768)+'×'+(fs.height||1344),
                seed:-1,prompt:cfg.film.story,mode:'film',negative:'',steps:0,
                sec:fs.elapsed,fav:0,video:true});
   st.img_count=GAL.length;
   L('✅ 成片已保存：'+file);L('── 成片结束 ──');
+}
+/* 云端那条线单独走：本地在出图时它照样能推进，两边的收尾互不覆盖 */
+function filmStep(fs){
+  fs.elapsed=+(fs.elapsed+0.8).toFixed(1);
+  if(FILM.tick++%2)return;
+  const cur=fs.shots.filter(s=>s.state==='run')[0];
+  if(cur){
+    cur.state='done';cur.sec=8.4;
+    cur.frame_abs='D:/AI/Qwen-Image-2.1/outputs/films/demo/frames/'+
+      String(cur.i).padStart(3,'0')+'.jpg';
+    fs.done++;
+  }
+  const nxt=fs.shots.filter(s=>s.state==='wait')[0];
+  if(nxt){
+    nxt.state='run';fs.current=nxt.i;
+    fs.status='第 '+nxt.i+'/'+fs.total+' 段 · '+(fs.exec==='cloud'?'云端':'本地')+'出片中';
+  }
+}
+function advanceCloud(){
+  const c=st.cloud;if(!c.run)return;
+  c.elapsed=+(Number(c.elapsed)+0.8).toFixed(1);
+  if(c.run==='video'){
+    c.done=(Number(c.done)||0)+1;c.total=1;c.status='云端出片中';
+    if(c.done>=c.total){
+      finishVideo();
+      c.status='✅ 云端出片完成';c.run=null;c.elapsed=0;
+    }
+    return;
+  }
+  if(c.run==='film'){
+    const fs=st.film;
+    filmStep(fs);
+    c.done=fs.done;c.total=fs.total;c.status=fs.status;
+    if(fs.done>=fs.total){
+      finishFilm();
+      c.status='✅ 云端成片完成';c.run=null;c.elapsed=0;
+    }
+  }
 }
 
 /* ---------- Moss（内嵌 ComfyUI）假状态 ---------- */
@@ -441,7 +464,16 @@ window.MIC_MOCK={
     }
     beginGen();
     return {ok:true,total:st.total};},
-  stop(key){
+  stop(key,lane){
+    if(lane==='cloud'){
+      const c=st.cloud;
+      if(!c.run)return {ok:false,msg:'云端没有运行中的任务'};
+      if(st.film&&c.run==='film'){st.film.state='stopped';st.film.phase='已停';
+        st.film.status='已停止 · '+st.film.done+'/'+st.film.total+' 段';}
+      c.status='已停止';c.run=null;
+      L('⏹ 已请求停止云端任务：平台上那半截可能还在跑');
+      return {ok:true};
+    }
     if(!st.running)return {ok:false,msg:'没有运行中的任务'};
     st.running=null;wantGen=false;wantMossGen=false;st.status='已停止';
     L('⏹ 已请求停止'+(key==='gen'?'：本步完成后中断':''));
@@ -583,11 +615,13 @@ window.MIC_MOCK={
     const n=parseInt(body.seconds,10)||5;
     if(String(body.exec)==='cloud'){
       if(!cfg.cloud.workflow)return {ok:false,msg:'没给工作流：在视频页填一个已跑通过的 H3 工作流地址'};
-      st.running='video';st.total=1;st.done=0;st.video_exec='cloud';st.status='云端准备中…';
+      if(st.cloud.run)return {ok:false,msg:'云端已经有一段在跑：等它结束再开新片'};
+      st.cloud={run:'video',task:'视频',status:'云端准备中…',done:0,total:1,
+                t_start:Date.now()/1000,elapsed:0,last_fail:''};
       L('☁️ 云端出片：'+n+' 秒 · '+String(body.size).replace('x','×')+' · 号「主号」· 平台计费');
       return {ok:true,total:1,exec:'cloud',acct:'主号'};
     }
-    if(cfg.env_on&&cfg.env_on.h3===false)return {ok:false,msg:'H3 环境已关闭 · 到「环境 → H3」那页开启'};
+    if(cfg.env_on&&cfg.env_on.h3===false)return {ok:false,msg:'H3 环境已关闭 · 到「环境管理 → H3」开启'};
     if(!String(body.prompt||'').trim())return {ok:false,msg:'先写一句想要什么画面'};
     st.total=4;st.done=0;st.engine='moss';st.video_exec='local';
     const started=MOSS.running||st.comfyui_on;
@@ -634,8 +668,10 @@ window.MIC_MOCK={
     return Promise.resolve({ok:true,title:'雨夜旧书店',shots:shots,count:n,
       shot_sec:shot,total_sec:n*shot});},
   film_start(p){
-    if(st.running)return {ok:false,msg:'有任务在跑：'+st.running};
     const f=Object.assign({},cfg.film,p||{});
+    const cloud=String(f.exec)==='cloud';
+    if(cloud?st.cloud.run:st.running)
+      return {ok:false,msg:'有任务在跑：'+(cloud?st.cloud.run:st.running)};
     const shot=[5,10,15].indexOf(+f.shot)>=0?+f.shot:15;
     let rows=(p&&p.shots)||[];
     if(rows.length>40)return {ok:false,msg:'最多 40 段：把总时长压到 600 秒内，或拆成两集'};
@@ -651,14 +687,25 @@ window.MIC_MOCK={
       shots:rows.map(function(r,i){return {i:i+1,summary:r.summary||'',
         prompt:r.prompt||'',seconds:r.seconds||shot,state:i===0?'run':'wait',
         file:'',frame:'',sec:0,err:'',file_abs:'',frame_abs:''};})};
-    FILM.tick=0;st.running='film';st.status='准备中…';
+    FILM.tick=0;
+    if(cloud){
+      st.cloud={run:'film',task:'成片',status:'准备中…',done:0,total:rows.length,
+                t_start:Date.now()/1000,elapsed:0,last_fail:''};
+    }else{st.running='film';st.status='准备中…';}
     L('🎬 成片开跑：'+st.film.title+' · '+rows.length+' 段 × '+shot+' 秒 · '
-      +(String(f.exec)==='cloud'?'云端':'本地'));
+      +(cloud?'云端':'本地'));
     return {ok:true,shots:rows.length,shot_sec:shot,exec:f.exec,
       estimate:(rows.length*6)+'~'+(rows.length*10)+' 分钟'};},
   film_stop(){
+    const fs=st.film;
+    if(st.cloud.run==='film'){
+      st.cloud.status='已停止';st.cloud.run=null;
+      fs.state='stopped';fs.phase='已停';
+      fs.status='已停止 · '+fs.done+'/'+fs.total+' 段';
+      L('⏹ 成片已停：已出的段都留着');return {ok:true};
+    }
     if(st.running!=='film')return {ok:false,msg:'成片没在跑'};
-    const fs=st.film;st.running=null;
+    st.running=null;
     fs.state='stopped';fs.phase='已停';
     fs.status='已停止 · '+fs.done+'/'+fs.total+' 段';
     L('⏹ 成片已停：已出的段都留着');return {ok:true};},
@@ -667,12 +714,20 @@ window.MIC_MOCK={
     const fs=st.film;
     return {ok:true,items:fs.total?[{id:fs.id,title:fs.title,dir:fs.dir,time:stamp(),
       done:fs.done,total:fs.total,film:fs.film,current:true,
-      running:st.running==='film'}]:[]};},
+      running:st.running==='film'||st.cloud.run==='film'}]:[]};},
   film_resume(){
     const fs=st.film;
     if(!fs.total)return {ok:false,msg:'还没有可续跑的工程'};
     if(fs.done>=fs.total&&fs.film)return {ok:true,msg:'这部已经完成了',film:fs.film};
-    fs.state='running';fs.phase='出片';st.running='film';FILM.tick=0;
+    if(String(fs.exec)==='cloud'){
+      if(st.cloud.run)return {ok:false,msg:'云端已经有一段在跑'};
+      st.cloud={run:'film',task:'成片',status:'继续出片…',done:fs.done,total:fs.total,
+                t_start:Date.now()/1000,elapsed:fs.elapsed||0,last_fail:''};
+    }else{
+      if(st.running)return {ok:false,msg:'有任务在跑：'+st.running};
+      st.running='film';
+    }
+    fs.state='running';fs.phase='出片';FILM.tick=0;
     const nxt=fs.shots.filter(function(s){return s.state==='wait';})[0];
     if(nxt){nxt.state='run';fs.current=nxt.i;}
     L('▶️ 继续成片：'+fs.title);return {ok:true};},
@@ -684,7 +739,15 @@ window.MIC_MOCK={
     hit.forEach(function(s){s.state='wait';s.file='';s.frame='';s.frame_abs='';
       s.sec=0;s.err='';});
     fs.film='';fs.done=fs.shots.filter(function(s){return s.state==='done';}).length;
-    fs.state='running';st.running='film';FILM.tick=0;
+    fs.state='running';FILM.tick=0;
+    if(String(fs.exec)==='cloud'){
+      if(st.cloud.run)return {ok:false,msg:'云端已经有一段在跑'};
+      st.cloud={run:'film',task:'成片',status:'重出第 '+i+' 段…',done:fs.done,
+                total:fs.total,t_start:Date.now()/1000,elapsed:0,last_fail:''};
+    }else{
+      if(st.running)return {ok:false,msg:'有任务在跑：'+st.running};
+      st.running='film';
+    }
     L('↻ 重出第 '+i+' 段：作废 '+hit.length+' 段');
     return {ok:true,msg:'从第 '+i+' 段重出，作废 '+hit.length+' 段',count:hit.length};},
   film_merge(){
@@ -728,7 +791,7 @@ window.MIC_MOCK={
   cloud_brief(){
     const accts=CLOUD.accts.filter(a=>a.state==='ok').map(a=>({id:a.id,name:a.name}));
     return {dp:true,accts:accts,wf:String(cfg.cloud.workflow||''),
-      ready:accts.length>0,busy:!!st.cloud_busy};},
+      ready:accts.length>0,busy:!!st.cloud_busy||!!st.cloud.run};},
   cloud_new(name){
     const id='acc_'+Math.random().toString(36).slice(2,8);
     CLOUD.accts.push({id:id,name:String(name||'').trim()||('账号 '+(CLOUD.accts.length+1)),

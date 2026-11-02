@@ -15,10 +15,14 @@ sys.path.insert(0, os.path.join(ROOT, "webui", "ui"))
 
 from assemble import assemble  # noqa: E402
 
-# v7：环境按模型拆成四页（基础/千问/Moss/H3）、开关总入口是欢迎页、H3 多了「视频」页
+# v12：九页两组（创作 / 系统）；环境四页与云端账号收成「环境管理」一页，页内五格子页。
+# 截图/探针仍用细名字指「进哪一格」，真正落在同一个标签页 t_env 上。
 TAB = {"t2i": "t_gen", "edit": "t_edit", "inpaint": "t_inp", "video": "t_vid",
-       "gallery": "t_gal", "logs": "t_log", "settings": "t_set",
-       "env_base": "t_envb", "env_qwen": "t_envq", "env_moss": "t_envm", "env_h3": "t_envh"}
+       "film": "t_film", "gallery": "t_gal", "logs": "t_log", "settings": "t_set",
+       "env": "t_env", "cloud": "t_env",
+       "env_base": "t_env", "env_qwen": "t_env", "env_moss": "t_env", "env_h3": "t_env"}
+# 进环境管理后先停在哪一格（不列＝基础）
+ENV_TAB = {"env_qwen": "qwen", "env_moss": "moss", "env_h3": "h3", "cloud": "cloud"}
 EDGE = (r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
         r"C:\Program Files\Microsoft\Edge\Application\msedge.exe")
 
@@ -310,8 +314,8 @@ PROBE = {
 })();
 </script>
 """,
-    # 环境页：一个模型一页，页头那颗开关就是这一路的总闸（v7）。
-    # 探针跑在 env_qwen 上，跨页切一遍，最后真按一次开关看它收不收得干净。
+    # 环境管理：一页五个格子（基础/千问/Moss/H3/云端账号），页头那颗开关就是这一路的总闸。
+    # 探针从千问格进来，页内切一遍，最后真按一次开关看它收不收得干净。
     "env": """
 <script>
 (async function(){
@@ -343,20 +347,21 @@ PROBE = {
        heads().join('|'));
     ok('横幅也只说这一路（不是全局合计 8 项）',
        !!bar()&&/这一路还差 3 项/.test(bar().textContent), bar()&&bar().textContent.trim().slice(0,14));
-    /* 换页＝换一个环境：横幅、明细、按钮都得跟着换 */
-    MIC.nav.goto('env_moss');
+    /* 换一格＝换一个环境：横幅、明细、按钮都得跟着换（同一个标签页里切） */
+    MIC.env.focus('moss');
     await wait(700);
-    ok('Moss 页换成自己那一差 4 项', /还差 4 项/.test(note())&&/一键补齐 4 项/.test(btns().join('|')), note());
+    ok('Moss 格换成自己那一差 4 项', /还差 4 项/.test(note())&&/一键补齐 4 项/.test(btns().join('|')), note());
     ok('Moss 明细里是运行时那几行', rows().join('|').indexOf('内嵌 ComfyUI')>=0, rows().join('|'));
-    MIC.nav.goto('env_h3');
+    ok('切格不出环境管理这一页', MIC.nav.pageOf()==='env'&&MIC.env.tabId()==='moss', MIC.nav.pageOf());
+    MIC.env.focus('h3');
     await wait(700);
-    ok('H3 页把下载单独点名', /下载 1 项/.test(btns().join('|'))&&/41/.test(view()), btns().slice(0,4).join('|'));
-    MIC.nav.goto('env_base');
+    ok('H3 格把下载单独点名', /下载 1 项/.test(btns().join('|'))&&/41/.test(view()), btns().slice(0,4).join('|'));
+    MIC.env.focus('base');
     await wait(700);
-    ok('基础页没有开关（壳自己不给关）', !sw()&&/Python|磁盘/.test(rows().join('|')), rows().join('|'));
-    ok('基础页齐了就不挂横幅', !bar(), note());
+    ok('基础格没有开关（壳自己不给关）', !sw()&&/Python|磁盘/.test(rows().join('|')), rows().join('|'));
+    ok('基础格齐了就不挂横幅', !bar(), note());
     /* ---- 开关：关掉这一路 = 后端根本不检，页面只剩一句说明 ---- */
-    MIC.nav.goto('env_qwen');
+    MIC.env.focus('qwen');
     await wait(700);
     sw().click();                                  // MIC.env.set('qwen',0)
     await wait(900);
@@ -378,10 +383,10 @@ PROBE = {
     ok('点补齐后横幅换成补全中', !!bar()&&/补全中|步骤/.test(bar().textContent),
        bar()&&bar().textContent.trim().slice(0,14));
     await wait(9000);
-    MIC.nav.goto('env_moss');
+    MIC.env.focus('moss');
     await wait(900);
     ok('补千问没惊动 Moss 那一路（仍差 4 项）', /还差 4 项/.test(note()), note());
-    MIC.nav.goto('env_qwen');
+    MIC.env.focus('qwen');
     await wait(900);
     ok('千问页补完全绿', pills().length===4&&pills().every(t=>/就绪/.test(t)), pills().join('|'));
     ok('补完页头改口「已就绪」且横幅消失', /已就绪/.test(note())&&!bar(), note());
@@ -421,8 +426,9 @@ PROBE = {
        note()&&note().textContent.trim().slice(0,20));
     [].slice.call(note().querySelectorAll('button'))[0].click();
     await wait(700);
-    ok('那条提醒上的「去补齐」把人送到 H3 页', MIC.nav.pageOf()==='env_h3', MIC.nav.pageOf());
-    MIC.nav.goto('env_qwen');
+    ok('那条提醒上的「去补齐」把人送到 H3 格',
+       MIC.nav.pageOf()==='env'&&MIC.env.tabId()==='h3', MIC.nav.pageOf()+'/'+MIC.env.tabId());
+    MIC.env.focus('qwen');
     await wait(700);
     ok('环境页横幅出现（只数这一路的 3 项）',
        !!bar()&&/这一路还差 3 项/.test(bar().textContent), bar()&&bar().textContent.trim().slice(0,16));
@@ -442,7 +448,7 @@ PROBE = {
     MIC.nav.goto('t2i');
     await wait(600);
     await wait(9000);
-    MIC.nav.goto('env_moss');
+    MIC.env.focus('moss');
     await wait(900);
     ok('补完全局横幅整条消失（齐了不占地方）', !bar(),
        bar()?bar().textContent.trim().slice(0,20):'空');
@@ -470,8 +476,8 @@ PROBE = {
 })();
 </script>
 """,
-    # v9 导航：三组（出图 / 环境 / 系统）12 页；标签名统一两字，专有名词除外（Moss / H3云端），
-    # 分组树那一格给引擎归属，平铺那一格给分组路径
+    # v12 导航：两组九页（创作 / 系统），页名统一 3~5 字；环境四页收进「环境管理」的页内子页，
+    # 引擎归属留在悬停提示里，平铺那一格给分组路径
     "nav": """
 <script>
 (async function(){
@@ -479,51 +485,64 @@ PROBE = {
   const wait=ms=>new Promise(r=>setTimeout(r,ms));
   const tabs=()=>[].slice.call(document.querySelectorAll('#tree .node.tab'));
   const path=pid=>((document.querySelector('#tree .node[data-id="'+pid+'"] .path')||{}).textContent||'').trim();
+  const tip=pid=>{const el=document.querySelector('#tree .node[data-id="'+pid+'"]');
+    return el?(el.getAttribute('title')||''):'';};
   const shown=pid=>!!document.querySelector('#tree .node[data-id="'+pid+'"]');
   try{
     await wait(1500);
-    ok('默认分组树、正好三个分组', MIC.nav.state.layout==='tree'
-        && document.querySelectorAll('#tree .node.grp').length===3);
+    ok('默认分组树、正好两个分组', MIC.nav.state.layout==='tree'
+        && document.querySelectorAll('#tree .node.grp').length===2);
     const names=tabs().map(n=>n.querySelector('.nm').textContent.trim());
-    ok('十二个标签：出图四个 + 环境四个 + 系统四个',
-       names.join('|')==='生图|编辑|重绘|视频|基础|千问|Moss|H3|画廊|H3云端|日志|设置', names.join('|'));
-    ok('名称全是两字（Moss / H3云端 按专有名词留着）',
-       names.filter(t=>t!=='Moss'&&t!=='H3云端').every(t=>t.length===2), names.join('|'));
-    ok('组名也是两字：出图|环境|系统',
-       MIC.nav.allGroups().map(g=>g.name).join('|')==='出图|环境|系统',
+    ok('九个标签：创作五页 + 系统四页',
+       names.join('|')==='文生图|图像编辑|局部重绘|视频生成|剧本成片|环境管理|作品画廊|运行日志|全局设置',
+       names.join('|'));
+    ok('名称都在 3~5 个字', names.every(t=>t.length>=3&&t.length<=5), names.join('|'));
+    ok('组名：创作|系统',
+       MIC.nav.allGroups().map(g=>g.name).join('|')==='创作|系统',
        MIC.nav.allGroups().map(g=>g.name).join('|'));
-    ok('十二页都在分组里、顶层不留散页', MIC.nav.allTabs().every(n=>!!MIC.nav.find(n.id).parent));
+    ok('九页都在分组里、顶层不留散页', MIC.nav.allTabs().every(n=>!!MIC.nav.find(n.id).parent));
     /* 每页都渲染得出来：侧栏点一遍，看有没有哪页留白或抛异常 */
-    const gone=[],pages=['t2i','edit','inpaint','video','env_base','env_qwen','env_moss',
-                         'env_h3','gallery','cloud','logs','settings'];
+    const gone=[],pages=['t2i','edit','inpaint','video','film','env','gallery','logs','settings'];
     for(const p of pages){
       MIC.nav.goto(p);
       await wait(420);
       const v=document.getElementById('view');
       if(MIC.nav.pageOf()!==p||!v||v.querySelectorAll('.card').length===0)gone.push(p);
     }
-    ok('12 个功能页都能切出来且不空白', gone.length===0, gone.join('|'));
-    /* 引擎归属标在行尾：关掉环境会凭空少页，先说清每一页归谁 */
-    ok('分组树里模型专属那几页标了归属',
-       path('t_edit')==='千问'&&path('t_inp')==='千问'&&path('t_vid')==='H3'
-       && path('t_gen')==='千问/Moss'&&path('t_gal')==='',
-       ['t_gen','t_edit','t_inp','t_vid','t_gal'].map(path).join('|'));
-    ok('环境四页不挂归属（页名就是环境名，再标一遍是废话）',
-       ['t_envb','t_envq','t_envm','t_envh'].every(p=>path(p)===''),
-       ['t_envb','t_envq','t_envm','t_envh'].map(path).join('|'));
+    ok('9 个功能页都能切出来且不空白', gone.length===0, gone.join('|'));
+    /* 环境四页收成一页：页内五格挨个切，每格都得有内容 */
+    MIC.nav.goto('env');
+    await wait(500);
+    const zs=[].slice.call(document.querySelectorAll('#view .subtabs .chip'));
+    ok('环境管理里是五格：基础/千问/Moss/H3/云端账号',
+       zs.map(c=>c.textContent.replace(/\\s+/g,'')).join('|')==='基础|千问|Moss|H3|云端账号',
+       zs.map(c=>c.textContent.trim()).join('|'));
+    const goneZ=[];
+    for(const z of ['base','qwen','moss','h3','cloud']){
+      MIC.env.tab(z);
+      await wait(400);
+      const v=document.getElementById('view');
+      if(MIC.nav.pageOf()!=='env'||MIC.env.tabId()!==z
+         ||!v||v.querySelectorAll('.card').length===0)goneZ.push(z);
+    }
+    ok('五个子页都能切出来且不空白', goneZ.length===0, goneZ.join('|'));
+    /* 引擎归属在悬停里：关掉环境会凭空少页，先说清每一页归谁 */
+    ok('模型专属页的归属留在悬停提示里',
+       /千问/.test(tip('t_edit'))&&/H3/.test(tip('t_vid'))&&/千问\\/Moss/.test(tip('t_gen'))
+       && tip('t_env')==='', ['t_gen','t_edit','t_vid','t_env'].map(tip).join('|'));
     /* 平铺（临时解散分组）：那一格给分组路径，比归属更要紧 */
     MIC.nav.setLayout('flat');
     await wait(150);
-    ok('平铺 12 个标签且带分组副标题', tabs().length===12&&path('t_inp')==='出图', path('t_inp'));
+    ok('平铺 9 个标签且带分组副标题', tabs().length===9&&path('t_inp')==='创作', path('t_inp'));
     MIC.nav.setLayout('tree');
     await wait(150);
-    ok('切回分组树', document.querySelectorAll('#tree .node.grp').length===3
+    ok('切回分组树', document.querySelectorAll('#tree .node.grp').length===2
         && path('t_set')==='');
     /* 想自己归拢还是能建分组：新建→移入→移出→解散（空分组解散不弹确认） */
     MIC.nav.newGroup();
     await wait(250);
     const g=MIC.nav.allGroups().slice(-1)[0];
-    ok('新建分组后树里四个分组', !!g&&document.querySelectorAll('#tree .node.grp').length===4);
+    ok('新建分组后树里三个分组', !!g&&document.querySelectorAll('#tree .node.grp').length===3);
     MIC.nav.moveTo('t_inp',g.id);
     await wait(150);
     ok('标签页能移进新分组', (g.children||[]).map(x=>x.page).join('|')==='inpaint',
@@ -532,8 +551,8 @@ PROBE = {
     await wait(150);
     MIC.nav.dissolve(g.id);
     await wait(150);
-    ok('分组用完即散、标签页一个不少', MIC.nav.allGroups().length===3
-        && MIC.nav.allTabs().length===12 && shown('t_inp'));
+    ok('分组用完即散、标签页一个不少', MIC.nav.allGroups().length===2
+        && MIC.nav.allTabs().length===9 && shown('t_inp'));
     MIC.nav.goto('t2i');
     await wait(400);
   }catch(e){ok('探针跑完',false,String(e));}
@@ -820,9 +839,9 @@ PROBE = {
        pills().join('|')==='Moss|系统'&&/Moss/.test(brand())&&!/千问/.test(brand()),
        pills().join('|')+' | '+brand());
     await swall({qwen:0,moss:0,h3:0});
-    ok('一路都不开：明说「所有模型环境都关着」，出图组整组收走',
+    ok('一路都不开：明说「所有模型环境都关着」，生图页收走、环境页还留着',
        /都关着/.test(brand())&&!document.querySelector('#tree .node[data-id="t_gen"]')
-       && !!document.querySelector('#tree .node[data-id="t_envq"]'), brand());
+       && !!document.querySelector('#tree .node[data-id="t_env"]'), brand());
     await swall({qwen:1,moss:1,h3:1});
     ok('重新开一路：灯与页一起回来', pills().join('|')==='千问|Moss|系统'
         && !!document.querySelector('#tree .node[data-id="t_gen"]'), pills().join('|'));
@@ -851,14 +870,14 @@ PROBE = {
       .map(l=>l.getAttribute('title')||'').join('|');
   try{
     await wait(1500);
-    ok('默认三路全开：12 个标签', MIC.nav.envOn().qwen!==false&&tabs().length===12, tabs().join('|'));
+    ok('默认三路全开：九个标签', MIC.nav.envOn().qwen!==false&&tabs().length===9, tabs().join('|'));
     /* 关千问：千问专属的两页从侧栏收走，两路共用的生图页留着。
        等满一轮轮询（800ms）再断言：开关表得是后端刷进状态的那一份，不是界面本地改的。 */
     MIC.env.set('qwen',0);
     await wait(1100);
     const t1=tabs().join('|');
-    ok('关千问：编辑/重绘收走、其余 10 页都在',
-       t1.indexOf('编辑')<0 && t1.indexOf('重绘')<0 && tabs().length===10, t1);
+    ok('关千问：图像编辑/局部重绘收走、其余 7 页都在',
+       t1.indexOf('图像编辑')<0 && t1.indexOf('局部重绘')<0 && tabs().length===7, t1);
     ok('关千问：停在两路共用的生图页', MIC.nav.pageOf()==='t2i', MIC.nav.pageOf());
     MIC.nav.goto('edit');
     await wait(300);
@@ -884,13 +903,17 @@ PROBE = {
     MIC.env.set('h3',0);
     await wait(1100);
     ok('关 H3：视频页留着（云端那条路不碰本机权重），收走的是它本地那一档',
-       tabs().indexOf('视频')>=0 && tabs().indexOf('生图')>=0, tabs().join('|'));
-    ok('只剩 Moss 一路：出图组两张（生图|视频），环境与系统页一页不少（10 页）',
-       tabs().join('|')==='生图|视频|基础|千问|Moss|H3|画廊|H3云端|日志|设置', tabs().join('|'));
+       tabs().indexOf('视频生成')>=0 && tabs().indexOf('文生图')>=0, tabs().join('|'));
+    ok('只剩 Moss 一路：创作组留下文生图/视频生成/剧本成片，系统四页一页不少（7 页）',
+       tabs().join('|')==='文生图|视频生成|剧本成片|环境管理|作品画廊|运行日志|全局设置',
+       tabs().join('|'));
+    ok('环境四页收成一页后，关哪一路都不收走这一页（还剩一个开回来的门）',
+       !!document.querySelector('#tree .node[data-id="t_env"]')
+       && tabs().filter(t=>/环境/.test(t)).length===1,'');
     /* 全部开回来：被收走的页与设置项原样回来（TREE 没动，只在显示层过滤） */
     MIC.env.set('qwen',1);MIC.env.set('h3',1);
     await wait(1200);
-    ok('开回来：12 个标签一个不少', tabs().length===12, tabs().join('|'));
+    ok('开回来：九个标签一个不少', tabs().length===9, tabs().join('|'));
     MIC.nav.goto('settings');
     await wait(400);
     ok('开回来：设置页千问量化档跟着回来',
@@ -1430,6 +1453,10 @@ def main():
             print("不认识这页：%s（可选 %s）" % (name, ",".join(TAB))); continue
         assert "last_tab:'t_gen'" in base, "mock.js 的起始页写法变了，脚本要跟着改"
         html = base.replace("last_tab:'t_gen'", "last_tab:'%s'" % tid)
+        sub = ENV_TAB.get(name)
+        if sub:
+            assert "env_tab:'base'" in base, "mock.js 的环境子页写法变了，脚本要跟着改"
+            html = html.replace("env_tab:'base'", "env_tab:'%s'" % sub)
         if args.toast:
             html = html.replace("</body>",
                                 "<script>setTimeout(function(){MIC.toast('轻提示位置核对');},5200);</script></body>")

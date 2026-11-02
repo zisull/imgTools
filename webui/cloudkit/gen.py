@@ -60,18 +60,103 @@ return JSON.stringify({nodes:n.length,main:main,out:out});
 # 本地工作流文件这条路：真机量过托管前端确实有 app.loadGraphData（探针 --dump/--load 往返
 # 过一次：导出 65605 字节、灌回去 23 个节点、主节点 389 与输出节点 325 都按类型认得）。
 # 只改内存里那张图——不点保存、不提交、不扣积分。
+# 新版前端的 loadGraphData 回的是 Promise：同步 try/catch 接不到异步拒绝，
+# 失败会变成页面上那个「Loading aborted…setGraph」弹窗，而这边的代码还当成功了。
+# 所以把结果挂到 window.__qicWfLoad，由 Python 侧轮询，失败当场停，不拿旧图继续提交。
 _JS_LOAD_WF = """
 var fid=arguments[0],txt=arguments[1];
 var f=document.getElementById(fid);
 if(!f||!f.contentWindow)return JSON.stringify({err:'no_frame'});
-var a=f.contentWindow.app;
+var w=f.contentWindow,a=w.app;
 if(!a||typeof a.loadGraphData!=='function')return JSON.stringify({err:'这份前端没有 loadGraphData 的口'});
 var g;try{g=JSON.parse(txt);}catch(e){return JSON.stringify({err:'不是 JSON：'+(e&&e.message)});}
 if(!g||!g.nodes)return JSON.stringify({err:'JSON 里没有 nodes'});
-try{a.loadGraphData(g,true,false,'local.json');}
-catch(e){return JSON.stringify({err:'loadGraphData 报错：'+(e&&e.message)});}
-return JSON.stringify({ok:1,nodes:((a.graph||{})._nodes||[]).length});
+var r=null;
+try{
+  w.__qicWfLoad={state:'pending',msg:''};
+  r=a.loadGraphData(g,true,false,'local.json');
+  if(r&&typeof r.then==='function'){
+    r.then(function(){w.__qicWfLoad={state:'ok',msg:''};},
+           function(e){w.__qicWfLoad={state:'err',msg:String(e&&e.message||e)};});
+  }else w.__qicWfLoad={state:'ok',msg:''};
+}catch(e){w.__qicWfLoad={state:'err',msg:String(e&&e.message||e)};}
+return JSON.stringify({ok:1,async:!!(r&&typeof r.then==='function')});
 """
+# 灌图结果 + 画布现状：节点 id 拿来和文件逐一对，防止「加载失败了但旧图还挂着」被当成成功
+_JS_WF_STATE = """
+var f=document.getElementById(arguments[0]);
+if(!f||!f.contentWindow)return JSON.stringify({state:'err',msg:'画布不在了'});
+var w=f.contentWindow,s=w.__qicWfLoad||{state:'none'};
+var n=((w.app||{}).graph||{})._nodes||[],main=0,out=0;
+n.forEach(function(x){if(x.type==='FeiHouEasyH3RH')main=x.id;
+  else if(x.type==='VHS_VideoCombine')out=x.id;});
+return JSON.stringify({state:s.state||'none',msg:s.msg||'',nodes:n.length,
+  main:main,out:out,ids:n.map(function(x){return String(x.id);})});
+"""
+# 前端真正能接图：loadGraphData 是函数只是第一道，graph 也得挂上
+_JS_FRONTEND_READY = """
+var f=document.getElementById(arguments[0]);
+var a=f&&f.contentWindow&&f.contentWindow.app;
+return !!(a&&typeof a.loadGraphData==='function'&&a.graph);
+"""
+
+
+def _wf_json(path):
+    """读 + 解析工作流 JSON；API 格式在这里就拦下，并说清该导哪一份。"""
+    from .store import brief_error
+    try:
+        if os.path.getsize(path) > 8 * 1048576:
+            raise CloudError("这份文件超过 8MB，不像工作流 JSON")
+        with open(path, encoding="utf-8-sig", errors="replace") as f:
+            txt = f.read()
+    except CloudError:
+        raise
+    except Exception as e:
+        raise CloudError("本地工作流文件读不了：%s" % brief_error(e, 80))
+    try:
+        g = json.loads(txt)
+    except ValueError:
+        raise CloudError("本地那份不是 JSON：用平台「导出工作流」存下来的那一份")
+    if not isinstance(g, dict):
+        raise CloudError("本地那份不是画布工作流：顶层不是对象")
+    # API 格式（{"1": {"class_type": …}}）是给 /prompt 的，画布不认：
+    # 我们自己的 webui/moss/workflow_h3.json 就是这种，别让人把它拖进来。
+    api_keys = [k for k in g if str(k).isdigit()]
+    if api_keys and any(isinstance(g.get(k), dict) and g[k].get("class_type") for k in api_keys):
+        raise CloudError("这是 API 格式的工作流（节点编号 → class_type），云端画布不认；"
+                         "请在网页里点「导出工作流」存一份带 nodes 的再选")
+    return g
+
+
+def check_workflow_json(path):
+    """开跑前先拆开看一眼：能当场判死的，别开浏览器、别等几分钟才失败。
+
+    只查结构（nodes/links/节点类型），不查节点装没装——那得进页面才知道。
+    返回 {nodes, links, ids, types}；不合格直接 CloudError，消息里说清是哪一种不对。
+    """
+    g = _wf_json(path)
+    nodes, links = g.get("nodes"), g.get("links")
+    if not isinstance(nodes, list) or not nodes:
+        raise CloudError("这份 JSON 里没有画布节点：要网页里「导出工作流」存下来的那份（带 nodes）")
+    if not isinstance(links, list):
+        raise CloudError("这份 JSON 里没有 links：要网页里「导出工作流」存下来的那份（带 links）")
+    ids, types = set(), set()
+    for n in nodes:
+        if not isinstance(n, dict) or n.get("id") is None or not str(n.get("type") or "").strip():
+            raise CloudError("工作流节点缺 id/type：这份 JSON 不完整，重新导出一次")
+        ids.add(str(n["id"]))
+        types.add(str(n["type"]))
+    for l in links:
+        if not isinstance(l, (list, tuple)) or len(l) < 5:
+            raise CloudError("工作流连线格式不对：重新导出一次再试")
+        if str(l[1]) not in ids or str(l[3]) not in ids:
+            raise CloudError("工作流连线指向了不存在的节点（%s → %s）：重新导出一次再试"
+                             % (l[1], l[3]))
+    if "FeiHouEasyH3RH" not in types:
+        raise CloudError("这份工作流里没有 H3 主节点（FeiHouEasyH3RH）：不是这条路要的那张图")
+    if "VHS_VideoCombine" not in types:
+        raise CloudError("这份工作流里没有 VHS_VideoCombine 输出节点：取不到成片")
+    return {"nodes": len(nodes), "links": len(links), "ids": ids, "types": types}
 # 自动找宿主页那套（列表页点卡片 → 作品页 → 运行）依赖平台 SPA 的路由，
 # 实测客户端跳转偶尔只落空壳、按钮不挂出来——不如内置一页稳，整段去掉。
 # 写之前先看一眼：主节点现在的控件名与值、媒体那一份的真实形状（拿它当模板）
@@ -354,7 +439,7 @@ class CloudH3:
     def account(self, aid=""):
         rows = [a for a in self.store.list() if (self.store.load(a["id"]) or {}).get("cookies")]
         if not rows:
-            raise CloudError("还没有可用的登录账号：到「H3云端」页新建登录并保存")
+            raise CloudError("还没有可用的登录账号：到「环境管理 → 云端账号」新建登录并保存")
         if aid:
             for a in rows:
                 if a["id"] == aid:
@@ -374,7 +459,7 @@ class CloudH3:
     def wf_url(self, wf=""):
         wid = self.wf_id(wf)
         if not wid:
-            raise CloudError("没给工作流：在「H3云端」页填一个已跑通过的 H3 工作流地址")
+            raise CloudError("没给工作流：在「视频生成」或「剧本成片」页填一个已跑通过的 H3 工作流地址")
         return WF_URL % wid
 
     def wf_src(self, wf=""):
@@ -410,55 +495,93 @@ class CloudH3:
         return ""
 
     # ---------- 灌本地工作流 ----------
-    def load_local_wf(self, tab, fid, path, stop, limit=30):
-        """把本地 JSON 灌进页面，再按类型重新认主节点/输出节点（那张图的 id 未必是 389）。"""
-        from .store import brief_error
-        try:
-            if os.path.getsize(path) > 8 * 1048576:
-                raise CloudError("这份文件超过 8MB，不像工作流 JSON")
-            with open(path, encoding="utf-8-sig", errors="replace") as f:
-                txt = f.read()
-        except CloudError:
-            raise
-        except Exception as e:
-            raise CloudError("本地工作流文件读不了：%s" % brief_error(e, 80))
-        try:
-            g = json.loads(txt)
-        except ValueError:
-            raise CloudError("本地那份不是 JSON：用平台「导出工作流」存下来的那一份")
-        if not (isinstance(g, dict) and (g.get("nodes") or [])):
-            raise CloudError("这份 JSON 里没有画布：要平台「导出工作流」存下来的那种（带 nodes）——"
-                             "不是 API 格式、也不是节点清单")
-        # comfyUI.html 是「先到壳、后挂 app」：实测 iframe 已在，loadGraphData 先是对象、
-        # 两三秒后才变成函数、再几秒才把图挂上。等它挂好再灌，别拿「壳到了」当「编辑器好了」。
-        for _ in range(40):
+    def check_wf_file(self, path):
+        return check_workflow_json(path)
+
+    def _wait_frontend(self, tab, fid, stop, limit=40):
+        """等前端真正能接图：loadGraphData 是函数只是第一道，graph 也得挂上。"""
+        for _ in range(limit * 2):
             if stop and stop():
                 raise CloudError("已停止")
-            ready = self.js(tab,
-                            "var f=document.getElementById(arguments[0]);"
-                            "var a=f&&f.contentWindow&&f.contentWindow.app;"
-                            "return !!(a&&typeof a.loadGraphData==='function');", fid)
-            if ready:
-                break
+            try:
+                if self.js(tab, _JS_FRONTEND_READY, fid):
+                    return
+            except Exception:
+                pass
             time.sleep(0.5)
-        else:
-            raise CloudError("云端编辑器还没挂好：等不到 loadGraphData，重开这段再试")
+        raise CloudError("云端编辑器还没挂好：等不到画布，重开这段再试")
+
+    def _load_once(self, tab, fid, txt, stop, meta, limit=25):
+        """灌一次并等结果（同步/异步都接）：回 (ids, 错误串)。"""
+        from .store import brief_error
         try:
             d = json.loads(self.js(tab, _JS_LOAD_WF, fid, txt) or "{}")
         except ValueError:
-            d = {"err": "页面没回话"}
+            return None, "页面没回话"
         except Exception as e:
-            d = {"err": brief_error(e, 80)}
+            return None, brief_error(e, 80)
         if d.get("err"):
-            raise CloudError("灌不进那张图：%s" % d["err"])
+            return None, str(d["err"])
+        t0 = time.time()
+        while time.time() - t0 < limit:
+            if stop and stop():
+                raise CloudError("已停止")
+            try:
+                st = json.loads(self.js(tab, _JS_WF_STATE, fid) or "{}")
+            except ValueError:
+                st = {}
+            except Exception:
+                st = {}
+            state = st.get("state")
+            if state == "err":
+                return None, str(st.get("msg") or "前端加载工作流失败")
+            if state == "ok":
+                got = set(str(x) for x in (st.get("ids") or []))
+                missing = meta["ids"] - got
+                if missing:
+                    return None, ("文件里 %d 个节点，画布只认到 %d 个（缺 %d）"
+                                  % (len(meta["ids"]), len(got), len(missing)))
+                if not st.get("main") or not st.get("out"):
+                    return None, "图上没有 H3 主节点/输出节点"
+                return {"main": st.get("main"), "out": st.get("out"),
+                        "nodes": len(got)}, ""
+            time.sleep(0.5)
+        return None, "等 %d 秒也没把工作流挂到画布上" % limit
+
+    def load_local_wf(self, tab, fid, path, stop, limit=30):
+        """把本地 JSON 灌进页面，再按类型重新认主节点/输出节点（那张图的 id 未必是 389）。"""
+        from .store import brief_error
+        meta = self.check_wf_file(path)
         try:
-            ids = self._wait_graph(tab, fid, stop, limit=limit)
-        except CloudError as e:
-            raise CloudError("本地那份工作流没那张图要的东西：%s" % str(e)[-60:])
-        self.wf_title = "本地 · %s" % os.path.basename(path)
-        self.log("· 灌入本地工作流「%s」：节点 %s 个 · 主节点 %s · 输出节点 %s"
-                 % (os.path.basename(path), d.get("nodes"), ids["main"], ids["out"]))
-        return ids
+            with open(path, encoding="utf-8-sig", errors="replace") as f:
+                txt = f.read()
+        except Exception as e:
+            raise CloudError("本地工作流文件读不了：%s" % brief_error(e, 80))
+        last = ""
+        for attempt in (0, 1):
+            self._wait_frontend(tab, fid, stop)
+            ids, err = self._load_once(tab, fid, txt, stop, meta)
+            if ids:
+                self.wf_title = "本地 · %s" % os.path.basename(path)
+                self.log("· 灌入本地工作流「%s」：节点 %s 个 · 主节点 %s · 输出节点 %s"
+                         % (os.path.basename(path), ids["nodes"], ids["main"], ids["out"]))
+                return ids
+            last = err
+            # 前端偶发处在半初始化/上一张图还没清完：整页重开一次再灌，
+            # 第二次还不行就停——不拿画布上残留的旧图继续提交。
+            if attempt == 0:
+                self.log("· 工作流没灌上（%s）：重开页面再试一次" % str(err)[:60])
+                try:
+                    tab.refresh()
+                except Exception as e:
+                    raise CloudError("工作流没灌上，重开页面也失败：%s" % brief_error(e, 60))
+                fid = self._wait_frame(tab, stop)
+        msg = str(last or "未知原因")
+        if "setGraph" in msg:
+            raise CloudError("云端 ComfyUI 前端没接住这份工作流（setGraph）：多半是这份导出"
+                             "和当前前端版本不合。先在网页里手动打开它，能正常显示再点开始；"
+                             "还报错就重新「导出工作流」一次")
+        raise CloudError("云端前端没能加载这份工作流：%s" % msg[:120])
 
     def js(self, tab, script, *args):
         return tab.run_js(script, *args)
@@ -612,7 +735,7 @@ class CloudH3:
                 # 生成中途窗口被关掉：平台上可能还在跑，别把原生异常甩给界面
                 if browser_gone(e):
                     raise CloudError("浏览器窗口被关掉了：这一段没跑完。"
-                                     "平台上可能还在跑，去「H3云端」看一眼；"
+                                     "平台上可能还在跑，去「环境管理 → 云端账号」看一眼；"
                                      "重开自动处理，再点开始即可")
                 raise
             finally:
@@ -888,13 +1011,13 @@ class CloudH3:
             if n:
                 return "平台上有 %d 个任务（排队或在跑）" % n
         if new and str(last.get("s") or "") == "error":
-            return "平台把这段判了失败：去云端页看原因" + btn
+            return "平台把这段判了失败：去平台上那一页看原因" + btn
         # 「队列空了」是一句有分量的话：只有真读到过那个队列对象才可以说。
         # keys 是对象自己的字段名——读回来个空壳（{}），形状和「空队列」一模一样，
         # 但那是不知情，不是空。
         if q and q.get("keys") and waited > 60:
             if new and last.get("c"):
-                return "平台说这段跑完了，可输出节点还没刷新：去云端页看一眼" + btn
+                return "平台说这段跑完了，可输出节点还没刷新：去平台上看一眼" + btn
             if new:
                 return "平台已经收下这段，还在它那边跑" + btn
             # 队列里没它、历史里也没多出来：平台上看不见这段任务。

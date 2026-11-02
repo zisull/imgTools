@@ -400,42 +400,77 @@ def test_wf_src():
 
 
 def test_load_local_wf():
-    """把本地 JSON 灌进页面：不是画布、不是 JSON、灌不进、超过 8MB 各拦一次。
+    """本地工作流：开跑前验结构、灌图等异步结果、失败当场停。
 
     真机量过：托管前端有 app.loadGraphData，导出 65605 字节能原样灌回去、
-    23 个节点按类型重新认得出主节点与输出节点。这里拿假 tab 锁住失败那几条。
+    23 个节点按类型重新认得出主节点与输出节点。新版前端还会把失败藏进 Promise，
+    这里用假 tab 把「结构不对 / 灌图报错 / setGraph」几条都锁住。
     """
     from cloudkit import gen as cg
     d = tempfile.mkdtemp(prefix="load_", dir=TMP)
 
-    def mk(name, text):
+    def mk(name, obj):
         p = os.path.join(d, name)
         with open(p, "w", encoding="utf-8") as f:
-            f.write(text)
+            f.write(obj if isinstance(obj, str) else json.dumps(obj))
         return p
 
-    good = mk("g.json", json.dumps({"nodes": [{"id": 1}], "links": []}))
+    good_obj = {"nodes": [{"id": 1, "type": "FeiHouEasyH3RH"},
+                          {"id": 2, "type": "VHS_VideoCombine"}],
+                "links": [[1, 1, 0, 2, 0, "IMAGE"]]}
+    good = mk("g.json", good_obj)
+
+    class Tab:
+        def refresh(self):
+            pass
+
     g = cg.CloudH3(ROOT, {}, None, None)
-    g.js = lambda *a: json.dumps({"ok": 1, "nodes": 1})
-    g._wait_graph = lambda tab, fid, stop, limit=30: {"main": "1", "out": "2"}
-    assert g.load_local_wf(None, "f", good, lambda: False) == {"main": "1", "out": "2"}
+    g.js = lambda *a: json.dumps({"ok": 1, "state": "ok", "ids": ["1", "2"],
+                                  "main": 1, "out": 2, "nodes": 2})
+    assert g.load_local_wf(Tab(), "f", good, lambda: False) == {
+        "main": 1, "out": 2, "nodes": 2}
     assert g.wf_title.startswith("本地 · "), g.wf_title
 
-    def boom(path, script_ret=None):
-        if script_ret is not None:
-            g.js = lambda *a: script_ret
+    def boom(path, tab=None):
         try:
-            g.load_local_wf(None, "f", path, lambda: False)
+            g.load_local_wf(tab, "f", path, lambda: False)
         except cg.CloudError as e:
             return str(e)
         raise AssertionError("没拦住：%s" % path)
 
     assert "不是 JSON" in boom(mk("b.json", "{oops"))
     # 我们自己那份 API 格式（{"1": {...}}）不是画布，要说清是哪一种
-    assert "没有画布" in boom(mk("api.json", json.dumps({"1": {"class_type": "X"}})))
-    assert "灌不进" in boom(good, json.dumps({"err": "no_frame"}))
+    assert "API 格式" in boom(mk("api.json", {"1": {"class_type": "X"}}))
+    assert "没有画布节点" in boom(mk("nocanvas.json", {"nodes": [], "links": []}))
+    # 节点/连线结构不对：开跑前就拦，不等到页面里报错
+    assert "H3 主节点" in boom(mk("wrong.json", {
+        "nodes": [{"id": 1, "type": "Other"}], "links": []}))
+    assert "VHS_VideoCombine" in boom(mk("noout.json", {
+        "nodes": [{"id": 1, "type": "FeiHouEasyH3RH"}], "links": []}))
+    assert "连线" in boom(mk("badlink.json", {
+        "nodes": good_obj["nodes"], "links": [[1, 1, 0, 9, 0, "IMAGE"]]}))
     assert "8MB" in boom(mk("big.json", '{"nodes":[1]}' + " " * (9 * 1048576)))
-    print("  ✓ 本地工作流灌入：不是画布 / 不是 JSON / 灌不进 / 超 8MB，四种都拦得住")
+
+    # 页面异步报错：等到的错误要带出来，而不是继续拿旧图提交
+    g2 = cg.CloudH3(ROOT, {}, None, None)
+
+    def js(tab, script, *a):
+        if script is cg._JS_FRONTEND_READY:
+            return True
+        if script is cg._JS_LOAD_WF:
+            return json.dumps({"ok": 1})
+        if script is cg._JS_WF_STATE:
+            return json.dumps({"state": "err", "msg": "TypeError: setGraph is undefined"})
+        return "f"
+
+    g2.js = js
+    msg = ""
+    try:
+        g2.load_local_wf(Tab(), "f", good, lambda: False)
+    except cg.CloudError as e:
+        msg = str(e)
+    assert "setGraph" in msg, msg
+    print("  ✓ 本地工作流：结构/连线/API 格式先拦，异步 setGraph 也当场停")
 
 
 def test_write_selfcheck():

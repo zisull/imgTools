@@ -39,19 +39,23 @@ function pct(){
   if(!s.total)return 0;
   return Math.max(0,Math.min(100,Math.round(s.done/s.total*100)));
 }
-function elText(){
-  const e=Number(MIC.s.st.elapsed)||0;
+function elText(sec){
+  const e=Number(sec!=null?sec:MIC.s.st.elapsed)||0;
   return e>=60?`已用 ${Math.floor(e/60)} 分 ${Math.round(e%60)} 秒`:`已用 ${e.toFixed(0)} 秒`;
 }
-function pgText(){
+function cloudOf(){return (MIC.s.st.cloud||{});}
+function pgText(lane){
   const s=MIC.s.st;
+  if(lane==='cloud'){
+    const c=cloudOf();
+    if(!c.run)return c.status||'';
+    return (c.status||'云端出片中')+' · '+elText(c.elapsed);
+  }
   if(!s.running)return s.status||'';
   if(s.running==='load')return `载入 ${Number(s.load_pct)||0}%${s.load_stage?' · '+s.load_stage:''} · ${elText()}`;
   /* 出片只有 4 步（烘在 Turbo LoRA 里）：按步数走的百分比每步跨度太大，
      这一段更该看的是已经跑了多久，进度条就按步数粗算 */
   if(s.running==='video'){
-    /* 云端没有步数刻度：平台只报「到哪一步了」，这里能给的准数只有等了多久 */
-    if(s.video_exec==='cloud')return `云端出片中 · ${elText()}`;
     return `出片 ${s.done||0}/${s.total||0} 步 · ${elText()}`;
   }
   return `去噪 ${s.done||0}/${s.total||0} · ${pct()}% · ${elText()}`;
@@ -76,7 +80,7 @@ function engPill(name,icon,on,txt,tip){
     `<span class="dot ${on?'ok':'off'}"></span><i>${esc(txt)}</i></span>`;
 }
 function pillsHTML(){
-  const s=MIC.s.st,o=MIC.nav.envOn(),pills=[];
+  const s=MIC.s.st,o=MIC.nav.envOn(),pills=[],c=cloudOf();
   if(o.qwen!==false)
     pills.push(engPill('千问','flower',!!s.model_loaded,s.model_loaded?'已载入':'未载入',
       '千问（diffusers 直跑）：权重在显存才谈得上秒出'));
@@ -84,8 +88,15 @@ function pillsHTML(){
     pills.push(engPill('Moss','wave',!!s.comfyui_loaded,
       s.comfyui_on?(s.comfyui_loaded?'已常驻':'搬权重'):'已停',
       'Moss / H3（内嵌 ComfyUI）：已停=没起进程，搬权重=正在把权重上显存'));
-  pills.push(engPill('系统','cog',!!s.running,
-    '显存 '+(Number(s.vram_used)||0).toFixed(1)+'/'+(s.vram_total||12)+'G · '+(s.running?'出图中':'空闲'),
+  /* 云端在跑时单列一盏：它不是「本机在忙」，但占着平台那边的一条线，
+     从任何一页都该一眼看见，而不是跑回视频页才知道还没完。 */
+  if(c.run)
+    pills.push(engPill('云端','globe',true,c.run==='film'?'成片':'视频',
+      '云端任务正在跑：本地照常能出图，云端这一路等它结束'));
+  const busy=!!s.running||!!c.run;
+  pills.push(engPill('系统','cog',busy,
+    '显存 '+(Number(s.vram_used)||0).toFixed(1)+'/'+(s.vram_total||12)+'G · '+
+      (busy?((c.run&&!s.running)?'云端出片中':'出图中'):'空闲'),
     '整卡显存与任务队列；两个引擎共用这一张卡，同一时间只可能一边在载'));
   return pills.join('');
 }
@@ -99,8 +110,16 @@ function showPrev(){prevHidden='';MIC.render();}
 function failed(){return /失败|没出图/.test(String(MIC.s.st.status||''));}
 const VIDEO_EXT=/\.(mp4|webm|mov|mkv)$/i;
 function isVideo(p){return VIDEO_EXT.test(String(p||''));}
-function resultHTML(){
+function resultHTML(lane){
   const s=MIC.s.st;
+  if(lane==='cloud'){
+    const c=cloudOf();
+    if(c.last_fail)return `<b class="bad">❌ 本轮失败</b>：${esc(c.last_fail)}`;
+    if(c.run)return esc(c.status||'云端出片中…');
+    if(!c.status)return '就绪后开始';
+    return esc(c.status)+(s.last_image?
+      ` · 输出 <b>${esc(String(s.last_image).split(/[\\/]/).pop())}</b>`:'');
+  }
   if(failed())
     return `<b class="bad">❌ 本轮失败</b>${s.last_fail?'：'+esc(s.last_fail):''} · `+
       (s.last_image?(isVideo(s.last_image)?'成片仍是上一段':'画面仍是上一张'):'尚无成图');
@@ -138,14 +157,14 @@ function fmtT(s){
 }
 function hostOf(u){return String(u||'').replace(/^https?:\/\//,'').split('/')[0];}
 
-/* 环境横幅：只在「环境」那几页显示（基础/千问/Moss/H3 各一页）。
-   数字也按页取：在 H3 那页只报 H3 还差几项，不拿别的环境的欠账烦人。
+/* 环境横幅：只在「环境管理」这一页显示（四路环境收成了页内子页）。
+   数字也按当前子页取：停在 H3 那格只报 H3 还差几项，不拿别的环境的欠账烦人。
    补全/下载进行中时，这里换成步骤 + 百分比 + 速度 + 剩余时间的那条。
    挂在 data-role 插槽上而不是整页重画：进度是从轮询并进来的，八百毫秒自己就变了。 */
 function envBarHTML(){
   const s=MIC.s.st;
   const page=MIC.nav&&MIC.nav.pageOf?MIC.nav.pageOf():'';
-  if(page.indexOf('env_')!==0)return '';
+  if(page!=='env')return '';
   const d=s.dl||{};
   if(s.env_busy||d.busy){
     const st=Number(s.env_step)||0, n=Number(s.env_steps)||0;
@@ -164,12 +183,14 @@ function envBarHTML(){
       <span class="mut fine">${bits.join(' · ')||'准备中…'}</span><span class="grow"></span>
       <button class="btn sm gho" onclick="MIC.nav.goto('logs')">${ic('hist','s')}看日志</button></div>`;
   }
-  const n=Number((s.env_todo_by||{})[page.slice(4)])||0;
+  const zone=MIC.env&&MIC.env.tabId?MIC.env.tabId():'base';
+  if(zone==='cloud')return '';
+  const n=Number((s.env_todo_by||{})[zone])||0;
   if(!n)return '';
   return `<div class="envbar warn"><span class="tic">${ic('tool','s')}</span>
     <b>这一路还差 ${n} 项</b>
     <span class="mut fine">各环境互相独立，齐一个就能先用一个</span><span class="grow"></span>
-    <button class="btn sm pri" onclick="MIC.env.fixZone('${page.slice(4)}')">${ic('down','s')}一键补齐</button></div>`;
+    <button class="btn sm pri" onclick="MIC.env.fixZone('${zone}')">${ic('down','s')}一键补齐</button></div>`;
 }
 
 /* 每次轮询后调用：只刷新页面上存在的插槽 */
@@ -194,30 +215,32 @@ function tick(){
   const slot=MIC.$('envslot');if(slot)slot.innerHTML=envBarHTML();
   document.querySelectorAll('#view [data-role]').forEach(el=>{
     const r=el.dataset.role;
+    const cloud=el.dataset.lane==='cloud';
+    const c=cloudOf();
     if(r==='log')fillLog(el,el.dataset.keys?el.dataset.keys.split(','):null);
-    else if(r==='st')el.textContent=s.status||'就绪';
+    else if(r==='st')el.textContent=(cloud?c.status:s.status)||'就绪';
     else if(r==='dot')el.className='dot '+(el.dataset.mode==='model'
-        ?(s.model_loaded?'ok':''):(s.running?'run':''));
+        ?(s.model_loaded?'ok':''):((cloud?c.run:s.running)?'run':''));
     else if(r==='prog'){
       const bar=el.parentElement;
-      if(s.running==='load'){
+      if(cloud){
+        if(c.run){bar.classList.add('indet');el.style.width='';}
+        else{bar.classList.remove('indet');el.style.width=(c.done&&c.total?'100%':'0%');}
+      }
+      else if(s.running==='load'){
         /* 载入阶段也走真刻度：后端把第三方库的文本条折算成了百分比，
            只有第一帧还没数出来时暂时用不确定动画顶着 */
         const lp=Number(s.load_pct)||0;
         if(lp>0){bar.classList.remove('indet');el.style.width=lp+'%';}
         else{bar.classList.add('indet');el.style.width='';}
       }
-      else if(s.running==='video'&&s.video_exec==='cloud'){
-        /* 本地那 4 步给得出粗刻度，云端给不出：不装成有百分比，走不确定动画 */
-        bar.classList.add('indet');el.style.width='';
-      }
       else{bar.classList.remove('indet');el.style.width=pct()+'%';}
     }
-    else if(r==='pgtext')el.textContent=pgText();
+    else if(r==='pgtext')el.textContent=pgText(cloud?'cloud':'');
     else if(r==='logcount')el.textContent=MIC.s.logs.length;
     else if(r==='vram')el.innerHTML=vramHTML();
     else if(r==='count')el.textContent=MIC.n(s[el.dataset.field||'img_count']);
-    else if(r==='result')el.innerHTML=resultHTML();
+    else if(r==='result')el.innerHTML=resultHTML(cloud?'cloud':'');
     /* 成片时间线：结构变了才重画，进度条/耗时每跳自己更新（见 film.js paint） */
     else if(r==='film'){if(MIC.film&&MIC.film.paint)MIC.film.paint(el);}
     else if(r==='imgprev'){
@@ -288,18 +311,24 @@ document.addEventListener('focusout',()=>{
   },0);
 });
 
-/* 任务起止：按钮/状态行要跟着重画；正在输入时不抢渲染（避免清空未保存的输入） */
-let lastRun=null;
+/* 任务起止：按钮/状态行要跟着重画；正在输入时不抢渲染（避免清空未保存的输入）。
+   两条通道各记一个上值：云端（st.cloud.run）与本地（st.running）互不相干，
+   任何一条收尾都要作废画廊缓存；只盯 st.running 会把云端那一路的收尾漏掉。 */
+let lastRun=null,lastCloud=null;
 function watchFinish(){
-  const cur=MIC.s.st.running;
-  if(cur===lastRun)return;
-  const ended=(lastRun==='gen'||lastRun==='video'||
-               lastRun==='film'||lastRun==='film_merge')&&cur===null;
-  lastRun=cur;
-  if(ended){
-    if(MIC.gal)MIC.gal.invalidate();   // 生成收尾：画廊缓存作废，下次进页重扫
+  const s=MIC.s.st, cur=s.running, cRun=(s.cloud||{}).run||null;
+  if(cur===lastRun&&cRun===lastCloud)return;
+  const wasGpu=lastRun==='gen'||lastRun==='video'||
+               lastRun==='film'||lastRun==='film_merge';
+  const ended=wasGpu&&cur===null;
+  const cloudEnded=!!lastCloud&&!cRun;
+  lastRun=cur;lastCloud=cRun;
+  if(ended||cloudEnded){
+    if(MIC.gal)MIC.gal.invalidate();   // 收尾：画廊缓存作废，下次进页重扫
     if(MIC.film&&MIC.film.refresh)MIC.film.refresh();
-    if(MIC.s.cfg.notify!==false)MIC.toast(MIC.s.st.status||'生成已结束');
+    if(MIC.s.cfg.notify!==false)
+      MIC.toast(cloudEnded?((s.cloud||{}).status||'云端任务已结束')
+                          :(s.status||'生成已结束'));
   }
   if(skipForFocus())return;
   MIC.render();
@@ -312,9 +341,10 @@ let lastStruct="";
 function watchStruct(){
   const s=MIC.s.st;
   /* env_todo 也算结构：它决定欢迎页/生图页那条环境提示在不在，
-     开机体检晚半秒到，到了一屏字得自己补上。 */
+     开机体检晚半秒到，到了一屏字得自己补上。
+     云端任务起止也进这个键：视频页/成片页/云端账号页的锁与停止按钮要跟着换。 */
   const k=[s.engine,s.moss_tier,s.comfyui_on,s.comfyui_loaded,s.moss_installed,
-           s.env_todo,envKey()].join('|');
+           s.env_todo,envKey(),(s.cloud||{}).run||''].join('|');
   if(k===lastStruct)return;
   const first=lastStruct==="";
   lastStruct=k;

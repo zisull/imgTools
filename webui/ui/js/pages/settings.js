@@ -151,7 +151,7 @@ MIC.registerPage('settings',{
         quantRow)
       +C.card('界面','palette',
         C.field('模型环境',sw('qwen','千问')+sw('moss','Moss')+sw('h3','H3'),
-          '关掉的那一路不体检、不提醒，功能页也收起；明细与一键补齐在「环境」那几页')+
+          '关掉的那一路不体检、不提醒，功能页也收起；明细与一键补齐在「环境管理」')+
         C.field('欢迎页','<button class="btn sm" onclick="MIC.welcome.review()">'+
           ic('refresh','s')+'重看选环境那一屏','只有一开始那次会拦住你选路；这里点了才再看得到'),
         C.field('软件名',

@@ -147,8 +147,10 @@ _IMG_FILTER = "图片 (*" + ";*".join(IMG_EXT) + ")"
 # v10 加「成片」页：剧本 → AI 拆分镜 → 逐段出片 → 合成一部，通道本地/云端共用。
 # v11 页名从两字放成 3~5 字（文生图/局部重绘/剧本成片…）：两字在侧栏和页头都太像标签，
 #     也不够说清这页干什么；组名仍是两字，作为层级区分。
+# v12 环境四页合成一页「环境管理」（基础/千问/Moss/H3/云端账号做成页内子页），
+#     13 页收到 9 页；组名改成「创作 / 系统」，两页都放得下视频与成片。
 # 比它旧的配置在载入时按新默认表重排一次（只把用户改过的标签名带过去），见 _restructure_nav。
-NAV_VER = 11
+NAV_VER = 12
 
 # 各版默认表用过的标签名。换代重排时，名字落在这张表里说明「用户没自己改过」，
 # 直接换成新默认名；不在表里的才是他改的，原样保留。
@@ -159,6 +161,9 @@ LEGACY_TAB_NAMES = {
     "视频", "基础", "千问",
     "云端",
     "成片", "Moss", "H3", "H3云端",
+    "基础环境", "千问环境", "Moss 环境", "H3 视频", "H3 云端",
+    "环境管理", "云端账号", "运行日志",
+    "文生图", "图像编辑", "局部重绘", "视频生成", "剧本成片", "作品画廊", "全局设置",
 }
 
 # 反向提示词的出厂默认：以前出厂是空的，多数人不会填，图就照着常见失败出。
@@ -231,28 +236,24 @@ DEFAULT_CFG = {
              "exec": "cloud", "mode": "chain", "first": "", "style": "电影感写实",
              "acct": "", "retry": 2, "seed": -1},
     # 导航：分组套一页一个标签；组名两字作层级，页名 3~5 字说清这页干什么
+    # 环境四页并成一页（页内子页切换），导航只留九页：创作五页 + 系统四页
     "nav": [
-        {"id": "g_out", "type": "group", "name": "出图", "icon": "flower", "children": [
+        {"id": "g_out", "type": "group", "name": "创作", "icon": "flower", "children": [
             {"id": "t_gen", "type": "tab", "name": "文生图", "icon": "flower", "page": "t2i"},
             {"id": "t_edit", "type": "tab", "name": "图像编辑", "icon": "wand", "page": "edit"},
             {"id": "t_inp", "type": "tab", "name": "局部重绘", "icon": "brush", "page": "inpaint"},
             {"id": "t_vid", "type": "tab", "name": "视频生成", "icon": "film", "page": "video"},
             {"id": "t_film", "type": "tab", "name": "剧本成片", "icon": "play", "page": "film"},
         ]},
-        # 环境按模型一页一个：开关、明细、补齐都在自己那页，不再挤成一长串分区
-        {"id": "g_env", "type": "group", "name": "环境", "icon": "db", "children": [
-            {"id": "t_envb", "type": "tab", "name": "基础环境", "icon": "db", "page": "env_base"},
-            {"id": "t_envq", "type": "tab", "name": "千问环境", "icon": "flower", "page": "env_qwen"},
-            {"id": "t_envm", "type": "tab", "name": "Moss 环境", "icon": "wave", "page": "env_moss"},
-            {"id": "t_envh", "type": "tab", "name": "H3 视频", "icon": "film", "page": "env_h3"},
-        ]},
         {"id": "g_sys", "type": "group", "name": "系统", "icon": "cog", "children": [
+            {"id": "t_env", "type": "tab", "name": "环境管理", "icon": "db", "page": "env"},
             {"id": "t_gal", "type": "tab", "name": "作品画廊", "icon": "image", "page": "gallery"},
-            {"id": "t_cloud", "type": "tab", "name": "H3 云端", "icon": "globe", "page": "cloud"},
             {"id": "t_log", "type": "tab", "name": "运行日志", "icon": "hist", "page": "logs"},
             {"id": "t_set", "type": "tab", "name": "全局设置", "icon": "cog", "page": "settings"},
         ]},
     ],
+    # 环境页当前停在哪一格：base/qwen/moss/h3/cloud，页外跳转（去补齐、去登录）也写这里
+    "env_tab": "base",
 }
 
 
@@ -357,11 +358,16 @@ class App(WindowCtl):
         self._load_cfg()
         self._lock = threading.Lock()
         self._task_lock = threading.Lock()   # 「查空闲 + 占位」必须一气呵成
+        # 两条独立任务位：gpu=吃显存的本地活（生图/本地视频/成片/合成），
+        # cloud=只等平台、不碰显卡的云端活。云端在跑时本地照旧能出图，
+        # 反过来本地在跑也不耽误排队云端；真抢同一张卡的活仍然只认 gpu 这一条。
+        self._lanes = {"gpu": None, "cloud": None}
         self._logs = []            # [seq, hh:mm:ss, text]
         self._seq = 0
         self._window = None
         self._thread = None
         self._stop = threading.Event()
+        self._stop_cloud = threading.Event()
         self.mgr = None            # PipelineMgr：第一次载入时才 import（拉 torch）
         self.moss = None           # MossManager：切到 Moss 引擎时才建（拉 moss_mgr，纯 stdlib）
         self._api = None           # ApiServer：API 页开启时才 import（拉 fastapi）
@@ -413,6 +419,10 @@ class App(WindowCtl):
             "comfyui_on": False, "comfyui_url": "", "comfyui_loaded": False,
             # 云端账号：busy=正在做什么（空=闲），msg=上一条结果/错误（界面原样显示）
             "cloud_busy": "", "cloud_msg": "",
+            # 云端任务单独一条状态线：跑云端时 st.running 仍是本地的，
+            # 两边互不覆盖，界面才知道「云端在跑、本地还能出图」
+            "cloud": {"run": None, "task": "", "status": "", "done": 0, "total": 0,
+                      "t_start": 0, "elapsed": 0, "last_fail": ""},
             # 成片：state=idle/planning/running/done/paused/stopped/failed；
             # shots 每段一条（等待/跑/完成/失败/跳过），界面拿它画时间段线
             "film": {"state": "idle", "phase": "", "status": "", "id": "", "title": "",
@@ -555,16 +565,19 @@ class App(WindowCtl):
         return out
 
     def _restructure_nav(self):
-        """按新的默认表重排导航：v5 起恢复分组（出图 / 环境 / 系统）。
+        """按新的默认表重排导航：v5 起恢复分组（创作 / 系统）。
         只把用户自己改过的标签名带过去；分组名与排布用默认表。"""
         old = {}
+        old_page = {}      # 标签 id → 页面键：环境合成一页后，要能猜到他原来停在哪
 
         def collect(nodes):
             for n in nodes or []:
                 if n.get("type") == "tab":
                     old[n.get("page")] = n.get("name")
+                    old_page[n.get("id")] = n.get("page")
                 collect(n.get("children"))
         collect(self.cfg.get("nav") or [])
+        prev_tab = self.cfg.get("last_tab")
 
         def build(nodes):
             out = []
@@ -586,7 +599,14 @@ class App(WindowCtl):
 
         self.cfg["nav"] = build(DEFAULT_CFG["nav"])
         if self.cfg["last_tab"] not in self._nav_ids(self.cfg["nav"]):
-            self.cfg["last_tab"] = DEFAULT_CFG["last_tab"]
+            # 原来停在环境某页 / 云端页的，合并后落到「环境管理」同一格，不把人甩回文生图
+            p = old_page.get(prev_tab) or ""
+            z = p[4:] if p.startswith("env_") else ("cloud" if p == "cloud" else "")
+            if z in ("base", "qwen", "moss", "h3", "cloud"):
+                self.cfg["last_tab"] = "t_env"
+                self.cfg["env_tab"] = z
+            else:
+                self.cfg["last_tab"] = DEFAULT_CFG["last_tab"]
         self.cfg["layout"] = DEFAULT_CFG["layout"]   # 换代默认回到分组树（用户要的就是这个形态）
         return True
 
@@ -697,6 +717,10 @@ class App(WindowCtl):
         f = self.st.get("film") or {}
         s["film"] = dict(f)
         s["film"]["shots"] = [dict(x) for x in (f.get("shots") or [])]
+        c = dict(self.st.get("cloud") or {})
+        if c.get("run") and c.get("t_start"):
+            c["elapsed"] = round(time.time() - c["t_start"], 1)
+        s["cloud"] = c
         s["ffmpeg"] = self._ff()
         s["ai_key"] = self._ai_has()
         eng = str(self.cfg.get("engine", "qwen"))
@@ -889,31 +913,61 @@ class App(WindowCtl):
     def _busy(self):
         return self.st["running"] is not None
 
-    def _claim(self, key):
+    @staticmethod
+    def _lane(lane):
+        return "cloud" if str(lane or "") == "cloud" else "gpu"
+
+    def _claim(self, key, lane="gpu"):
         """占位：pywebview 给每个 js_api 调用单起一个线程，「先查 _busy 再起线程」
-        中间能被另一个调用插进来，两个任务会同踩同一个 pipeline。查+占放一把锁里。"""
+        中间能被另一个调用插进来，两个任务会同踩同一个 pipeline。查+占放一把锁里。
+
+        两条任务位互不相干：云端任务只占 cloud 那条，gpu 照旧给本地生图用。
+        st.running 只承载 gpu 这一条，界面里原有「running=本地在跑」的语义不变。
+        """
+        lane = self._lane(lane)
         with self._task_lock:
-            if self.st["running"] is not None:
+            if self._lanes.get(lane) is not None:
                 return False
-            self.st["running"] = key
-            self.st["t_start"] = time.time()
-            self.st["dup_last"] = False     # 上一轮的同图标记不能顺延到新任务
-            self.st["last_fail"] = ""
-            self._stop.clear()       # 上一个任务留下的停止位不能顺延到新任务
+            self._lanes[lane] = key
+            if lane == "gpu":
+                self.st["running"] = key
+                self.st["t_start"] = time.time()
+                self.st["dup_last"] = False     # 上一轮的同图标记不能顺延到新任务
+                self.st["last_fail"] = ""
+                self._stop.clear()       # 上一个任务留下的停止位不能顺延到新任务
+            else:
+                c = self.st.setdefault("cloud", {})
+                c.update(run=key, task=("成片" if key == "film" else "视频"),
+                         status="准备中…", done=0, total=0, t_start=time.time(),
+                         elapsed=0, last_fail="")
+                self._stop_cloud.clear()
             return True
 
-    def _release(self):
+    def _release(self, lane="gpu"):
+        lane = self._lane(lane)
         with self._task_lock:
-            self.st["running"] = None
+            self._lanes[lane] = None
+            if lane == "gpu":
+                self.st["running"] = None
+            else:
+                c = self.st.setdefault("cloud", {})
+                t0 = c.get("t_start") or 0
+                c["elapsed"] = round(time.time() - t0, 1) if t0 else float(c.get("elapsed") or 0)
+                c["run"] = None
+                c["t_start"] = 0
+                self._cloud_gen.clear()
 
-    def _launch(self, key, fn):
-        if not self._claim(key):
+    def _launch(self, key, fn, lane="gpu"):
+        if not self._claim(key, lane):
             return False
         self._thread = threading.Thread(target=fn, daemon=True)
         self._thread.start()
         return True
 
-    def _busy_msg(self):
+    def _busy_msg(self, lane="gpu"):
+        if self._lane(lane) == "cloud":
+            c = self.st.get("cloud") or {}
+            return "云端已有任务在跑：%s（等它结束或先点停止）" % (c.get("task") or "任务")
         return "有任务在跑：" + str(self.st["running"])
 
     def _get_mgr(self):
@@ -940,9 +994,9 @@ class App(WindowCtl):
         """
         on = self._env_on()
         if eng == "qwen" and on.get("qwen") is False:
-            return "千问环境已关闭 · 到「环境 → 千问」那页开启"
+            return "千问环境已关闭 · 到「环境管理 → 千问」开启"
         if eng == "moss" and (on.get("moss") is False and on.get("h3") is False):
-            return "Moss 环境已关闭 · 到「环境 → Moss」那页开启"
+            return "Moss 环境已关闭 · 到「环境管理 → Moss」开启"
         return ""
 
     def _ensure_engine(self, name):
@@ -1211,18 +1265,40 @@ class App(WindowCtl):
         finally:
             self._release()
 
-    def stop(self, key=None):
-        if not self._busy():
-            return {"ok": False, "msg": "没有运行中的任务"}
-        self._stop.set()
-        self.st["status"] = "停止中…"
-        if self.st["running"] == "load":
-            self._log("⏹ 已请求停止：模型载入是一次性动作，完成后将不再开始生成")
-        elif self._cloud_gen.is_set():
-            self._log("⏹ 已请求停止：这边不再等了，平台上那半截可能还在跑")
-        else:
-            self._log("⏹ 已请求停止：等当前这一步去噪完成后中断")
-        return {"ok": True}
+    def stop(self, key=None, lane=None):
+        """停止：按通道各收各的。云端任务不该顺手把本地生图也停掉。"""
+        key = str(key or "")
+        lane = str(lane or "")
+        if lane not in ("gpu", "cloud"):
+            if self._lanes.get("cloud") and (not key or self._lanes["cloud"] == key):
+                lane = "cloud"
+            elif self._lanes.get("gpu") and (not key or self._lanes["gpu"] == key):
+                lane = "gpu"
+            elif self._lanes.get("gpu"):
+                lane = "gpu"
+            elif self._lanes.get("cloud"):
+                lane = "cloud"
+        if lane == "cloud" and self._lanes.get("cloud"):
+            self._stop_cloud.set()
+            c = self.st.setdefault("cloud", {})
+            c["status"] = "停止中…"
+            if str(c.get("run") or "") == "film":
+                self._film_stop.set()
+                f = self.st.get("film") or {}
+                f["status"] = "正在停：这一段收尾后结束，已出的段都留着"
+            self._log("⏹ 已请求停止云端任务：这边不再等了，平台上那半截可能还在跑")
+            return {"ok": True}
+        if lane == "gpu" and self._lanes.get("gpu"):
+            self._stop.set()
+            self.st["status"] = "停止中…"
+            if self.st["running"] == "load":
+                self._log("⏹ 已请求停止：模型载入是一次性动作，完成后将不再开始生成")
+            elif self._cloud_gen.is_set():
+                self._log("⏹ 已请求停止：这边不再等了，平台上那半截可能还在跑")
+            else:
+                self._log("⏹ 已请求停止：等当前这一步去噪完成后中断")
+            return {"ok": True}
+        return {"ok": False, "msg": "没有运行中的任务"}
 
     # ------------------------------------------------------------ js_api：Moss 引擎（内嵌 ComfyUI）
     def set_engine(self, name):
@@ -1582,7 +1658,7 @@ class App(WindowCtl):
         if str(v.get("exec") or "local") == "cloud":
             return self._video_cloud(v)
         if not self._env_on().get("h3"):
-            return {"ok": False, "msg": "H3 环境已关闭 · 到「环境 → H3」那页开启"}
+            return {"ok": False, "msg": "H3 环境已关闭 · 到「环境管理 → H3」开启"}
         p = self._video_params(v)
         self.st["total"] = p["steps"]
         need_start = not (self.moss is not None and self.moss.alive())
@@ -1603,21 +1679,30 @@ class App(WindowCtl):
         """
         g = self._cloud_h3()
         if not self._dp_ready():
-            return {"ok": False, "msg": "云端要浏览器：到「环境 → 基础」补齐 DrissionPage 后重开软件"}
-        if self._cloud_gen.is_set():
-            return {"ok": False, "msg": "云端正有一段在跑：等它出片或先点停止"}
+            return {"ok": False, "msg": "云端要浏览器：到「环境管理 → 基础」补齐 DrissionPage 后重开软件"}
+        if self._lanes.get("cloud"):
+            return {"ok": False, "msg": self._busy_msg("cloud")}
         try:
             row = g.account(str(v.get("cloud_acct") or ""))
         except Exception as e:
             return {"ok": False, "msg": "云端还没备好：%s" % e}
         try:
             kind, src = g.wf_src(str(v.get("cloud_wf") or ""))
-            # 本地文件没有平台编号：宿主页到开页时再自动借，这里只校验远端地址
-            wf = g.wf_url(src) if kind != "file" else ""
+            # 本地文件没有平台编号：宿主页到开页时再自动借，这里先验结构；
+            # 「API 格式 / 缺节点 / 连线断了 / 不是 H3 图」都能当场说清，不用等浏览器。
+            if kind == "file":
+                g.check_wf_file(src)
+                if not g.host_url():
+                    return {"ok": False,
+                            "msg": "本地工作流要借一页平台画布入口：先在「环境管理 → 云端账号」"
+                                   "填一份能打开的 H3 工作流地址当兜底"}
+                wf = ""
+            else:
+                wf = g.wf_url(src)
         except Exception as e:
             return {"ok": False, "msg": "%s" % e}
-        if not self._launch("video", lambda: self._do_video_cloud(v)):
-            return {"ok": False, "msg": self._busy_msg()}
+        if not self._launch("video", lambda: self._do_video_cloud(v), lane="cloud"):
+            return {"ok": False, "msg": self._busy_msg("cloud")}
         w, h = self._h3_size(v, hi=self.H3_HI_CLOUD)
         self._log("☁️ 云端出片：%ds · %dx%d · 号「%s」· %s（要开浏览器，按平台计费）"
                   % (_to_int(v.get("seconds"), 5, 5, 15), w, h, row["name"],
@@ -1625,11 +1710,8 @@ class App(WindowCtl):
         return {"ok": True, "total": 1, "exec": "cloud", "acct": row["name"]}
 
     def _do_video_cloud(self, v):
-        self.st["running"] = "video"
-        self.st["video_exec"] = "cloud"
-        self.st["done"] = 0
-        self.st["total"] = 1
-        self.st["status"] = "云端准备中…"
+        c = self.st.setdefault("cloud", {})
+        c.update(task="视频", status="云端准备中…", done=0, total=1, last_fail="")
         self._cloud_gen.set()
         t0 = time.time()
         try:
@@ -1647,34 +1729,32 @@ class App(WindowCtl):
                 self._log("⚠️ 参考图不在了：%s · 云端这份工作流必须有图，这一段会直接停下"
                           % os.path.basename(str(v.get("first"))))
             path = self._cloud_h3().run(p, on_progress=self._cloud_step,
-                                        should_stop=self._stop.is_set)
-            if self._stop.is_set():
-                self.st["status"] = "已停止"
+                                        should_stop=self._stop_cloud.is_set)
+            if self._stop_cloud.is_set():
+                c["status"] = "已停止"
                 return
             self._publish(path, mode="h3", params=v, size="%dx%d" % (w, h),
                           steps=self.H3_STEPS, seed=-1,
                           sec=round(time.time() - t0, 1),
                           name=os.path.basename(path))
-            self.st["done"] = 1
-            self.st["status"] = "✅ 完成"
+            c["done"] = 1
+            c["status"] = "✅ 完成"
             self._log("── 结束 ──")
         except Exception as e:
-            self.st["last_fail"] = str(e)
-            if self._stop.is_set():
-                self._log("⏹ 已停止：云端那半段可能还在平台上跑，去 H3云端 看一眼")
-                self.st["status"] = "已停止"
+            c["last_fail"] = str(e)
+            if self._stop_cloud.is_set():
+                self._log("⏹ 已停止：云端那半段可能还在平台上跑，去「云端账号」看一眼")
+                c["status"] = "已停止"
             else:
                 self._log("❌ 云端出片失败：%s" % e)
-                self.st["status"] = "出片失败"
+                c["status"] = "出片失败"
         finally:
-            self._cloud_gen.clear()
-            self._release()
+            self._release("cloud")
 
     def _cloud_step(self, msg):
         """云端只有一条「等多久」的路可报：没有步数刻度，就把实话写在状态行上。"""
-        if not self._stop.is_set():
-            self.st["status"] = str(msg or "云端出片中…")[:120]
-
+        if not self._stop_cloud.is_set():
+            self.st.setdefault("cloud", {})["status"] = str(msg or "云端出片中…")[:120]
 
     def _do_video_gen(self, v):
         self.st["running"] = "video"
@@ -1819,6 +1899,9 @@ class App(WindowCtl):
         return bool(self._ff_ok)
 
     def _film_should_stop(self):
+        # 云端成片只认成片自己的停止位：本地生图点停止不能顺手把云端那部也停掉
+        if getattr(self, "_film_cloud", False):
+            return bool(self._film_stop.is_set())
         return bool(self._stop.is_set() or self._film_stop.is_set())
 
     def _film_cfg(self, payload=None):
@@ -1882,6 +1965,12 @@ class App(WindowCtl):
             f["status"] = t[:120]
             self.st["status"] = t[:120]
 
+    # 这几类错误重试同一份工作流也不会变：一份一份重试只是把时间再烧一遍
+    FILM_WF_FATAL = ("云端前端没能加载这份工作流", "云端 ComfyUI 前端没接住这份工作流",
+                     "这份工作流里没有 H3 主节点", "没有 VHS_VideoCombine",
+                     "这是 API 格式", "这份 JSON 里没有画布", "工作流连线",
+                     "本地工作流文件读不了", "云端编辑器还没挂好")
+
     def _film_precheck(self, f, count, base_dir=""):
         """开跑前把「一定跑不动」的话说完：通道、账号、工作流、首帧、ffmpeg。"""
         exec_ = "cloud" if str(f.get("exec")) == "cloud" else "local"
@@ -1904,7 +1993,7 @@ class App(WindowCtl):
         err = ""
         if exec_ == "cloud":
             if not self._dp_ready():
-                err = "云端要浏览器：到「环境 → 基础」补齐 DrissionPage 后重开软件"
+                err = "云端要浏览器：到「环境管理 → 基础」补齐 DrissionPage 后重开软件"
             elif self._cloud_gen.is_set():
                 err = "云端已经有一段在跑：等它结束再开新片"
             else:
@@ -1913,7 +2002,13 @@ class App(WindowCtl):
                     row = g.account(acct)
                     acct_id, acct_name = row["id"], row["name"]
                     kind, src = g.wf_src(wf)
-                    if kind != "file":
+                    if kind == "file":
+                        g.check_wf_file(src)
+                        if not g.host_url():
+                            raise RuntimeError("本地工作流要借一页平台画布入口："
+                                               "先在「环境管理 → 云端账号」填一份能打开的"
+                                               " H3 工作流地址当兜底")
+                    else:
                         g.wf_url(src)
                     if not first:
                         err = ("云端这份工作流按参考生成：先在「首帧」那格选一张图"
@@ -1921,9 +2016,9 @@ class App(WindowCtl):
                 except Exception as e:
                     err = str(e)
         elif not self._env_on().get("h3"):
-            err = "H3 环境已关闭 · 到「环境 → H3」那页开启"
+            err = "H3 环境已关闭 · 到「环境管理 → H3」开启"
         if not err and str(f.get("mode")) == "chain" and not self._ff():
-            err = ("接帧模式要 FFmpeg 抽尾帧：到「环境 → 基础」补上"
+            err = ("接帧模式要 FFmpeg 抽尾帧：到「环境管理 → 基础」补上"
                    "「FFmpeg 静态包」（约 190 MB）")
         return {"err": err, "exec": exec_, "width": w, "height": h, "first": first,
                 "acct": acct_id, "acct_name": acct_name, "wf": wf, "count": count}
@@ -2060,6 +2155,7 @@ class App(WindowCtl):
         retry = _to_int(proj.get("retry"), 2, 0, 5)
         chain = str(proj.get("mode")) == "chain"
         cloud = str(proj.get("exec")) == "cloud"
+        self._film_cloud = cloud
         fail_run = 0
         last_ref = prj.abs_path(d, proj.get("first") or "")
         try:
@@ -2092,11 +2188,15 @@ class App(WindowCtl):
                 fs["current"] = sh["i"]
                 fs["status"] = "第 %d/%d 段 · %s" % (
                     sh["i"], total, "云端出片中" if cloud else "本地出片中")
-                self.st["status"] = fs["status"]
+                if cloud:
+                    self.st.setdefault("cloud", {})["status"] = fs["status"]
+                else:
+                    self.st["status"] = fs["status"]
                 fs["elapsed"] = round(time.time() - t0, 1)
                 prj.save(d, proj)
                 ok = False
                 last = ""
+                fatal = False
                 first = last_ref
                 for attempt in range(retry + 1):
                     if self._film_should_stop():
@@ -2126,6 +2226,10 @@ class App(WindowCtl):
                         self._log("⚠️ %s失败：%s" % (label, last))
                         if self._film_should_stop():
                             break
+                        # 工作流本身加载不上：同一份图重试多少次都一样，整批停在这里
+                        if cloud and any(k in last for k in self.FILM_WF_FATAL):
+                            fatal = True
+                            break
                         time.sleep(min(8.0, 2.0 * (attempt + 1)))
                 if self._film_should_stop():
                     sh["state"] = "wait"
@@ -2149,6 +2253,14 @@ class App(WindowCtl):
                     sh["err"] = last or "未知错误"
                     fail_run += 1
                     self._log("❌ 第 %d 段跳过（不跳号）：%s" % (sh["i"], sh["err"]))
+                    if fatal:
+                        fs["state"] = "paused"
+                        fs["phase"] = "暂停"
+                        fs["msg"] = ("工作流没加载上，已停下：%s。修好工作流后点「继续」，"
+                                     "已经出完的段都留着" % sh["err"][:120])
+                        fs["status"] = "工作流没加载上，已停下"
+                        self._log("⛔ 工作流没加载上：整批停下，不重试")
+                        break
                     if fail_run >= 5:
                         fs["state"] = "paused"
                         fs["phase"] = "暂停"
@@ -2162,7 +2274,10 @@ class App(WindowCtl):
                                     if x.get("state") in ("fail", "skip"))
                 fs["elapsed"] = round(time.time() - t0, 1)
                 fs["shots"] = self._film_shots(proj, d)
-                self.st["status"] = fs["status"]
+                if cloud:
+                    self.st.setdefault("cloud", {})["status"] = fs["status"]
+                else:
+                    self.st["status"] = fs["status"]
                 prj.save(d, proj)
             if fs["state"] != "paused":
                 if self._film_should_stop():
@@ -2183,7 +2298,10 @@ class App(WindowCtl):
                     else:
                         fs["phase"] = "合成"
                         fs["status"] = "合成中…"
-                        self.st["status"] = "合成中…"
+                        if cloud:
+                            self.st.setdefault("cloud", {})["status"] = fs["status"]
+                        else:
+                            self.st["status"] = "合成中…"
                         try:
                             film = self._film_merge(d, proj)
                             fs["film"] = film
@@ -2216,8 +2334,14 @@ class App(WindowCtl):
                                 if x.get("state") in ("fail", "skip"))
             fs["elapsed"] = round(time.time() - t0, 1)
             fs["shots"] = self._film_shots(proj, d)
+            if cloud:
+                c = self.st.setdefault("cloud", {})
+                c["status"] = fs.get("status") or ""
+                c["done"] = fs.get("done") or 0
+                c["total"] = fs.get("total") or 0
             prj.save(d, proj)
-            self._release()
+            self._film_cloud = False
+            self._release("cloud" if cloud else "gpu")
 
     def film_plan(self, payload=None):
         f = self._film_cfg(payload)
@@ -2257,8 +2381,9 @@ class App(WindowCtl):
         if not rows and total > 40 * shot:
             return {"ok": False, "msg": "最多 40 段（15 秒一段＝10 分钟）："
                                         "把总时长压到 600 秒内，或拆成两集"}
-        if not self._claim("film"):
-            return {"ok": False, "msg": self._busy_msg()}
+        lane = "cloud" if str(f.get("exec") or "local") == "cloud" else "gpu"
+        if not self._claim("film", lane):
+            return {"ok": False, "msg": self._busy_msg(lane)}
         self._film_stop.clear()
         try:
             title = str(f.get("title") or p.get("title") or "").strip()
@@ -2282,7 +2407,7 @@ class App(WindowCtl):
                 raise FilmError(chk["err"])
             d, proj = self._film_new(f, shots, title, chk)
         except Exception as e:
-            self._release()
+            self._release(lane)
             msg = str(e) if isinstance(e, FilmError) else self._ai_err(e)
             self.st["film"] = dict(self.st.get("film") or {}, state="idle", phase="",
                                    status="", msg=msg)
@@ -2304,10 +2429,17 @@ class App(WindowCtl):
                 "exec": chk["exec"], "estimate": "%d~%d 分钟" % (lo, hi)}
 
     def film_stop(self):
-        if str(self.st.get("running") or "") != "film":
+        gpu = self._lanes.get("gpu") == "film"
+        cloud = self._lanes.get("cloud") == "film"
+        if not (gpu or cloud):
             return {"ok": False, "msg": "成片没在跑"}
         self._film_stop.set()
-        self._stop.set()
+        if gpu:
+            self._stop.set()
+        if cloud:
+            self._stop_cloud.set()
+            c = self.st.setdefault("cloud", {})
+            c["status"] = "正在停：这一段收尾后结束"
         f = self.st.get("film") or {}
         f["status"] = "正在停：这一段收尾后结束，已出的段都留着"
         self._log("⏹ 收到停止：当前这一段收尾后结束；云端那一段可能还在平台上跑")
@@ -2340,7 +2472,8 @@ class App(WindowCtl):
                     # 「当前」与「正在跑」是两件事：跑完的当前工程仍要能点继续/重出
                     "current": d == (self._film_dir or ""),
                     "running": (d == (self._film_dir or "")
-                                and self.st.get("running") in ("film", "film_merge")),
+                                and (self._lanes.get("gpu") in ("film", "film_merge")
+                                     or self._lanes.get("cloud") == "film")),
                 })
         items.sort(key=lambda x: x["time"], reverse=True)
         return {"ok": True, "items": items[:20]}
@@ -2379,8 +2512,9 @@ class App(WindowCtl):
             return {"ok": False, "msg": chk["err"]}
         # 先占位、写好 view 再起线程：_film_run 第一句就读 st.film，
         # 反过来写的话线程可能先拿到旧的 idle 视图，之后又被这里覆盖，界面就不动了
-        if not self._claim("film"):
-            return {"ok": False, "msg": self._busy_msg()}
+        lane = "cloud" if str(proj.get("exec") or "local") == "cloud" else "gpu"
+        if not self._claim("film", lane):
+            return {"ok": False, "msg": self._busy_msg(lane)}
         self._film_stop.clear()
         self._film = proj
         self._film_dir = d
@@ -2389,7 +2523,7 @@ class App(WindowCtl):
         self._thread = threading.Thread(target=self._film_run, args=(d, proj), daemon=True)
         self._thread.start()
         self._log("▶️ 继续成片：%s · 从第一段没出的往后跑" % (proj.get("title") or d))
-        return {"ok": True}
+        return {"ok": True, "exec": proj.get("exec") or "local"}
 
     def film_redo(self, shot=1, deep=False):
         """重出某一段。接帧模式下自动连带作废后面所有段：第 N+1 段的参考
@@ -2399,7 +2533,8 @@ class App(WindowCtl):
         已完成的段照旧跳过，失败段原位重试，不跳号。
         """
         from filmkit import project as prj
-        if str(self.st.get("running") or "") in ("film", "film_merge"):
+        if (self._lanes.get("gpu") in ("film", "film_merge")
+                or self._lanes.get("cloud") == "film"):
             return {"ok": False, "msg": "成片在跑：先点停止再重出"}
         d = self._film_dir or ""
         if not d or not os.path.isfile(os.path.join(d, "project.json")):
@@ -2439,7 +2574,8 @@ class App(WindowCtl):
         r = self.film_resume(d)
         if not r.get("ok"):
             return r
-        return {"ok": True, "msg": "从第 %d 段重出，作废 %d 段" % (i, n), "count": n}
+        return {"ok": True, "msg": "从第 %d 段重出，作废 %d 段" % (i, n), "count": n,
+                "exec": r.get("exec") or "local"}
 
     def film_merge(self, dir=""):
         from filmkit import project as prj
@@ -2456,7 +2592,7 @@ class App(WindowCtl):
                    for s in (proj.get("shots") or [])):
             return {"ok": False, "msg": "还没有一段成功出片"}
         if not self._ff():
-            return {"ok": False, "msg": "缺 FFmpeg：到「环境 → 基础」补上后再合成"}
+            return {"ok": False, "msg": "缺 FFmpeg：到「环境管理 → 基础」补上后再合成"}
         self._film = proj
         self._film_dir = d
         if not self._launch("film_merge", lambda: self._film_merge_job(d, proj)):
@@ -2542,6 +2678,25 @@ class App(WindowCtl):
         out["ready"] = bool(out["dp"] and out["accts"])
         return out
 
+    def cloud_check_wf(self, path=""):
+        """选完工作流先验结构：不拉浏览器、不占任务位，选完几秒内就能知道行不行。
+
+        本地文件当场给结论；平台地址只能等开页再验，这里不假装知道。
+        """
+        s = str(path or (self.cfg.get("cloud") or {}).get("workflow") or "").strip()
+        if not s:
+            return {"ok": False, "msg": "还没填工作流"}
+        if not re.search(r"\.json$|\.txt$", s, re.I):
+            return {"ok": True, "kind": "remote", "msg": "平台工作流：开跑时进页面再验"}
+        p = os.path.normpath(s if os.path.isabs(s) else os.path.join(ROOT, s))
+        try:
+            from cloudkit.gen import check_workflow_json
+            meta = check_workflow_json(p)
+        except Exception as e:
+            return {"ok": False, "kind": "file", "msg": str(e)}
+        return {"ok": True, "kind": "file", "nodes": meta["nodes"], "links": meta["links"],
+                "msg": "结构没问题：%d 个节点 · 主节点/输出节点都在" % meta["nodes"]}
+
     def cloud_state(self):
         """给界面的账号表 + 浏览器/保活状态。不含任何凭据。"""
         c = self.cfg.get("cloud") or {}
@@ -2556,7 +2711,7 @@ class App(WindowCtl):
                     "browser": {"on": False, "port": int(c.get("port") or 9333),
                                 "base": str(c.get("base") or ""), "account": ""},
                     "busy": self.st.get("cloud_busy", ""),
-                    "msg": "缺 DrissionPage：到「环境 → 基础」补齐后重开这页",
+                    "msg": "缺 DrissionPage：到「环境管理 → 基础」补齐后重开这页",
                     "keep": {"on": bool(c.get("keep", True)),
                              "min": int(c.get("keep_min") or 30),
                              "last": 0, "msg": "还没跑过"},
@@ -2586,7 +2741,7 @@ class App(WindowCtl):
             return False, "云端出片正占用浏览器：先等这一段跑完"
         with self._cloud_lock:
             if self.st.get("cloud_busy"):
-                return False, "H3云端正忙：%s" % self.st["cloud_busy"]
+                return False, "云端账号正忙：%s" % self.st["cloud_busy"]
             self.st["cloud_busy"] = label
             self.st["cloud_msg"] = ""
 
@@ -2599,7 +2754,7 @@ class App(WindowCtl):
                 # 这一句要进界面、日志、账号索引，先抹一遍再落地
                 msg = brief_error(e)
                 self.st["cloud_msg"] = msg
-                self._log("❌ H3云端：%s" % msg)
+                self._log("❌ 云端账号：%s" % msg)
             finally:
                 with self._cloud_lock:
                     self.st["cloud_busy"] = ""
@@ -2614,7 +2769,7 @@ class App(WindowCtl):
     def cloud_new(self, name=""):
         """新建一个登录档案：起共用浏览器，停在登录页；用户登好回来点「保存」。"""
         if not self._dp_ready():
-            return {"ok": False, "msg": "缺 DrissionPage：到「环境 → 基础」补齐后重开这页",
+            return {"ok": False, "msg": "缺 DrissionPage：到「环境管理 → 基础」补齐后重开这页",
                     "state": self.cloud_state()}
         h = self._cloudkit()
         row = h["store"].create(name)
@@ -2774,7 +2929,7 @@ class App(WindowCtl):
 
     def cloud_keep_now(self):
         if not self._dp_ready():
-            return {"ok": False, "msg": "缺 DrissionPage：到「环境 → 基础」补齐后重开这页"}
+            return {"ok": False, "msg": "缺 DrissionPage：到「环境管理 → 基础」补齐后重开这页"}
         h = self._cloudkit()
         if not h["host"].alive():
             return {"ok": False, "msg": "浏览器还没开：先点「打开平台」"}
@@ -2783,7 +2938,7 @@ class App(WindowCtl):
 
     def cloud_browser_start(self):
         if not self._dp_ready():
-            return {"ok": False, "msg": "缺 DrissionPage：到「环境 → 基础」补齐后重开这页"}
+            return {"ok": False, "msg": "缺 DrissionPage：到「环境管理 → 基础」补齐后重开这页"}
         h = self._cloudkit()
 
         def job():

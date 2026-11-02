@@ -76,7 +76,7 @@ def _run(argv, timeout=600):
 def probe(root, path):
     _, fp = tools(root)
     if not fp:
-        raise StitchError("缺 ffprobe：到「环境 → 基础」补上 FFmpeg")
+        raise StitchError("缺 ffprobe：到「环境管理 → 基础」补上 FFmpeg")
     r = _run([fp, "-v", "error", "-print_format", "json",
               "-show_streams", "-show_format", str(path)], timeout=60)
     if r.returncode != 0:
@@ -133,7 +133,7 @@ def concat(root, paths, out_path, *, log=None):
         raise StitchError("有 0 字节的分段：那一段没出完")
     ff, _ = tools(root)
     if not ff:
-        raise StitchError("缺 FFmpeg：到「环境 → 基础」补上「FFmpeg 静态包」后再合成")
+        raise StitchError("缺 FFmpeg：到「环境管理 → 基础」补上「FFmpeg 静态包」后再合成")
     check_compatible(root, paths)
     os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
     if len(paths) == 1:

@@ -136,6 +136,11 @@
   background:var(--panel);color:var(--fg2);font-size:12.5px;cursor:pointer;transition:.12s}
 .chip:hover{border-color:var(--ac-line)}
 .chip.on{border-color:var(--ac-line);color:var(--ac);background:var(--ac-soft)}
+/* 环境管理页内子页：一排药丸当二级导航，欠账数挂在名字后面 */
+.subtabs{margin:0 0 10px}
+.subtabs .chip{display:inline-flex;align-items:center;gap:5px}
+.subtabs .chip .n{font-size:11px;color:var(--bad);font-weight:650}
+.subtabs .chip.on .n{color:var(--ac)}
 .insrow .chip.act{border-style:dashed;color:var(--fg3)}
 /* 分类行只多一道分隔线，和灵感行同一套构件：不做成第二层卡片 */
 .catrow{padding-bottom:7px;margin-bottom:1px;border-bottom:1px solid var(--line)}

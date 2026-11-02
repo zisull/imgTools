@@ -1,31 +1,38 @@
-/* pages/env.js —— 环境：一个模型一页，开关、明细、一键补齐都在这页上
-   开关是这一页的第一件事：关掉的环境后端根本不体检（env_check 先按 env_on 过滤），
+/* pages/env.js —— 环境管理：一路模型一格，开关、明细、一键补齐都在这一页
+   四路环境原来各占一张导航页，侧栏被撑到十三项；现在收成一页，页内用一排子页切换。
+   开关仍是这一页的第一件事：关掉的环境后端根本不体检（env_check 先按 env_on 过滤），
    于是待补数、横幅提醒、功能页一起安静下来——用户要的是「关掉就当它不存在」。
    分区数据来自 envs/index.json 注册表（后端 env_check 回 r.envs），
-   新增一个模型只要加一个 envs/<id>/ 目录 + 一条注册表，再在这张列表里加一页。 */
+   新增一个模型只要加一个 envs/<id>/ 目录 + 一条注册表，再在这张列表里加一格。 */
 (function(){
 const MIC=window.MIC=window.MIC||{};
 const C=MIC.form, ic=MIC.ic, esc=MIC.esc;
 
-let envItems=null, env=null, envAt=null, dir='', mdl=null;
+let envItems=null, env=null, envAt=null, dir='', mdl=null, tab='', checking=false;
 
 const ST={ok:['on','ok','就绪'],miss:['','bad','没装'],part:['','bad','待补'],warn:['','','提醒']};
 const G={PY:'运行环境',PKG:'依赖包',TOOL:'扩展工具',MODEL:'模型权重',RT:'ComfyUI 运行时',DIR:'目录'};
 const ORDER=[G.PY,G.PKG,G.TOOL,G.RT,G.MODEL,G.DIR];
 
-/* 工具环境（ffmpeg）没有自己的导航页，明细并到基础页；
-   它们不是一路模型，缺了只算可选扩展，不进「还差几项」。 */
+/* 工具环境（ffmpeg）没有自己的格子，明细并到基础；它们不是一路模型，
+   缺了只算可选扩展，不进「还差几项」。 */
 function toolIds(){
   return new Set(((env&&env.envs)||[]).filter(x=>x.tool).map(x=>x.id));
 }
 
-/* 页名与图标：环境 id → 这一页的表头。叫法跟着导航走。 */
-const PAGES=[
-  {id:'base',page:'env_base',name:'基础环境',icon:'db'},
-  {id:'qwen',page:'env_qwen',name:'千问环境',icon:'flower'},
-  {id:'moss',page:'env_moss',name:'Moss 环境',icon:'wave'},
-  {id:'h3',page:'env_h3',name:'H3 视频',icon:'film'},
+/* 页内子页：四路环境 + 云端账号（DrissionPage 与登录态都算「这台机器备了什么」） */
+const TABS=[
+  {id:'base',name:'基础',icon:'db'},
+  {id:'qwen',name:'千问',icon:'flower'},
+  {id:'moss',name:'Moss',icon:'wave'},
+  {id:'h3',name:'H3',icon:'film'},
+  {id:'cloud',name:'云端账号',icon:'globe'},
 ];
+function validTab(id){return TABS.some(t=>t.id===id)?id:'';}
+function tabId(){
+  if(!tab)tab=validTab(MIC.s.cfg.env_tab)||'base';
+  return tab;
+}
 
 /* 后端还没回体检结果时的占位分区（真分区以 env.envs 为准）。 */
 const FALLBACK={
@@ -118,7 +125,7 @@ function btn(id,t){
     ic('down','s')+(id==='h3'?'下载 ':'一键补齐 ')+t.length+' 项</button>';
 }
 
-/* 千问那两块的归属：权重目录与下载器只服务千问，放在千问这一页而不是基础页 */
+/* 千问那两块的归属：权重目录与下载器只服务千问，放在千问这一格而不是基础 */
 function qwenExtra(){
   const s=MIC.s.st;
   const list=mdl===null?'<div class="empty">正在扫描权重目录 …</div>'
@@ -133,12 +140,12 @@ function qwenExtra(){
     '<div class="btnrow"><button class="btn pri" onclick="MIC.models.start()" '+
       'title="自动选镜像、多线程分段、断点续传；开着 Motrix 时先交给它">'+
       ic('down','s')+'开始下载（断点续传）</button></div>';
-  return C.duo(C.card('本机模型','db',local,{tight:true,tip:'千问的权重目录，换激活模型在这里切（Moss 与 H3 的权重在各自环境目录，由那一页管）'+
+  return C.duo(C.card('本机模型','db',local,{tight:true,tip:'千问的权重目录，换激活模型在这里切（Moss 与 H3 的权重在各自环境目录，由那一格管）'+
       (s.model_loaded?'；显存里已载入模型，切换后要先卸载再载入才生效':'')}),
       C.card('下载权重','down',dl),'eq');
 }
 
-function render(id){
+function zone(id){
   const isOn=on(id);
   const m=meta(id);
   const head=switchRow(id);
@@ -150,39 +157,77 @@ function render(id){
   return head+tip+C.card('明细','db',body(id),{tight:true})+extra;
 }
 
-PAGES.forEach(p=>{
-  MIC.registerPage(p.page,{
-    title:p.name,icon:p.icon,
-    sub(){
-      if(!on(p.id))return '已关闭';
-      if(envItems===null)return '体检中…';
-      const n=todoOf(p.id).length;
-      return n?'还差 '+n+' 项':'已就绪';
-    },
-    render(){
-      return '<div class="pagebar"><span class="mut fine">体检于 '
-          +(envAt?envAt.toLocaleTimeString('zh-CN',{hour12:false}):'…')+'</span><span class="grow"></span>'+
-        '<button class="btn sm gho" onclick="MIC.env.check()">'+ic('refresh','s')+'重新体检</button></div>'+
-        render(p.id);
-    },
-    mount(){
-      if(p.id==='qwen'&&!mdl)MIC.models.refresh();
-      if(!env)MIC.env.check();
-    },
-  });
+/* 子页那一排：当前格高亮；右边挂一句欠账数，扫一眼就知道该先补哪一路 */
+function tabsHTML(){
+  return '<div class="chiprow subtabs">'+TABS.map(t=>{
+    let n='';
+    if(t.id!=='cloud'&&envItems!==null&&on(t.id)){
+      const k=todoOf(t.id).length;
+      if(k)n=`<span class="n">${k}</span>`;
+    }
+    return `<button class="chip${t.id===tabId()?' on':''}" onclick="MIC.env.tab('${t.id}')">`+
+      `${ic(t.icon,'s')}${t.name}${n}</button>`;
+  }).join('')+'</div>';
+}
+
+function page(){
+  const id=tabId();
+  const tabs=tabsHTML();
+  if(id==='cloud')
+    return tabs+(MIC.cloud&&MIC.cloud.render?MIC.cloud.render():'<div class="empty">云端账号页没挂上</div>');
+  return tabs+'<div class="pagebar"><span class="mut fine">体检于 '
+      +(envAt?envAt.toLocaleTimeString('zh-CN',{hour12:false}):'…')+'</span><span class="grow"></span>'+
+    '<button class="btn sm gho" onclick="MIC.env.check()">'+ic('refresh','s')+'重新体检</button></div>'+
+    zone(id);
+}
+
+function totalTodo(){
+  let n=0;
+  ['base','qwen','moss','h3'].forEach(id=>{if(on(id))n+=todoOf(id).length;});
+  return n;
+}
+
+MIC.registerPage('env',{
+  title:'环境管理',icon:'db',
+  sub(){
+    if(envItems===null)return '体检中…';
+    const n=totalTodo();
+    return n?'还差 '+n+' 项':'已就绪';
+  },
+  render(){return page();},
+  mount(){
+    if(!env)MIC.env.check();
+    const id=tabId();
+    if(id==='qwen'&&!mdl)MIC.models.refresh();
+    if(id==='cloud'&&MIC.cloud&&MIC.cloud.mount)MIC.cloud.mount();
+  },
 });
 
 /* ---------- 体检 / 开关 / 补齐 ---------- */
 MIC.env={
+  /* 页内切格；从别的页跳过来也走这里：先记下停哪格，再进「环境管理」 */
+  tab(id){
+    id=validTab(id)||'base';
+    tab=id;
+    MIC.s.cfg.env_tab=id;
+    MIC.api.save({env_tab:id}).catch(()=>{});
+    if(MIC.nav.pageOf()==='env')MIC.render();
+    else MIC.nav.goto('env');
+  },
+  focus(id){MIC.env.tab(id);},
+  tabId,
   check(){
+    if(checking)return;
+    checking=true;
     MIC.api.envCheck().then(r=>{
+      checking=false;
       if(!r||!r.ok){MIC.toast((r&&r.msg)||'体检失败');return;}
       envItems=r.items;env=r;envAt=new Date();
       MIC.env.lastItems=r.items;
       if(r.env_on)MIC.s.st.env_on=r.env_on;
       MIC.nav.applyMode();
       MIC.render();
-    }).catch(()=>MIC.toast('体检失败'));
+    }).catch(()=>{checking=false;MIC.toast('体检失败');});
   },
   /* 开关走后端 env_set（它要顺手放显存、重跑体检），不能只当表单字段存：
      先落 cfg 让界面立刻变，再用后端回的这份对齐。 */

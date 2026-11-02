@@ -192,8 +192,8 @@ def main():
     ok("真 envs/index.json 解析通过", isinstance(spec["packages"], list) and spec["models"],
        "%d 个包 · %d 个模型 · %d 个环境"
        % (len(spec["packages"]), len(spec["models"]), len(spec["envs"])))
-    ok("三个环境都在注册表里（qwen/moss/h3）",
-       [e["id"] for e in spec["envs"]] == ["qwen", "moss", "h3"],
+    ok("注册表里的环境：三路模型 + 可选 ffmpeg",
+       [e["id"] for e in spec["envs"]] == ["qwen", "moss", "h3", "ffmpeg"],
        [e["id"] for e in spec["envs"]])
     real = ec.check(ROOT, spec=spec)
     moss_it = item(real, "model:moss-comfy")

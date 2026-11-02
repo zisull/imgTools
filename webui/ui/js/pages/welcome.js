@@ -3,7 +3,7 @@
    关掉的那一路后端根本不体检（env_check 先按 env_on 过滤），
    于是待补数、横幅提醒、功能页一起安静下来——「关掉就当它不存在」。
    这一页不挂导航标签（是一次性的门），cfg.welcomed 落 true 就再也不来；
-   设置页留了「重看」，开关本身也随时能在「环境 → 各页」上改。 */
+   设置页留了「重看」，开关本身也随时能在「环境管理」里改。 */
 (function(){
 const MIC=window.MIC=window.MIC||{};
 const ic=MIC.ic, esc=MIC.esc;
@@ -11,13 +11,13 @@ const ic=MIC.ic, esc=MIC.esc;
 const CARDS=[
   {id:'qwen',icon:'flower',name:'千问',tag:'生图 + 改图',
    desc:'Qwen-Image-2.1-Turbo，画质稳，能整图改绘与局部重绘。',
-   cost:'权重约 30 GB · 1024 约 28 秒',page:'env_qwen'},
+   cost:'权重约 30 GB · 1024 约 28 秒'},
   {id:'moss',icon:'wave',name:'Moss',tag:'出图快',
    desc:'MOSS-Image，内嵌 ComfyUI；只出图，不做改绘。',
-   cost:'权重约 12 GB · 1024 约 3.3 秒',page:'env_moss'},
+   cost:'权重约 12 GB · 1024 约 3.3 秒'},
   {id:'h3',icon:'film',name:'H3 视频',tag:'出成片',
    desc:'MiniMax H3，一句话出一段带声音的成片；和 Moss 共用那个运行时。',
-   cost:'权重约 41 GB · 12G 显存',page:'env_h3'},
+   cost:'权重约 41 GB · 12G 显存'},
 ];
 
 /* 这一路在「这台机器」上缺不缺东西：开机那趟后台体检把数按环境拆好（st.env_todo_by），
@@ -57,7 +57,7 @@ MIC.registerPage('welcome',{
         <button class="btn pri big" onclick="MIC.welcome.enter()">${ic('play','s')}进入控制台</button>
         <div class="mut fine" style="margin-top:8px">${
           open.length?'已开 '+open.map(c=>({qwen:'千问',moss:'Moss',h3:'H3'}[c])).join(' / '):'一路都没开，进去只看得到环境与设置'
-        } · 开关随时能在「环境」那几页改 · H3 云端（RunningHub）在接入中</div></div>
+        } · 开关随时能在「环境管理」里改 · H3 云端（RunningHub）已接入</div></div>
     </div>`;
   },
 });

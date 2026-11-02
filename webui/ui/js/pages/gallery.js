@@ -141,7 +141,7 @@ MIC.gal={
     const m=map[it.mode];
     if(!m){MIC.toast('不认识的任务类型：'+it.mode);return;}
     if(MIC.nav.pageHidden&&MIC.nav.pageHidden(m[1])){
-      MIC.toast('「'+(MIC.pages[m[1]]||{}).title+'」页对应的环境关着，到「环境」那几页开启后再回填');return;}
+      MIC.toast('「'+(MIC.pages[m[1]]||{}).title+'」页对应的环境关着，到「环境管理」开启后再回填');return;}
     const k=m[0],patch={};
     MIC.mset(patch,k+'.prompt',it.prompt||'');
     if(it.negative!=null)MIC.mset(patch,k+'.negative',it.negative);

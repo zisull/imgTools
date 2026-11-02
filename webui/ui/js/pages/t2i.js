@@ -120,7 +120,7 @@ MIC.registerPage('t2i',{
     const todo=Number((s.env_todo_by||{}).moss)||0;
     const envNote=moss&&todo
       ?`<div class="notebar">${ic('db','s')}<b>Moss 环境还差 ${todo} 项</b><span class="grow"></span>`+
-        `<button class="btn sm pri" onclick="MIC.nav.goto('env_moss')">去补齐</button></div>`
+        `<button class="btn sm pri" onclick="MIC.env.focus('moss')">去补齐</button></div>`
       :'';
     return engineBar()+envNote+C.duo(
       C.card('生成参数','flower',C.lock(run,params)+MIC.runner.action()),
