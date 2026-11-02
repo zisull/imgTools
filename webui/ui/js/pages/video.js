@@ -95,7 +95,7 @@ function liveSub(){
 }
 
 MIC.registerPage('video',{
-  title:'视频',sub:liveSub,icon:'film',
+  title:'视频生成',sub:liveSub,icon:'film',
   render(){
     const s=MIC.s.st,v=MIC.s.cfg.video||{},run=!!s.running;
     const cloud=String(v.exec)==='cloud';

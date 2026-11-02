@@ -113,7 +113,7 @@ function page(){
 }
 
 MIC.registerPage('cloud',{
-  title:'H3云端',sub:liveSub,icon:'globe',
+  title:'H3 云端',sub:liveSub,icon:'globe',
   render(){return page();},
 });
 

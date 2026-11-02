@@ -91,15 +91,16 @@ function grpHTML(n){
     ${kids.length===0?`<div class="emptygrp" data-id="${n.id}" data-type="group">空分组 · 拖标签页进来</div>`:''}`;
 }
 function tabHTML(n){
+  /* 树形布局里身份已经由分组表达，不再挂引擎小字：四字页名要占满这一行，
+     窄侧栏下「千问/Moss」会把页名挤成省略号。引擎归属留在悬停提示里。 */
   const path=S.layout==='flat'?pathOf(n.id).slice(0,-1).join(' / '):'';
   const eng=pageEng(n.page);
-  const tag=path||eng;
-  const tip=path||('这一页要用的环境：'+eng+' · 关掉环境会一并收起');
+  const tip=path?'在「'+path+'」组':(eng?'这一页要用的环境：'+eng+' · 关掉环境会一并收起':'');
   return `<div class="node tab ${S.sel===n.id?'sel':''}" data-id="${n.id}" data-type="tab" draggable="true"
-      onclick="MIC.nav.click('${n.id}')" ondblclick="MIC.nav.startRename('${n.id}')">
+      onclick="MIC.nav.click('${n.id}')" ondblclick="MIC.nav.startRename('${n.id}')"${tip?` title="${esc(tip)}"`:''}>
     ${ic(n.icon||'tool','ni')}
     <span class="nm">${esc(n.name)}</span>
-    ${tag?`<span class="path" title="${esc(tip)}">${esc(tag)}</span>`:''}
+    ${path?`<span class="path">${esc(path)}</span>`:''}
     <span class="more" onclick="MIC.nav.nodeMenu(event,'${n.id}')">${ic('dots')}</span>
   </div>`;
 }

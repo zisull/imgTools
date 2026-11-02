@@ -19,12 +19,12 @@ function toolIds(){
   return new Set(((env&&env.envs)||[]).filter(x=>x.tool).map(x=>x.id));
 }
 
-/* 页名与图标：环境 id → 这一页的表头。叫法跟着导航走，两字对齐。 */
+/* 页名与图标：环境 id → 这一页的表头。叫法跟着导航走。 */
 const PAGES=[
-  {id:'base',page:'env_base',name:'基础',icon:'db'},
-  {id:'qwen',page:'env_qwen',name:'千问',icon:'flower'},
-  {id:'moss',page:'env_moss',name:'Moss',icon:'wave'},
-  {id:'h3',page:'env_h3',name:'H3',icon:'film'},
+  {id:'base',page:'env_base',name:'基础环境',icon:'db'},
+  {id:'qwen',page:'env_qwen',name:'千问环境',icon:'flower'},
+  {id:'moss',page:'env_moss',name:'Moss 环境',icon:'wave'},
+  {id:'h3',page:'env_h3',name:'H3 视频',icon:'film'},
 ];
 
 /* 后端还没回体检结果时的占位分区（真分区以 env.envs 为准）。 */

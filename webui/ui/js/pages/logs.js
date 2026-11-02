@@ -23,7 +23,7 @@ function bar(){
 }
 
 MIC.registerPage('logs',{
-  title:'日志',sub:()=>MIC.s.logs.length+' 条 · 生成 / 体检 / 补全同一条流',icon:'hist',
+  title:'运行日志',sub:()=>MIC.s.logs.length+' 条 · 生成 / 体检 / 补全',icon:'hist',
   render(){
     return C.card('运行日志','refresh',
         bar()+`<div class="log tall" data-role="log" data-keys="${MIC.esc(f)}"></div>`,{tight:true});

@@ -266,7 +266,7 @@ function projectsHTML(){
 }
 
 MIC.registerPage('film',{
-  title:'成片',sub:liveSub,icon:'film',
+  title:'剧本成片',sub:liveSub,icon:'film',
   render(){
     const s=MIC.s.st,f=MIC.s.cfg.film||{},fs=s.film||{};
     const busy=!!s.running,cloud=String(f.exec)==='cloud';

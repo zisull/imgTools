@@ -72,7 +72,7 @@ jh,
 }
 
 MIC.registerPage('settings',{
-  title:'设置',sub:'界面、目录与对外接口',icon:'cog',
+  title:'全局设置',sub:'界面、目录与对外接口',icon:'cog',
   render(){
     const s=MIC.s.st, a=MIC.s.cfg.api||{};
     const svc=

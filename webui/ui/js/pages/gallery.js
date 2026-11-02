@@ -90,7 +90,7 @@ function getThumb(el){
 }
 
 MIC.registerPage('gallery',{
-  title:'画廊',sub:()=>MIC.s.gal?(MIC.s.gal.length+' 项 · 图与成片 · 收藏 / 回填 / 首帧 / 删除'):'输出目录里的成图与成片',icon:'image',
+  title:'作品画廊',sub:()=>MIC.s.gal?(MIC.s.gal.length+' 项 · 收藏 / 回填 / 首帧 / 删除'):'输出目录里的成图与成片',icon:'image',
   render(){
     let items=MIC.s.gal;
     const scan=items===null;

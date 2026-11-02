@@ -53,7 +53,7 @@ function loadThumb(p){
 }
 
 MIC.registerPage('edit',{
-  title:'编辑',sub:'给 ≤10 张参考图，出一张合成或改绘',icon:'wand',
+  title:'图像编辑',sub:'≤10 张参考图，合成或改绘',icon:'wand',
   render(){
     const run=!!MIC.s.st.running;
     const dropzone='<div class="refdrop" onclick="MIC.edit.add()" '+

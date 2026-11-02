@@ -85,7 +85,7 @@ function stage(){
 }
 
 MIC.registerPage('inpaint',{
-  title:'重绘',sub:'涂抹要改的区域，其余保持原样',icon:'brush',
+  title:'局部重绘',sub:'涂抹区域，其余不动',icon:'brush',
   render(){
     const run=!!MIC.s.st.running;
     const params=

@@ -145,8 +145,10 @@ _IMG_FILTER = "图片 (*" + ";*".join(IMG_EXT) + ")"
 # v8 加「云端」页：多账号登录态与浏览器保活（生成仍走协议，浏览器只负责登录）。
 # v9 改叫「H3云端」（这页服务的是 H3/RunningHub 那条线）。
 # v10 加「成片」页：剧本 → AI 拆分镜 → 逐段出片 → 合成一部，通道本地/云端共用。
+# v11 页名从两字放成 3~5 字（文生图/局部重绘/剧本成片…）：两字在侧栏和页头都太像标签，
+#     也不够说清这页干什么；组名仍是两字，作为层级区分。
 # 比它旧的配置在载入时按新默认表重排一次（只把用户改过的标签名带过去），见 _restructure_nav。
-NAV_VER = 10
+NAV_VER = 11
 
 # 各版默认表用过的标签名。换代重排时，名字落在这张表里说明「用户没自己改过」，
 # 直接换成新默认名；不在表里的才是他改的，原样保留。
@@ -156,6 +158,7 @@ LEGACY_TAB_NAMES = {
     "生图", "编辑", "重绘", "词库", "环境",
     "视频", "基础", "千问",
     "云端",
+    "成片", "Moss", "H3", "H3云端",
 }
 
 # 反向提示词的出厂默认：以前出厂是空的，多数人不会填，图就照着常见失败出。
@@ -227,27 +230,27 @@ DEFAULT_CFG = {
     "film": {"story": "", "total": 60, "shot": 15, "size": "768x1344", "cw": 768, "ch": 1344,
              "exec": "cloud", "mode": "chain", "first": "", "style": "电影感写实",
              "acct": "", "retry": 2, "seed": -1},
-    # 导航：分组套一页一个标签；组名与标签名统一两字，竖排对齐
+    # 导航：分组套一页一个标签；组名两字作层级，页名 3~5 字说清这页干什么
     "nav": [
         {"id": "g_out", "type": "group", "name": "出图", "icon": "flower", "children": [
-            {"id": "t_gen", "type": "tab", "name": "生图", "icon": "flower", "page": "t2i"},
-            {"id": "t_edit", "type": "tab", "name": "编辑", "icon": "wand", "page": "edit"},
-            {"id": "t_inp", "type": "tab", "name": "重绘", "icon": "brush", "page": "inpaint"},
-            {"id": "t_vid", "type": "tab", "name": "视频", "icon": "film", "page": "video"},
-            {"id": "t_film", "type": "tab", "name": "成片", "icon": "play", "page": "film"},
+            {"id": "t_gen", "type": "tab", "name": "文生图", "icon": "flower", "page": "t2i"},
+            {"id": "t_edit", "type": "tab", "name": "图像编辑", "icon": "wand", "page": "edit"},
+            {"id": "t_inp", "type": "tab", "name": "局部重绘", "icon": "brush", "page": "inpaint"},
+            {"id": "t_vid", "type": "tab", "name": "视频生成", "icon": "film", "page": "video"},
+            {"id": "t_film", "type": "tab", "name": "剧本成片", "icon": "play", "page": "film"},
         ]},
         # 环境按模型一页一个：开关、明细、补齐都在自己那页，不再挤成一长串分区
         {"id": "g_env", "type": "group", "name": "环境", "icon": "db", "children": [
-            {"id": "t_envb", "type": "tab", "name": "基础", "icon": "db", "page": "env_base"},
-            {"id": "t_envq", "type": "tab", "name": "千问", "icon": "flower", "page": "env_qwen"},
-            {"id": "t_envm", "type": "tab", "name": "Moss", "icon": "wave", "page": "env_moss"},
-            {"id": "t_envh", "type": "tab", "name": "H3", "icon": "film", "page": "env_h3"},
+            {"id": "t_envb", "type": "tab", "name": "基础环境", "icon": "db", "page": "env_base"},
+            {"id": "t_envq", "type": "tab", "name": "千问环境", "icon": "flower", "page": "env_qwen"},
+            {"id": "t_envm", "type": "tab", "name": "Moss 环境", "icon": "wave", "page": "env_moss"},
+            {"id": "t_envh", "type": "tab", "name": "H3 视频", "icon": "film", "page": "env_h3"},
         ]},
         {"id": "g_sys", "type": "group", "name": "系统", "icon": "cog", "children": [
-            {"id": "t_gal", "type": "tab", "name": "画廊", "icon": "image", "page": "gallery"},
-            {"id": "t_cloud", "type": "tab", "name": "H3云端", "icon": "globe", "page": "cloud"},
-            {"id": "t_log", "type": "tab", "name": "日志", "icon": "hist", "page": "logs"},
-            {"id": "t_set", "type": "tab", "name": "设置", "icon": "cog", "page": "settings"},
+            {"id": "t_gal", "type": "tab", "name": "作品画廊", "icon": "image", "page": "gallery"},
+            {"id": "t_cloud", "type": "tab", "name": "H3 云端", "icon": "globe", "page": "cloud"},
+            {"id": "t_log", "type": "tab", "name": "运行日志", "icon": "hist", "page": "logs"},
+            {"id": "t_set", "type": "tab", "name": "全局设置", "icon": "cog", "page": "settings"},
         ]},
     ],
 }
@@ -552,7 +555,7 @@ class App(WindowCtl):
         return out
 
     def _restructure_nav(self):
-        """按新的默认表重排导航：v5 起恢复分组（出图 / 系统），标签名仍是统一两字。
+        """按新的默认表重排导航：v5 起恢复分组（出图 / 环境 / 系统）。
         只把用户自己改过的标签名带过去；分组名与排布用默认表。"""
         old = {}
 

@@ -67,7 +67,7 @@ function liveSub(){
 }
 
 MIC.registerPage('t2i',{
-  title:'生图',sub:liveSub,icon:'flower',
+  title:'文生图',sub:liveSub,icon:'flower',
   render(){
     const s=MIC.s.st,run=!!s.running,moss=s.engine==='moss',K=moss?'moss':'gen';
     const rgba=!moss&&String(MIC.mget(MIC.s.cfg,'gen.mode'))==='rgba';
