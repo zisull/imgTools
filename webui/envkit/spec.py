@@ -73,6 +73,7 @@ def load_spec(root):
         "packages": [],
         "models": [],
         "dirs": [],
+        "tools": [],
         "envs": [],
         "spec": INDEX,
     }
@@ -99,13 +100,16 @@ def load_spec(root):
             "engine": str(e.get("engine") or eid),
             "optional": bool(e.get("optional") or es.get("optional")),
             "runtime": str(e.get("runtime") or es.get("runtime") or ""),
+            # 工具类环境（ffmpeg 这类）不是模型路线：不进欢迎页的三路开关，
+            # 也不按「关掉就不体检」处理，缺了只是在基础页多一行可补的扩展
+            "tool": bool(e.get("tool") or es.get("tool")),
             "title": str(es.get("title") or e.get("label") or eid),
             "desc": str(es.get("desc") or ""),
             "models_dir": str(es.get("models_dir") or ""),
             "spec": "%s/%s" % (ENVS_DIR, rel),
         }
         merged["envs"].append(meta)
-        for key in ("packages", "models", "dirs"):
+        for key in ("packages", "models", "dirs", "tools"):
             for item in es.get(key) or []:
                 q = dict(item)
                 q["env"] = eid
@@ -161,9 +165,27 @@ def runtime_dir(root, spec, name="comfyui"):
     return _abs(root, rt.get("dir") or "comfyui")
 
 
+def tool_path(root, spec, key, filename=""):
+    """可选工具的可执行文件路径；清单里没有就回空串（调用方再回落 PATH）。"""
+    for t in spec.get("tools") or []:
+        if str(t.get("key") or "") != str(key):
+            continue
+        dest = _abs(root, t.get("dest") or "")
+        name = filename or ((t.get("files") or [""])[0])
+        return os.path.join(dest, *str(name).split("/"))
+    return ""
+
+
 def env_installed(root, spec, env_id):
-    """这个环境装没装：至少有一个 must 文件在盘上就算装了。"""
-    meta = env_meta(spec, env_id)
+    """这个环境装没装：至少有一个 must 文件（工具环境则是一个可执行文件）在盘上就算装了。"""
+    tools = [t for t in spec.get("tools") or [] if t.get("env") == env_id]
+    if tools:
+        for t in tools:
+            dest = _abs(root, t.get("dest") or ("envs/%s" % env_id))
+            for name in t.get("files") or []:
+                if os.path.isfile(os.path.join(dest, *str(name).split("/"))):
+                    return True
+        return False
     models = [m for m in spec.get("models") or [] if m.get("env") == env_id]
     if not models:
         return False

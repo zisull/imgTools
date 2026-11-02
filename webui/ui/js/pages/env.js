@@ -10,8 +10,14 @@ const C=MIC.form, ic=MIC.ic, esc=MIC.esc;
 let envItems=null, env=null, envAt=null, dir='', mdl=null;
 
 const ST={ok:['on','ok','就绪'],miss:['','bad','没装'],part:['','bad','待补'],warn:['','','提醒']};
-const G={PY:'运行环境',PKG:'依赖包',MODEL:'模型权重',RT:'ComfyUI 运行时',DIR:'目录'};
-const ORDER=[G.PY,G.PKG,G.RT,G.MODEL,G.DIR];
+const G={PY:'运行环境',PKG:'依赖包',TOOL:'扩展工具',MODEL:'模型权重',RT:'ComfyUI 运行时',DIR:'目录'};
+const ORDER=[G.PY,G.PKG,G.TOOL,G.RT,G.MODEL,G.DIR];
+
+/* 工具环境（ffmpeg）没有自己的导航页，明细并到基础页；
+   它们不是一路模型，缺了只算可选扩展，不进「还差几项」。 */
+function toolIds(){
+  return new Set(((env&&env.envs)||[]).filter(x=>x.tool).map(x=>x.id));
+}
 
 /* 页名与图标：环境 id → 这一页的表头。叫法跟着导航走，两字对齐。 */
 const PAGES=[
@@ -39,12 +45,17 @@ function on(id){
   return m[id]!==false;
 }
 function itemsOf(id){
-  const out=[];
-  (envItems||[]).forEach((it,i)=>{if(String(it.env||'base')===id)out.push({it:it,i:i});});
+  const out=[],tools=toolIds();
+  (envItems||[]).forEach((it,i)=>{
+    const e=String(it.env||'base');
+    if(e===id||(id==='base'&&tools.has(e)))out.push({it:it,i:i});
+  });
   return out;
 }
 function todoOf(id){
-  return itemsOf(id).filter(x=>x.it.state==='miss'||x.it.state==='part');
+  /* optional 的工具项只叫「可选扩展没装」：在明细里能点补，但不计入
+     「还差几项」、也不进一键补齐——不需要合成的用户不该一直被提醒。 */
+  return itemsOf(id).filter(x=>(x.it.state==='miss'||x.it.state==='part')&&!x.it.optional);
 }
 function gbOf(list){
   let g=0;list.forEach(x=>{g+=Number(x.it.gb)||0;});

@@ -24,6 +24,10 @@ const cfg={
   video:{prompt:'一只猫推开木门，阳光落在地板上，镜头缓慢推进',
         seconds:5,size:'1344x768',cw:1344,ch:768,first:'',seed:-1,
         exec:'local',cloud_acct:''},
+  film:{story:'雨夜的旧书店，一个女孩推门进来，抖落伞上的水，店主抬头，两人认出彼此。',
+        total:60,shot:15,size:'768x1344',cw:768,ch:1344,exec:'cloud',mode:'chain',
+        first:'',style:'电影感写实',acct:'',retry:2,seed:-1},
+  ai:{base:'https://api.deepseek.com',model:'deepseek-chat',temp:0.7},
   api:{enabled:false,lan:false,host:'127.0.0.1',port:8765,token:'',no_token:false,
        def_engine:'follow',def_size:'1024x1024'},
   cloud:{port:9333,base:'https://www.runninghub.cn',login_url:'',browser:'',
@@ -34,7 +38,8 @@ const cfg={
       {id:'t_gen',type:'tab',name:'生图',icon:'flower',page:'t2i'},
       {id:'t_edit',type:'tab',name:'编辑',icon:'wand',page:'edit'},
       {id:'t_inp',type:'tab',name:'重绘',icon:'brush',page:'inpaint'},
-      {id:'t_vid',type:'tab',name:'视频',icon:'film',page:'video'}]},
+      {id:'t_vid',type:'tab',name:'视频',icon:'film',page:'video'},
+      {id:'t_film',type:'tab',name:'成片',icon:'play',page:'film'}]},
     {id:'g_env',type:'group',name:'环境',icon:'db',children:[
       {id:'t_envb',type:'tab',name:'基础',icon:'db',page:'env_base'},
       {id:'t_envq',type:'tab',name:'千问',icon:'flower',page:'env_qwen'},
@@ -56,7 +61,9 @@ const st={running:null,status:'就绪',done:0,total:0,
   api_on:false,api_url:'',load_pct:0,load_stage:'',env_busy:false,env_todo:null,
   env_on:{base:true,qwen:true,moss:true,h3:true},env_todo_by:{},
   engine:'qwen',moss_tier:'daily',moss_installed:false,comfyui_on:false,comfyui_loaded:false,comfyui_url:'',
-  cloud_busy:'',cloud_msg:''};
+  cloud_busy:'',cloud_msg:'',ffmpeg:true,ai_key:false,
+  film:{state:'idle',phase:'',status:'',id:'',title:'',dir:'',total:0,done:0,current:0,
+        elapsed:0,film:'',err:'',shots:[],missing:0,merge_ok:true,msg:'',exec:'',mode:''}};
 
 let seq=0;
 const logs=[];
@@ -138,6 +145,9 @@ const ENV=[
    detail:'目录不存在：envs/moss/models/loras · 约 1.1 GB',gb:1.1,fix:{kind:'model'}},
   {key:'model:h3-fl2va',group:'模型权重',env:'h3',optional:true,label:'H3 图生视频权重（41.4 GB）',
    state:'miss',detail:'目录不存在：envs/h3/models · 约 41.37 GB',gb:41.37,fix:{kind:'model'}},
+  {key:'tool:ffmpeg',group:'扩展工具',env:'ffmpeg',optional:true,label:'FFmpeg 静态包（约 190 MB）',
+   state:'ok',detail:'已装 · envs/ffmpeg/bin',
+   fix:{kind:'tool',key:'ffmpeg',dest:'envs/ffmpeg/bin',files:['ffmpeg.exe','ffprobe.exe'],urls:[]}},
   {key:'dir:outputs',group:'目录',env:'base',label:'outputs/',state:'ok',detail:'可写',fix:{kind:'dir'}},
 ];
 const ENVS=[
@@ -149,6 +159,8 @@ const ENVS=[
    desc:'内嵌 ComfyUI 子进程（共用 comfyui/ 与它的 .venv）。权重在 envs/moss/models。'},
   {id:'h3',label:'H3 视频',icon:'film',engine:'moss',title:'H3 视频（可选）',optional:true,
    desc:'MiniMax H3 图生视频，共用 Moss 的 ComfyUI 运行时；默认不下载。'},
+  {id:'ffmpeg',label:'FFmpeg',icon:'scissors',engine:'',title:'FFmpeg（可选）',optional:true,tool:true,
+   desc:'把多段成片拼成一部短剧，并抽尾帧接下一镜；不装也能逐段出片。'},
 ];
 /* 关掉的环境当它不存在：与 app.env_check 同一条规矩（先过滤，再算待补） */
 function envLive(){
@@ -238,7 +250,30 @@ function advance(){
     st.status=`出片 ${st.done}/${st.total}`;
     st.vram_used=11.0+Math.random()*0.4;
     if(st.done>=st.total)finishVideo();
+    return;
   }
+  /* 成片：每两轮走完一段，界面上的时间线能看见「跑完 → 下一段」 */
+  if(st.running==='film'){
+    const fs=st.film;
+    fs.elapsed=+(fs.elapsed+0.8).toFixed(1);
+    if(FILM.tick++%2===0){
+      const cur=fs.shots.filter(s=>s.state==='run')[0];
+      if(cur){
+        cur.state='done';cur.sec=8.4;
+        cur.frame_abs='D:/AI/Qwen-Image-2.1/outputs/films/demo/frames/'+
+          String(cur.i).padStart(3,'0')+'.jpg';
+        fs.done++;
+      }
+      const nxt=fs.shots.filter(s=>s.state==='wait')[0];
+      if(nxt){
+        nxt.state='run';fs.current=nxt.i;
+        fs.status='第 '+nxt.i+'/'+fs.total+' 段 · '+(fs.exec==='cloud'?'云端':'本地')+'出片中';
+      }
+      if(fs.done>=fs.total)finishFilm();
+    }
+    return;
+  }
+  if(st.running==='film_merge')finishFilm();
 }
 function beginGen(){
   const steps=parseInt(cfg.gen.steps,10)||8;
@@ -257,6 +292,23 @@ function finishVideo(){
   st.running=null;st.status='✅ 完成 · '+name;
   L('✅ 已保存：'+file+' · 96.5 秒');
   L('── 结束 ──');
+}
+
+/* ---------- 成片与文本 API 假状态 ---------- */
+const AI={has:false};
+const FILM={tick:0};
+function finishFilm(){
+  const fs=st.film;
+  const name='film_'+stamp().replace(/[-: ]/g,'').slice(0,14)+'.mp4';
+  const file=(cfg.console.output_dir+'/'+name).replace(/\\/g,'/');
+  fs.state='done';fs.phase='完成';fs.status='✅ 成片完成';fs.film=file;fs.current=0;
+  fs.shots.forEach(function(s){if(s.state==='run')s.state='done';});
+  fs.done=fs.total;st.running=null;st.status='✅ 成片完成';
+  GAL.unshift({file:file,name:name,t:stamp(),size:(fs.width||768)+'×'+(fs.height||1344),
+               seed:-1,prompt:cfg.film.story,mode:'film',negative:'',steps:0,
+               sec:fs.elapsed,fav:0,video:true});
+  st.img_count=GAL.length;
+  L('✅ 成片已保存：'+file);L('── 成片结束 ──');
 }
 
 /* ---------- Moss（内嵌 ComfyUI）假状态 ---------- */
@@ -549,6 +601,97 @@ window.MIC_MOCK={
       (body.seed<0?'随机种子':'种子 '+body.seed)+
       (body.first?' · 参考图 '+String(body.first).split(/[\\/]/).pop():''));
     return {ok:true,total:4,frames:n*24};},
+  /* ---------- 文本 API：拆镜/润色；Key 只记「有没有」，界面拿不到明文 ---------- */
+  ai_state(){return {ok:true,has_key:AI.has,base:cfg.ai.base,model:cfg.ai.model,
+    env:false,saved:AI.has};},
+  ai_set(p){
+    p=p||{};
+    if(String(p.key||'').trim())AI.has=true;
+    if(p.base)cfg.ai.base=p.base;
+    if(p.model)cfg.ai.model=p.model;
+    if(p.temp!=null)cfg.ai.temp=p.temp;
+    st.ai_key=AI.has;
+    L('🔐 文本 API 设置已更新（Key '+(AI.has?'已保存':'未填')+'）');
+    return this.ai_state();},
+  ai_key_clear(){AI.has=false;st.ai_key=false;L('🔐 文本 API Key 已清除');
+    return this.ai_state();},
+  ai_test(){return Promise.resolve({ok:true,ms:126,model:cfg.ai.model,reply:'可用'});},
+  ai_polish(text){
+    return Promise.resolve({ok:true,text:'傍晚旧书店门口，美少女站在半开的木门旁，中景略低机位，'
+      +'镜头从她侧后方缓慢推近；暖黄顶灯与冷蓝街灯对打，背景书架层层退远。'+String(text||'')});},
+  /* ---------- 成片：拆分镜 → 逐段出片 → 合成 ---------- */
+  film_plan(p){
+    const f=Object.assign({},cfg.film,p||{});
+    if(String(f.story||'').trim().length<4)return {ok:false,msg:'先写一段剧情'};
+    const shot=[5,10,15].indexOf(+f.shot)>=0?+f.shot:15;
+    const total=parseInt(f.total,10)||60;
+    if(total>40*shot)return {ok:false,msg:'最多 40 段：把总时长压到 600 秒内，或拆成两集'};
+    const n=Math.max(1,Math.min(40,Math.round(total/shot)));
+    const shots=[];
+    for(let i=1;i<=n;i++)shots.push({i:i,summary:'第 '+i+' 镜：雨夜旧书店',
+      prompt:'镜头 '+i+'：美少女推开旧书店木门，雨水顺伞尖滴落，暖黄灯光照亮侧脸，'
+        +'主体居左，镜头缓慢推进，浅景深，电影感写实。',seconds:shot});
+    return Promise.resolve({ok:true,title:'雨夜旧书店',shots:shots,count:n,
+      shot_sec:shot,total_sec:n*shot});},
+  film_start(p){
+    if(st.running)return {ok:false,msg:'有任务在跑：'+st.running};
+    const f=Object.assign({},cfg.film,p||{});
+    const shot=[5,10,15].indexOf(+f.shot)>=0?+f.shot:15;
+    let rows=(p&&p.shots)||[];
+    if(rows.length>40)return {ok:false,msg:'最多 40 段：把总时长压到 600 秒内，或拆成两集'};
+    if(!rows.length){
+      const n=Math.max(1,Math.min(40,Math.round((parseInt(f.total,10)||60)/shot)));
+      for(let i=1;i<=n;i++)rows.push({prompt:'第 '+i+' 镜：雨夜旧书店，美少女回头。',seconds:shot});
+    }
+    st.film={state:'running',phase:'出片',status:'准备中…',id:'demo',
+      title:(p&&p.title)||'雨夜旧书店',dir:'D:/AI/Qwen-Image-2.1/outputs/films/demo',
+      total:rows.length,done:0,current:1,elapsed:0,film:'',err:'',missing:0,
+      merge_ok:true,msg:'',exec:f.exec,mode:f.mode,
+      width:parseInt(f.cw,10)||768,height:parseInt(f.ch,10)||1344,
+      shots:rows.map(function(r,i){return {i:i+1,summary:r.summary||'',
+        prompt:r.prompt||'',seconds:r.seconds||shot,state:i===0?'run':'wait',
+        file:'',frame:'',sec:0,err:'',file_abs:'',frame_abs:''};})};
+    FILM.tick=0;st.running='film';st.status='准备中…';
+    L('🎬 成片开跑：'+st.film.title+' · '+rows.length+' 段 × '+shot+' 秒 · '
+      +(String(f.exec)==='cloud'?'云端':'本地'));
+    return {ok:true,shots:rows.length,shot_sec:shot,exec:f.exec,
+      estimate:(rows.length*6)+'~'+(rows.length*10)+' 分钟'};},
+  film_stop(){
+    if(st.running!=='film')return {ok:false,msg:'成片没在跑'};
+    const fs=st.film;st.running=null;
+    fs.state='stopped';fs.phase='已停';
+    fs.status='已停止 · '+fs.done+'/'+fs.total+' 段';
+    L('⏹ 成片已停：已出的段都留着');return {ok:true};},
+  film_state(){return {ok:true,film:st.film,ffmpeg:true,ai_key:AI.has};},
+  film_list(){
+    const fs=st.film;
+    return {ok:true,items:fs.total?[{id:fs.id,title:fs.title,dir:fs.dir,time:stamp(),
+      done:fs.done,total:fs.total,film:fs.film,current:true,
+      running:st.running==='film'}]:[]};},
+  film_resume(){
+    const fs=st.film;
+    if(!fs.total)return {ok:false,msg:'还没有可续跑的工程'};
+    if(fs.done>=fs.total&&fs.film)return {ok:true,msg:'这部已经完成了',film:fs.film};
+    fs.state='running';fs.phase='出片';st.running='film';FILM.tick=0;
+    const nxt=fs.shots.filter(function(s){return s.state==='wait';})[0];
+    if(nxt){nxt.state='run';fs.current=nxt.i;}
+    L('▶️ 继续成片：'+fs.title);return {ok:true};},
+  film_redo(i,deep){
+    const fs=st.film;
+    if(!fs.total)return {ok:false,msg:'没有工程'};
+    i=Math.max(1,Math.min(fs.total,parseInt(i,10)||1));
+    const hit=fs.shots.filter(function(s){return s.i===i||(deep&&s.i>i);});
+    hit.forEach(function(s){s.state='wait';s.file='';s.frame='';s.frame_abs='';
+      s.sec=0;s.err='';});
+    fs.film='';fs.done=fs.shots.filter(function(s){return s.state==='done';}).length;
+    fs.state='running';st.running='film';FILM.tick=0;
+    L('↻ 重出第 '+i+' 段：作废 '+hit.length+' 段');
+    return {ok:true,msg:'从第 '+i+' 段重出，作废 '+hit.length+' 段',count:hit.length};},
+  film_merge(){
+    const fs=st.film;
+    if(!fs.done)return {ok:false,msg:'还没有一段成功出片'};
+    st.running='film_merge';fs.state='running';fs.phase='合成';
+    fs.status='合成中…';return {ok:true};},
   env_fix(keys){
     const want=Array.isArray(keys)?keys:envTodo();
     const hit=ENV.filter(x=>want.indexOf(x.key)>=0&&(x.state==='miss'||x.state==='part'));

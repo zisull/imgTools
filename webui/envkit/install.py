@@ -9,8 +9,12 @@
 import codecs
 import os
 import re
+import shutil
 import subprocess
 import sys
+import time
+import zipfile
+from urllib import request as urlreq
 
 from envkit import check as ec
 from envkit import spec as sp
@@ -192,6 +196,113 @@ def ensure_comfyui_venv(root, fix, log, on_line=None, python=None):
         return False
     log("✅ ComfyUI 独立环境就绪：%s" % os.path.relpath(py, root))
     return os.path.isfile(py)
+
+
+def _fmt_mb(n):
+    return "%.1f MB" % (float(n or 0) / 1048576.0)
+
+
+def install_tool(root, fix, log, on_line=None, on_progress=None):
+    """可选工具环境：下载静态包，只解出清单点名的可执行文件。
+
+    ffmpeg 这类工具没有 pip 包、也不该 clone 整个仓库；清单给的是官方静态
+    zip 与要留的文件名，这里按名字从 zip 里挑出来，别把几十 MB 的源码/
+    示例一起落盘。下载按 1MB 一块回报进度，环境页那条进度条与权重下载共用。
+    """
+    dest = sp._abs(root, str(fix.get("dest") or ""))
+    files = [str(x) for x in (fix.get("files") or []) if x]
+    urls = [str(x) for x in (fix.get("urls") or []) if x]
+    if not dest or not files or not urls:
+        log("❌ 工具清单不完整：%s" % (fix.get("key") or "?"))
+        return False
+    if all(os.path.isfile(os.path.join(dest, *f.split("/"))) for f in files):
+        log("✅ 工具已在 %s，跳过" % os.path.relpath(dest, root).replace("\\", "/"))
+        return True
+    os.makedirs(dest, exist_ok=True)
+    cache = os.path.join(root, "envs", "_cache")
+    os.makedirs(cache, exist_ok=True)
+    zpath = os.path.join(cache, "ffmpeg.zip")
+    ok_url = ""
+    for url in urls:
+        if os.path.isfile(zpath):
+            try:
+                os.remove(zpath)
+            except OSError:
+                pass
+        log("📥 下载 %s" % url)
+        try:
+            req = urlreq.Request(url, headers={"User-Agent": "Moss-env/1"})
+            t0 = time.time()
+            with urlreq.urlopen(req, timeout=90) as r, open(zpath, "wb") as f:
+                total = int(r.headers.get("Content-Length") or 0)
+                done = 0
+                last = 0.0
+                while True:
+                    chunk = r.read(1 << 20)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+                    done += len(chunk)
+                    now = time.time()
+                    if now - last >= 0.4:
+                        last = now
+                        speed = done / max(now - t0, 0.001)
+                        eta = int((total - done) / speed) if total and speed else 0
+                        if on_progress:
+                            on_progress({"busy": True, "phase": "tool",
+                                         "file": os.path.basename(url), "done": done,
+                                         "total": total, "speed": speed, "eta": eta,
+                                         "files_done": 0, "files_total": 1})
+                        if on_line:
+                            on_line("下载 %s%% · %s%s" % (
+                                int(done * 100 / total) if total else "?",
+                                _fmt_mb(done),
+                                (" / " + _fmt_mb(total)) if total else ""))
+            if os.path.getsize(zpath) < 1 << 20:
+                raise OSError("下载到的包太小（%d 字节）" % os.path.getsize(zpath))
+            ok_url = url
+            break
+        except Exception as e:
+            log("⚠️ 这个源没下成：%s" % e)
+    if not ok_url:
+        log("❌ 所有下载源都失败了：网络不稳就开代理再点一次")
+        return False
+    try:
+        with zipfile.ZipFile(zpath) as z:
+            names = [n.replace("\\", "/") for n in z.namelist()]
+            for want in files:
+                cand = [n for n in names
+                        if n == want or n.endswith("/bin/" + want) or n.endswith("/" + want)]
+                if not cand:
+                    raise KeyError("包里没有 %s" % want)
+                src = cand[0]
+                out = os.path.join(dest, *want.split("/"))
+                os.makedirs(os.path.dirname(out), exist_ok=True)
+                with z.open(src) as a, open(out, "wb") as b:
+                    shutil.copyfileobj(a, b, 1 << 20)
+                log("✅ 解出 %s → %s（%s）" % (
+                    src, os.path.relpath(out, root).replace("\\", "/"),
+                    _fmt_mb(os.path.getsize(out))))
+    except Exception as e:
+        log("❌ 解包失败：%s" % e)
+        return False
+    finally:
+        try:
+            os.remove(zpath)
+        except OSError:
+            pass
+    exe = os.path.join(dest, files[0])
+    try:
+        r = subprocess.run([exe, "-version"], capture_output=True, text=True,
+                           encoding="utf-8", errors="replace", timeout=20,
+                           creationflags=NO_CONS)
+        line = (r.stdout or r.stderr or "").splitlines()[0][:120]
+        if r.returncode == 0 and line:
+            log("✅ 工具可用：%s" % line)
+            return True
+    except Exception as e:
+        log("❌ 装好了但跑不起来：%s" % e)
+    return False
 
 
 def install_dir(root, rel):

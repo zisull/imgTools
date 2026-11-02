@@ -106,8 +106,12 @@ MIC.registerPage('video',{
       C.field('通道',C.seg('video.exec',[['local','本地'],['cloud','云端']],true),
         cloud?'云端跑：不占显存、按平台计费，要一个保存过的登录号'
              :'本机跑：拉起 ComfyUI、占显存，不花钱；4 步是权重里烘死的')+
-      C.field('描述',C.ta('video.prompt',4,
-        '一只猫推开木门，阳光落在地板上，镜头缓慢推进'),'写清动作和镜头怎么动，比堆形容词管用；带声音的片子连环境音一起出')+
+      C.field('描述',
+        C.ta('video.prompt',4,
+          '一只猫推开木门，阳光落在地板上，镜头缓慢推进')+
+        `<div class="btnrow" style="margin-top:6px"><button class="btn sm gho"`+
+        ` onclick="MIC.polish.prompt('video.prompt','video')">${ic('wand','s')}AI 润色</button></div>`,
+        '写清动作和镜头怎么动，比堆形容词管用；带声音的片子连环境音一起出')+
       '<div class="grid3">'+
         C.field('时长',C.sel('video.seconds',LEN),
           '帧数会自动贴到模型认的 17k+5 网格，所以选 5 秒可能出来 5.2 秒')+

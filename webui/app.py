@@ -144,8 +144,9 @@ _IMG_FILTER = "图片 (*" + ";*".join(IMG_EXT) + ")"
 # v7 加「视频」页（本地 H3），环境从一页拆成按模型的一组图；
 # v8 加「云端」页：多账号登录态与浏览器保活（生成仍走协议，浏览器只负责登录）。
 # v9 改叫「H3云端」（这页服务的是 H3/RunningHub 那条线）。
+# v10 加「成片」页：剧本 → AI 拆分镜 → 逐段出片 → 合成一部，通道本地/云端共用。
 # 比它旧的配置在载入时按新默认表重排一次（只把用户改过的标签名带过去），见 _restructure_nav。
-NAV_VER = 9
+NAV_VER = 10
 
 # 各版默认表用过的标签名。换代重排时，名字落在这张表里说明「用户没自己改过」，
 # 直接换成新默认名；不在表里的才是他改的，原样保留。
@@ -215,6 +216,17 @@ DEFAULT_CFG = {
               "browser": "", "domains": ["runninghub.cn"],
               "keep": True, "keep_min": 30, "concurrency": 1,
               "workflow": "", "wf_host": "", "exec_tag": "Plus", "poll_sec": 5, "gen_timeout": 1800},
+    # 文本 API（OpenAI 兼容）：拆分镜与提示词润色都走它。key 只存本机 config.json，
+    # 从不回给界面、不写日志；运行时也可用 DEEPSEEK_API_KEY / QIC_AI_KEY 顶掉这里。
+    "ai": {"base": "https://api.deepseek.com", "model": "deepseek-chat", "key": "",
+           "temp": 0.7, "timeout": 120, "max_tokens": 8192},
+    # 成片：一段剧本 → N 个镜头 → 逐段出片 → 合成。
+    # total=目标总秒数，shot=单镜秒数（只认 5/10/15），段数=round(total/shot)；
+    # exec=cloud 走 RunningHub（不占显存），local 走本机 H3；mode=chain 用上一段尾帧接下一段，
+    # shot=每镜独立（靠同一张首帧/参考图保持身份）。first 只有云端必填。
+    "film": {"story": "", "total": 60, "shot": 15, "size": "768x1344", "cw": 768, "ch": 1344,
+             "exec": "cloud", "mode": "chain", "first": "", "style": "电影感写实",
+             "acct": "", "retry": 2, "seed": -1},
     # 导航：分组套一页一个标签；组名与标签名统一两字，竖排对齐
     "nav": [
         {"id": "g_out", "type": "group", "name": "出图", "icon": "flower", "children": [
@@ -222,6 +234,7 @@ DEFAULT_CFG = {
             {"id": "t_edit", "type": "tab", "name": "编辑", "icon": "wand", "page": "edit"},
             {"id": "t_inp", "type": "tab", "name": "重绘", "icon": "brush", "page": "inpaint"},
             {"id": "t_vid", "type": "tab", "name": "视频", "icon": "film", "page": "video"},
+            {"id": "t_film", "type": "tab", "name": "成片", "icon": "play", "page": "film"},
         ]},
         # 环境按模型一页一个：开关、明细、补齐都在自己那页，不再挤成一长串分区
         {"id": "g_env", "type": "group", "name": "环境", "icon": "db", "children": [
@@ -290,6 +303,10 @@ def _rand_seed():
     return (int(time.time() * 1000) * 1000 + n) % 10 ** 12
 
 
+class FilmError(Exception):
+    """成片流程里「能说清原因」的失败：消息直接给界面，不当异常抛栈。"""
+
+
 def _same_file(a, b):
     """两张图字节级相同？用来识别「固定种子 + 同参数」重跑出来的同一张。"""
     try:
@@ -351,6 +368,14 @@ class App(WindowCtl):
         # 云端出片占着那只共用浏览器（点运行 + 轮询），这期间账号操作一律让路
         self._cloud_gen = threading.Event()
         self._h3cloud = None       # cloudkit.gen.CloudH3：真要用云端才建
+        # 成片：一条长任务串起 N 段；停止位与普通任务分开，点停止只收当前这一段，
+        # 已出的段留在盘上，下次「继续」从断点接着跑。
+        self._film_stop = threading.Event()
+        self._film_lock = threading.RLock()
+        self._film = None          # 当前工程 project.json 的内存副本
+        self._film_dir = ""        # 当前工程目录
+        self._ff_ok = None         # FFmpeg 是否可用（缓存 15 秒，不必每轮扫清单）
+        self._ff_ts = 0.0
         self._thumbs = OrderedDict()  # (path, mtime, wide) -> data url，缩略缓存（LRU 逐出）
         from store import Store
         self.store = Store(os.path.join(ROOT, "data", "history.db"))
@@ -385,6 +410,12 @@ class App(WindowCtl):
             "comfyui_on": False, "comfyui_url": "", "comfyui_loaded": False,
             # 云端账号：busy=正在做什么（空=闲），msg=上一条结果/错误（界面原样显示）
             "cloud_busy": "", "cloud_msg": "",
+            # 成片：state=idle/planning/running/done/paused/stopped/failed；
+            # shots 每段一条（等待/跑/完成/失败/跳过），界面拿它画时间段线
+            "film": {"state": "idle", "phase": "", "status": "", "id": "", "title": "",
+                     "dir": "", "total": 0, "done": 0, "current": 0, "elapsed": 0,
+                     "film": "", "err": "", "shots": [], "missing": 0, "merge_ok": True,
+                     "msg": "", "exec": "", "mode": ""},
         }
         self._refresh_gallery_count()
         self._sync_env_on()
@@ -449,6 +480,10 @@ class App(WindowCtl):
             return on
         for e in spec.get("envs") or []:
             eid = e["id"]
+            # 工具环境（ffmpeg）不是一路模型：没有「关掉不体检」这回事，
+            # 也不该在开关表里占一格；缺了只是基础页多一行可补的扩展
+            if e.get("tool"):
+                continue
             if eid in on:
                 on[eid] = bool(on[eid])
                 continue
@@ -625,8 +660,20 @@ class App(WindowCtl):
                 del self._logs[:len(self._logs) - 3000]
 
     # ------------------------------------------------------------ js_api：取数
+    def _cfg_public(self):
+        """发给界面的配置：api token 照旧给（设置页要显示/复制），但文本 API 的 Key 永不外发。
+
+        界面换配置时是整份替换（applyCfg），把 Key 抹成空串最稳：既不会在 DevTools/页面
+        源码里留一份，也不会被下一次保存把空串写回盘上——Key 只走 ai_set 一条路。
+        """
+        c = copy.deepcopy(self.cfg)
+        a = c.get("ai")
+        if isinstance(a, dict):
+            a.pop("key", None)
+        return c
+
     def boot(self):
-        return {"cfg": self.cfg, "state": self._snap(),
+        return {"cfg": self._cfg_public(), "state": self._snap(),
                 "version": APP_VERSION, "default_nav": DEFAULT_CFG["nav"]}
 
     def poll(self, cursor=0):
@@ -644,6 +691,11 @@ class App(WindowCtl):
     def _snap(self):
         s = dict(self.st)      # st 里全是标量，浅拷贝就够；每 0.8 秒一轮，别拿 json 来回序列化
         s["dl"] = dict(self.st.get("dl") or {})   # 下载进度是 dict，浅拷贝后再给出去
+        f = self.st.get("film") or {}
+        s["film"] = dict(f)
+        s["film"]["shots"] = [dict(x) for x in (f.get("shots") or [])]
+        s["ffmpeg"] = self._ff()
+        s["ai_key"] = self._ai_has()
         eng = str(self.cfg.get("engine", "qwen"))
         s["engine"] = eng
         s["moss_tier"] = str((self.cfg.get("moss") or {}).get("tier", "daily"))
@@ -668,7 +720,7 @@ class App(WindowCtl):
         _deep_merge(self.cfg, patch or {})
         self.st["quant"] = self.cfg["console"].get("quant", "fp8")
         self._save_cfg()
-        return {"ok": True, "cfg": self.cfg}
+        return {"ok": True, "cfg": self._cfg_public()}
 
     def set_title(self, title):
         self.cfg["app_title"] = title
@@ -804,6 +856,7 @@ class App(WindowCtl):
     def on_closing(self):
         """关闭收尾：叫停后台线程 → 停 API 监听 → 停 Moss 子进程 → 存配置。绝不能 return False（=取消关闭）。"""
         self._stop.set()
+        self._film_stop.set()
         if self._api is not None:
             try:
                 self._api.stop()
@@ -1670,6 +1723,759 @@ class App(WindowCtl):
         finally:
             self._release()
 
+    # ------------------------------------------------------------ js_api：文本 API
+    # 只服务拆镜与润色：Key 只在本机，界面只拿到「有没有」；任何错误先过 _scrub 再回。
+    def _ai(self):
+        from filmkit import ai as fa
+        return fa
+
+    def _ai_has(self):
+        try:
+            return self._ai().has_key(self.cfg)
+        except Exception:
+            return False
+
+    def _ai_err(self, e):
+        fa = self._ai()
+        try:
+            key = fa.settings(self.cfg)["key"]
+        except Exception:
+            key = ""
+        return fa._scrub(str(e), key)[:400]
+
+    def ai_state(self):
+        s = self._ai().settings(self.cfg)
+        return {"ok": True, "has_key": bool(s["key"]),
+                "base": s["base"], "model": s["model"],
+                "env": bool(os.environ.get("DEEPSEEK_API_KEY")
+                            or os.environ.get("QIC_AI_KEY")),
+                "saved": bool(str((self.cfg.get("ai") or {}).get("key") or "").strip())}
+
+    def ai_set(self, patch=None):
+        p = dict(patch or {})
+        a = self.cfg.setdefault("ai", {})
+        key = str(p.get("key") or "").strip()
+        if key:
+            a["key"] = key
+        for k in ("base", "model"):
+            v = str(p.get(k) or "").strip()
+            if v:
+                a[k] = v
+        if "temp" in p:
+            try:
+                a["temp"] = max(0.0, min(1.5, float(p["temp"])))
+            except (TypeError, ValueError):
+                pass
+        self._save_cfg()
+        self._log("🔐 文本 API 设置已更新（Key %s）"
+                  % ("已保存" if a.get("key") else "未填"))
+        return self.ai_state()
+
+    def ai_key_clear(self):
+        (self.cfg.setdefault("ai", {})).pop("key", None)
+        self._save_cfg()
+        self._log("🔐 文本 API Key 已清除")
+        return self.ai_state()
+
+    def ai_test(self):
+        try:
+            r = self._ai().test(self.cfg)
+            self._log("🔎 文本 API 可用：%s · %d 毫秒" % (r.get("model"), r.get("ms") or 0))
+            return r
+        except Exception as e:
+            msg = self._ai_err(e)
+            self._log("❌ 文本 API 测试失败：%s" % msg)
+            return {"ok": False, "msg": msg}
+
+    def ai_polish(self, text, kind="image"):
+        try:
+            out = self._ai().polish(text, kind, self.cfg)
+            self._log("✨ 润色完成：%d 字 → %d 字" % (len(str(text or "")), len(out)))
+            return {"ok": True, "text": out}
+        except Exception as e:
+            return {"ok": False, "msg": self._ai_err(e)}
+
+    # ------------------------------------------------------------ js_api：剧本成片
+    # 一条长任务串起 N 段：拆分镜 → 逐段出片（本地/云端同一份接口）→ 合成。
+    # 每段先落盘再记账；中断后按「非空文件即已完成」续跑，失败只在原位标红、不跳号。
+    def _ff(self):
+        now = time.time()
+        if self._ff_ok is None or now - self._ff_ts > 15:
+            try:
+                from filmkit import stitch
+                self._ff_ok = stitch.available(ROOT)
+            except Exception:
+                self._ff_ok = False
+            self._ff_ts = now
+        return bool(self._ff_ok)
+
+    def _film_should_stop(self):
+        return bool(self._stop.is_set() or self._film_stop.is_set())
+
+    def _film_cfg(self, payload=None):
+        f = dict(self.cfg.get("film") or {})
+        f.update(dict(payload or {}))
+        return f
+
+    def _film_ratio(self, size):
+        m = re.match(r"^(\d+)x(\d+)$", str(size or "").lower())
+        if not m:
+            return "9:16"
+        w, h = int(m.group(1)), int(m.group(2))
+        r = float(w) / max(1, h)
+        if abs(r - 1.0) < 0.05:
+            return "1:1"
+        return "16:9" if r > 1 else "9:16"
+
+    def _film_n(self, total, shot):
+        shot = shot if shot in (5, 10, 15) else 15
+        return max(1, min(40, int(round(float(total) / shot)))), shot
+
+    def _film_shots(self, proj, d=""):
+        """给界面的分段表：相对路径留在工程里，绝对路径只给这一次轮询用。
+
+        界面点缩略图要交给系统播放器/预览，join 路径的活别让 JS 再猜一遍
+        （Windows 的分隔符与相对路径的斜杠方向是两套）；文件真在才算有。
+        """
+        from filmkit import project as prj
+        out = []
+        for x in (proj.get("shots") or []):
+            s = dict(x)
+            f = prj.abs_path(d, s.get("file") or "") if d else ""
+            fr = prj.abs_path(d, s.get("frame") or "") if d else ""
+            s["file_abs"] = f if f and os.path.isfile(f) else ""
+            s["frame_abs"] = fr if fr and os.path.isfile(fr) else ""
+            out.append(s)
+        return out
+
+    def _film_view(self, proj, **kw):
+        shots = self._film_shots(proj, str(kw.get("dir") or self._film_dir or ""))
+        cur = next((x["i"] for x in shots if x.get("state") == "run"), 0)
+        v = {
+            "state": "idle", "phase": "", "status": "", "id": str(proj.get("id") or ""),
+            "title": str(proj.get("title") or ""), "dir": self._film_dir or "",
+            "total": len(shots), "done": sum(1 for x in shots if x.get("state") == "done"),
+            "current": cur, "elapsed": 0, "film": str(proj.get("film") or ""), "err": "",
+            "missing": sum(1 for x in shots if x.get("state") in ("fail", "skip")),
+            "merge_ok": bool(proj.get("merge_ok", True)), "msg": "",
+            "exec": str(proj.get("exec") or ""), "mode": str(proj.get("mode") or ""),
+            "shots": shots,
+        }
+        v.update(kw)
+        return v
+
+    def _film_step(self, msg):
+        t = str(msg or "").strip()
+        if not t:
+            return
+        f = self.st.get("film") or {}
+        if f.get("state") in ("running", "planning"):
+            f["status"] = t[:120]
+            self.st["status"] = t[:120]
+
+    def _film_precheck(self, f, count, base_dir=""):
+        """开跑前把「一定跑不动」的话说完：通道、账号、工作流、首帧、ffmpeg。"""
+        exec_ = "cloud" if str(f.get("exec")) == "cloud" else "local"
+        hi = self.H3_HI_CLOUD if exec_ == "cloud" else self.H3_HI_LOCAL
+        if f.get("width") and f.get("height"):
+            w, h = int(f["width"]), int(f["height"])
+        else:
+            w, h = self._h3_size({"size": f.get("size"), "cw": f.get("cw"),
+                                  "ch": f.get("ch")}, hi=hi)
+        raw_first = str(f.get("first") or "")
+        if base_dir and raw_first and not os.path.isabs(raw_first):
+            first = os.path.join(base_dir, *raw_first.replace("\\", "/").split("/"))
+            first = first if os.path.isfile(first) else ""
+        else:
+            first = self._ref_path(raw_first)
+        acct = str(f.get("acct") or "")
+        acct_id, acct_name = "", ""
+        wf = str((self.cfg.get("cloud") or {}).get("workflow")
+                 or f.get("workflow") or "")
+        err = ""
+        if exec_ == "cloud":
+            if not self._dp_ready():
+                err = "云端要浏览器：到「环境 → 基础」补齐 DrissionPage 后重开软件"
+            elif self._cloud_gen.is_set():
+                err = "云端已经有一段在跑：等它结束再开新片"
+            else:
+                try:
+                    g = self._cloud_h3()
+                    row = g.account(acct)
+                    acct_id, acct_name = row["id"], row["name"]
+                    kind, src = g.wf_src(wf)
+                    if kind != "file":
+                        g.wf_url(src)
+                    if not first:
+                        err = ("云端这份工作流按参考生成：先在「首帧」那格选一张图"
+                               "（本地通道可纯文字起步）")
+                except Exception as e:
+                    err = str(e)
+        elif not self._env_on().get("h3"):
+            err = "H3 环境已关闭 · 到「环境 → H3」那页开启"
+        if not err and str(f.get("mode")) == "chain" and not self._ff():
+            err = ("接帧模式要 FFmpeg 抽尾帧：到「环境 → 基础」补上"
+                   "「FFmpeg 静态包」（约 190 MB）")
+        return {"err": err, "exec": exec_, "width": w, "height": h, "first": first,
+                "acct": acct_id, "acct_name": acct_name, "wf": wf, "count": count}
+
+    def _film_new(self, f, shots, title, chk):
+        from filmkit import project as prj
+        out_dir = _abs_path(self.cfg["console"]["output_dir"])
+        d = prj.new_dir(out_dir)
+        proj = {
+            "ver": 1, "id": os.path.basename(d), "title": title or "未命名短剧",
+            "story": str(f.get("story") or ""), "exec": chk["exec"],
+            "mode": "chain" if str(f.get("mode")) == "chain" else "shot",
+            "shot_sec": _to_int(f.get("shot"), 15, 5, 15),
+            "width": chk["width"], "height": chk["height"],
+            "acct": chk["acct"], "acct_name": chk["acct_name"], "workflow": chk["wf"],
+            "style": str(f.get("style") or ""), "first": "",
+            "seed": _to_int(f.get("seed"), -1, -1, 10 ** 12),
+            "retry": _to_int(f.get("retry"), 2, 0, 5),
+            "shots": shots, "film": "", "merge_ok": True, "merge_missing": 0,
+            "created": time.strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        first = chk["first"]
+        if first:
+            ext = os.path.splitext(first)[1].lower()
+            if ext not in IMG_EXT:
+                ext = ".png"
+            dst = os.path.join(d, "first" + ext)
+            shutil.copy2(first, dst)
+            proj["first"] = prj.rel(d, dst)
+        prj.save(d, proj)
+        return d, proj
+
+    def _film_prompt(self, proj, sh):
+        p = str(sh.get("prompt") or "").strip()
+        if str(proj.get("mode")) == "chain" and int(sh.get("i") or 1) > 1:
+            p += ("。承接上一段结尾：人物、服装、场景与光线保持一致，"
+                  "动作从上一段最后的状态自然继续。")
+        style = str(proj.get("style") or "").strip()
+        if style and style not in p:
+            p += "。画面风格：" + style
+        return p
+
+    def _film_frame(self, d, sh):
+        from filmkit import project as prj, stitch
+        if not self._ff():
+            return ""
+        video = prj.abs_path(d, sh.get("file") or "")
+        if not video or not os.path.isfile(video):
+            return ""
+        fr = prj.abs_path(d, sh.get("frame") or prj.frame_file(sh["i"]))
+        got = stitch.last_frame(ROOT, video, fr)
+        if got:
+            sh["frame"] = prj.rel(d, got)
+            return got
+        return ""
+
+    def _film_one(self, d, proj, sh, first):
+        from filmkit import project as prj
+        out = prj.abs_path(d, prj.shot_file(sh["i"]))
+        os.makedirs(os.path.dirname(out), exist_ok=True)
+        w = _to_int(proj.get("width"), 768, 16, 8192)
+        h = _to_int(proj.get("height"), 1344, 16, 8192)
+        prompt = self._film_prompt(proj, sh)
+        if str(proj.get("exec")) == "cloud":
+            p = {"prompt": prompt, "seconds": sh["seconds"], "width": w, "height": h,
+                 "first": first, "acct": str(proj.get("acct") or ""),
+                 "wf": str(proj.get("workflow") or ""), "out_dir": os.path.dirname(out)}
+            got = self._cloud_h3().run(
+                p, on_progress=lambda m: self._film_step("第 %d 段 · %s" % (sh["i"], m)),
+                should_stop=self._film_should_stop)
+        else:
+            mgr = self._get_moss()
+            params = self._video_params({"prompt": prompt, "seconds": sh["seconds"],
+                                         "size": "%dx%d" % (w, h)})
+            if first:
+                params["first_image"] = mgr.upload_image(first)
+            seed = _to_int(proj.get("seed"), -1, -1, 10 ** 12)
+            params["seed"] = _rand_seed() if seed < 0 else seed
+            paths = mgr.generate(
+                params,
+                on_progress=lambda dn, t: self._film_step(
+                    "第 %d 段 · 采样 %d/%d" % (sh["i"], dn, t)),
+                should_stop=self._film_should_stop,
+                out_dir=os.path.dirname(out), out_prefix="film%03d" % sh["i"])
+            if not paths:
+                raise FilmError("工作流跑完但没取回片子")
+            got = paths[0]
+            for extra in paths[1:]:
+                try:
+                    os.remove(extra)
+                except OSError:
+                    pass
+        if os.path.abspath(got) != os.path.abspath(out):
+            try:
+                os.replace(got, out)
+            except OSError:
+                shutil.move(got, out)
+        if not os.path.isfile(out) or os.path.getsize(out) <= 0:
+            raise FilmError("这一段没落盘")
+        return out
+
+    def _film_merge(self, d, proj):
+        from filmkit import project as prj, stitch
+        paths = [prj.abs_path(d, s.get("file") or "") for s in (proj.get("shots") or [])
+                 if s.get("state") == "done" and prj.ok_file(d, s)]
+        if not paths:
+            raise stitch.StitchError("还没有一段成功出片")
+        out_dir = _abs_path(self.cfg["console"]["output_dir"])
+        out = prj.final_path(out_dir, proj.get("title") or "短剧")
+        r = stitch.concat(ROOT, paths, out, log=self._log)
+        proj["film"] = r["path"]
+        proj["merge_ok"] = len(paths) == len(proj.get("shots") or [])
+        proj["merge_missing"] = len(proj.get("shots") or []) - len(paths)
+        prj.save(d, proj)
+        return r["path"]
+
+    def _film_publish(self, proj, path, sec):
+        self._publish(path, mode="film",
+                      params={"prompt": str(proj.get("story") or "")[:200],
+                              "negative": "", "_saved": []},
+                      size="%dx%d" % (_to_int(proj.get("width"), 0, 0, 8192),
+                                      _to_int(proj.get("height"), 0, 0, 8192)),
+                      steps=0, seed=_to_int(proj.get("seed"), -1, -1, 10 ** 12),
+                      sec=sec, name=os.path.basename(path))
+
+    def _film_run(self, d, proj):
+        from filmkit import project as prj
+        t0 = time.time()
+        fs = self.st["film"]
+        fs["state"] = "running"
+        fs["phase"] = "出片"
+        fs["status"] = "准备中…"
+        fs["shots"] = self._film_shots(proj, d)
+        retry = _to_int(proj.get("retry"), 2, 0, 5)
+        chain = str(proj.get("mode")) == "chain"
+        cloud = str(proj.get("exec")) == "cloud"
+        fail_run = 0
+        last_ref = prj.abs_path(d, proj.get("first") or "")
+        try:
+            if cloud:
+                self._cloud_gen.set()
+            else:
+                self._ensure_engine("moss")
+                self._film_step("拉起 H3 引擎…")
+                mgr = self._get_moss()
+                if not mgr.alive():
+                    mgr.start(tier=str((self.cfg.get("moss") or {}).get("tier", "daily")),
+                              should_stop=self._film_should_stop)
+                self._film_step("引擎就绪，开始出片")
+            total = len(proj.get("shots") or [])
+            for sh in proj["shots"]:
+                if self._film_should_stop():
+                    break
+                if prj.ok_file(d, sh):
+                    sh["state"] = "done"
+                    sh["err"] = ""
+                    fr = prj.abs_path(d, sh.get("frame") or "")
+                    if not fr or not os.path.isfile(fr):
+                        fr = self._film_frame(d, sh) or ""
+                    # 续跑时接帧要接在「上一段已经出完的尾帧」上，不能退回工程首帧
+                    if chain and fr:
+                        last_ref = fr
+                    continue
+                sh["state"] = "run"
+                sh["err"] = ""
+                fs["current"] = sh["i"]
+                fs["status"] = "第 %d/%d 段 · %s" % (
+                    sh["i"], total, "云端出片中" if cloud else "本地出片中")
+                self.st["status"] = fs["status"]
+                fs["elapsed"] = round(time.time() - t0, 1)
+                prj.save(d, proj)
+                ok = False
+                last = ""
+                first = last_ref
+                for attempt in range(retry + 1):
+                    if self._film_should_stop():
+                        break
+                    label = "第 %d 段" % sh["i"] + (
+                        "" if attempt == 0 else " · 第 %d 次重试" % attempt)
+                    self._log("🎬 %s：%d 秒 · %s" % (
+                        label, sh["seconds"], "云端" if cloud else "本地"))
+                    t1 = time.time()
+                    try:
+                        path = self._film_one(d, proj, sh, first)
+                        if not cloud and self._film_should_stop():
+                            # 本地半路停下：这一段的文件可能是残的，丢掉重出，别当已完成
+                            try:
+                                os.remove(path)
+                            except OSError:
+                                pass
+                            sh["file"] = ""
+                            sh["sec"] = 0.0
+                            break
+                        sh["file"] = prj.rel(d, path)
+                        sh["sec"] = round(time.time() - t1, 1)
+                        ok = True
+                        break
+                    except Exception as e:
+                        last = str(e)[:300]
+                        self._log("⚠️ %s失败：%s" % (label, last))
+                        if self._film_should_stop():
+                            break
+                        time.sleep(min(8.0, 2.0 * (attempt + 1)))
+                if self._film_should_stop():
+                    sh["state"] = "wait"
+                    break
+                if ok:
+                    sh["state"] = "done"
+                    fail_run = 0
+                    self._log("✅ 第 %d 段出完：%s · %.1f 秒"
+                              % (sh["i"], os.path.basename(sh["file"]), sh["sec"]))
+                    # 每段都抽一张尾帧：时间线上要能看见这一段的画面，
+                    # 接帧模式再拿它当下一段的参考；缺 ffmpeg 时抽不出就只少张缩略图
+                    fr = self._film_frame(d, sh)
+                    if chain:
+                        if fr:
+                            last_ref = fr
+                        else:
+                            self._log("⚠️ 第 %d 段抽不出尾帧：下一段沿用上一张参考图"
+                                      % sh["i"])
+                else:
+                    sh["state"] = "fail"
+                    sh["err"] = last or "未知错误"
+                    fail_run += 1
+                    self._log("❌ 第 %d 段跳过（不跳号）：%s" % (sh["i"], sh["err"]))
+                    if fail_run >= 5:
+                        fs["state"] = "paused"
+                        fs["phase"] = "暂停"
+                        fs["msg"] = ("连续 5 段失败，已暂停：先处理登录/额度/环境，"
+                                     "再点「继续」")
+                        fs["status"] = fs["msg"]
+                        self._log("⛔ 连续 5 段失败，整批暂停")
+                        break
+                fs["done"] = sum(1 for x in proj["shots"] if x.get("state") == "done")
+                fs["missing"] = sum(1 for x in proj["shots"]
+                                    if x.get("state") in ("fail", "skip"))
+                fs["elapsed"] = round(time.time() - t0, 1)
+                fs["shots"] = self._film_shots(proj, d)
+                self.st["status"] = fs["status"]
+                prj.save(d, proj)
+            if fs["state"] != "paused":
+                if self._film_should_stop():
+                    fs["state"] = "stopped"
+                    fs["phase"] = "已停"
+                    fs["done"] = sum(1 for x in proj["shots"]
+                                     if x.get("state") == "done")
+                    fs["status"] = "已停止 · %d/%d 段" % (fs["done"],
+                                                          len(proj["shots"]))
+                    self._log("⏹ 成片已停：已出的段都留着，点「继续」从断点接着跑")
+                else:
+                    done = [x for x in proj["shots"] if x.get("state") == "done"]
+                    if not done:
+                        fs["state"] = "failed"
+                        fs["phase"] = "失败"
+                        fs["status"] = "没有一段出成功"
+                        fs["msg"] = "每段都失败了：看日志里第一条错误，先处理登录/额度/环境"
+                    else:
+                        fs["phase"] = "合成"
+                        fs["status"] = "合成中…"
+                        self.st["status"] = "合成中…"
+                        try:
+                            film = self._film_merge(d, proj)
+                            fs["film"] = film
+                            fs["state"] = "done"
+                            fs["phase"] = "完成"
+                            fs["merge_ok"] = bool(proj.get("merge_ok"))
+                            miss = int(proj.get("merge_missing") or 0)
+                            fs["status"] = "✅ 成片完成" + (
+                                "（缺 %d 段，序号没乱）" % miss if miss else "")
+                            self._film_publish(proj, film, round(time.time() - t0, 1))
+                            self._log("── 成片结束：%s ──" % film)
+                        except Exception as e:
+                            fs["state"] = "done"
+                            fs["phase"] = "完成"
+                            fs["merge_ok"] = False
+                            fs["status"] = "分段都出完了 · 没合成"
+                            fs["msg"] = "合成失败：%s" % str(e)[:200]
+                            self._log("⚠️ 分段都出完，但合成失败：%s" % e)
+        except Exception as e:
+            fs["state"] = "failed"
+            fs["phase"] = "中断"
+            fs["err"] = str(e)[:300]
+            fs["status"] = "出片中断"
+            self._log("❌ 成片中断：%s" % e)
+        finally:
+            if cloud:
+                self._cloud_gen.clear()
+            fs["done"] = sum(1 for x in proj["shots"] if x.get("state") == "done")
+            fs["missing"] = sum(1 for x in proj["shots"]
+                                if x.get("state") in ("fail", "skip"))
+            fs["elapsed"] = round(time.time() - t0, 1)
+            fs["shots"] = self._film_shots(proj, d)
+            prj.save(d, proj)
+            self._release()
+
+    def film_plan(self, payload=None):
+        f = self._film_cfg(payload)
+        story = str(f.get("story") or "").strip()
+        if len(story) < 4:
+            return {"ok": False, "msg": "先写一段剧情"}
+        total = _to_int(f.get("total"), 60, 5, 3600)
+        n, shot = self._film_n(total, _to_int(f.get("shot"), 15, 5, 15))
+        if total > 40 * shot:
+            return {"ok": False, "msg": "最多 40 段（15 秒一段＝10 分钟）："
+                                        "把总时长压到 600 秒内，或拆成两集"}
+        try:
+            r = self._ai().plan_shots(
+                story, total, shot, self.cfg,
+                style=str(f.get("style") or ""), ratio=self._film_ratio(
+                    str(f.get("size") or "")),
+                extra=str(f.get("extra") or ""), log=self._log)
+        except Exception as e:
+            msg = self._ai_err(e)
+            self._log("❌ 拆分镜失败：%s" % msg)
+            return {"ok": False, "msg": msg}
+        return {"ok": True, "title": r["title"], "shots": r["shots"],
+                "count": r["count"], "shot_sec": r["shot_sec"],
+                "total_sec": r["total_sec"]}
+
+    def film_start(self, payload=None):
+        from filmkit import project as prj
+        p = dict(payload or {})
+        f = self._film_cfg(p)
+        rows = p.get("shots") or []
+        if len(rows) > 40:
+            return {"ok": False, "msg": "最多 40 段：把总时长压到 600 秒内，或拆成两集"}
+        total = _to_int(f.get("total"), 60, 5, 3600)
+        n, shot = self._film_n(total, _to_int(f.get("shot"), 15, 5, 15))
+        if not rows and len(str(f.get("story") or "").strip()) < 4:
+            return {"ok": False, "msg": "先写一段剧情，或先点「AI 拆分镜」"}
+        if not rows and total > 40 * shot:
+            return {"ok": False, "msg": "最多 40 段（15 秒一段＝10 分钟）："
+                                        "把总时长压到 600 秒内，或拆成两集"}
+        if not self._claim("film"):
+            return {"ok": False, "msg": self._busy_msg()}
+        self._film_stop.clear()
+        try:
+            title = str(f.get("title") or p.get("title") or "").strip()
+            if not rows:
+                self.st["film"] = {"state": "planning", "phase": "拆镜", "status": "拆分镜中…",
+                                   "id": "", "title": title, "dir": "", "total": n,
+                                   "done": 0, "current": 0, "elapsed": 0, "film": "",
+                                   "err": "", "shots": [], "missing": 0, "merge_ok": True,
+                                   "msg": "", "exec": str(f.get("exec") or ""), "mode": ""}
+                plan = self.film_plan(f)
+                if not plan.get("ok"):
+                    raise FilmError(plan.get("msg") or "拆分镜失败")
+                rows = plan["shots"]
+                title = title or plan.get("title") or ""
+                shot = int(plan.get("shot_sec") or shot)
+            shots = prj.norm_shots(rows, shot)
+            if not shots:
+                raise FilmError("分镜是空的：先点「AI 拆分镜」或写一段剧情")
+            chk = self._film_precheck(f, len(shots))
+            if chk["err"]:
+                raise FilmError(chk["err"])
+            d, proj = self._film_new(f, shots, title, chk)
+        except Exception as e:
+            self._release()
+            msg = str(e) if isinstance(e, FilmError) else self._ai_err(e)
+            self.st["film"] = dict(self.st.get("film") or {}, state="idle", phase="",
+                                   status="", msg=msg)
+            self._log("❌ 成片没起来：%s" % msg)
+            return {"ok": False, "msg": msg}
+        self._film = proj
+        self._film_dir = d
+        self.st["film"] = self._film_view(proj, state="running", phase="出片",
+                                          status="准备中…")
+        self._log("🎬 成片开跑：%s · %d 段 × %d 秒 · %s"
+                  % (proj["title"], len(shots), shot,
+                     "云端" if chk["exec"] == "cloud" else "本地"))
+        self._thread = threading.Thread(target=self._film_run, args=(d, proj), daemon=True)
+        self._thread.start()
+        lo = len(shots) * (6 if chk["exec"] == "cloud" else 4)
+        hi = len(shots) * (10 if chk["exec"] == "cloud" else 10)
+        return {"ok": True, "id": proj["id"], "title": proj["title"],
+                "shots": len(shots), "shot_sec": shot,
+                "exec": chk["exec"], "estimate": "%d~%d 分钟" % (lo, hi)}
+
+    def film_stop(self):
+        if str(self.st.get("running") or "") != "film":
+            return {"ok": False, "msg": "成片没在跑"}
+        self._film_stop.set()
+        self._stop.set()
+        f = self.st.get("film") or {}
+        f["status"] = "正在停：这一段收尾后结束，已出的段都留着"
+        self._log("⏹ 收到停止：当前这一段收尾后结束；云端那一段可能还在平台上跑")
+        return {"ok": True}
+
+    def film_state(self):
+        return {"ok": True, "film": self._snap().get("film"),
+                "ffmpeg": self._ff(), "ai_key": self._ai_has()}
+
+    def film_list(self):
+        from filmkit import project as prj
+        base = os.path.join(_abs_path(self.cfg["console"]["output_dir"]), "films")
+        items = []
+        if os.path.isdir(base):
+            for name in os.listdir(base):
+                d = os.path.join(base, name)
+                try:
+                    proj = prj.load(d)
+                except Exception:
+                    continue
+                shots = proj.get("shots") or []
+                items.append({
+                    "id": str(proj.get("id") or name),
+                    "title": str(proj.get("title") or ""),
+                    "dir": d,
+                    "time": str(proj.get("updated") or proj.get("created") or ""),
+                    "done": sum(1 for x in shots if x.get("state") == "done"),
+                    "total": len(shots),
+                    "film": str(proj.get("film") or ""),
+                    # 「当前」与「正在跑」是两件事：跑完的当前工程仍要能点继续/重出
+                    "current": d == (self._film_dir or ""),
+                    "running": (d == (self._film_dir or "")
+                                and self.st.get("running") in ("film", "film_merge")),
+                })
+        items.sort(key=lambda x: x["time"], reverse=True)
+        return {"ok": True, "items": items[:20]}
+
+    def film_resume(self, dir=""):
+        from filmkit import project as prj
+        d = str(dir or "").strip() or self._film_dir
+        if not d:
+            d = prj.latest(_abs_path(self.cfg["console"]["output_dir"]))
+        if not d or not os.path.isfile(os.path.join(d, "project.json")):
+            return {"ok": False, "msg": "还没有可续跑的工程"}
+        try:
+            proj = prj.load(d)
+        except Exception as e:
+            return {"ok": False, "msg": "工程读不出来：%s" % e}
+        if not (proj.get("shots") or []):
+            return {"ok": False, "msg": "这份工程没有分镜"}
+        for sh in proj["shots"]:
+            if sh.get("state") in ("run", "fail"):
+                sh["state"] = "wait"
+                sh["err"] = ""
+            if sh.get("state") == "done" and not prj.ok_file(d, sh):
+                sh["state"] = "wait"
+                sh["file"] = ""
+                sh["frame"] = ""
+        all_done = all(prj.ok_file(d, sh) for sh in proj["shots"])
+        film = str(proj.get("film") or "")
+        if all_done and film and os.path.isfile(film):
+            self._film = proj
+            self._film_dir = d
+            self.st["film"] = self._film_view(proj, state="done", phase="完成",
+                                              status="✅ 已完成")
+            return {"ok": True, "msg": "这部已经完成了", "film": film}
+        chk = self._film_precheck(proj, len(proj["shots"]), base_dir=d)
+        if chk["err"]:
+            return {"ok": False, "msg": chk["err"]}
+        # 先占位、写好 view 再起线程：_film_run 第一句就读 st.film，
+        # 反过来写的话线程可能先拿到旧的 idle 视图，之后又被这里覆盖，界面就不动了
+        if not self._claim("film"):
+            return {"ok": False, "msg": self._busy_msg()}
+        self._film_stop.clear()
+        self._film = proj
+        self._film_dir = d
+        self.st["film"] = self._film_view(proj, state="running", phase="出片",
+                                          status="准备中…")
+        self._thread = threading.Thread(target=self._film_run, args=(d, proj), daemon=True)
+        self._thread.start()
+        self._log("▶️ 继续成片：%s · 从第一段没出的往后跑" % (proj.get("title") or d))
+        return {"ok": True}
+
+    def film_redo(self, shot=1, deep=False):
+        """重出某一段。接帧模式下自动连带作废后面所有段：第 N+1 段的参考
+        是第 N 段的尾帧，只重出第 N 段的话，后半部还是旧画面接出来的。
+
+        作废=删掉那几段的 mp4 与尾帧、状态回到等待，再按续跑那条路跑——
+        已完成的段照旧跳过，失败段原位重试，不跳号。
+        """
+        from filmkit import project as prj
+        if str(self.st.get("running") or "") in ("film", "film_merge"):
+            return {"ok": False, "msg": "成片在跑：先点停止再重出"}
+        d = self._film_dir or ""
+        if not d or not os.path.isfile(os.path.join(d, "project.json")):
+            return {"ok": False, "msg": "没有工程：先跑一部，或从「最近工程」打开一份"}
+        try:
+            proj = prj.load(d)          # 以盘上为准：界面里那份可能是几轮前的快照
+        except Exception as e:
+            return {"ok": False, "msg": "工程读不出来：%s" % e}
+        shots = proj.get("shots") or []
+        if not shots:
+            return {"ok": False, "msg": "这份工程没有分镜"}
+        i = _to_int(shot, 1, 1, len(shots))
+        deep = bool(deep or str(proj.get("mode")) == "chain")
+        n = 0
+        for sh in shots:
+            if sh.get("i") != i and not (deep and int(sh.get("i") or 0) > i):
+                continue
+            for key in ("file", "frame"):
+                p = prj.abs_path(d, sh.get(key) or "")
+                if p and os.path.isfile(p):
+                    try:
+                        os.remove(p)
+                    except OSError:
+                        pass
+                sh[key] = ""
+            sh["state"] = "wait"
+            sh["sec"] = 0.0
+            sh["err"] = ""
+            n += 1
+        # 旧成片已经拼过被作废的段：指回它只会让人以为「改完了」
+        proj["film"] = ""
+        proj["merge_ok"] = True
+        proj["merge_missing"] = 0
+        prj.save(d, proj)
+        self._log("↻ 重出第 %d 段%s：作废 %d 段"
+                  % (i, "（接帧，含后面所有段）" if deep else "", n))
+        r = self.film_resume(d)
+        if not r.get("ok"):
+            return r
+        return {"ok": True, "msg": "从第 %d 段重出，作废 %d 段" % (i, n), "count": n}
+
+    def film_merge(self, dir=""):
+        from filmkit import project as prj
+        d = str(dir or "").strip() or self._film_dir
+        if not d:
+            d = prj.latest(_abs_path(self.cfg["console"]["output_dir"]))
+        if not d or not os.path.isfile(os.path.join(d, "project.json")):
+            return {"ok": False, "msg": "还没有可合成的工程"}
+        try:
+            proj = prj.load(d)
+        except Exception as e:
+            return {"ok": False, "msg": "工程读不出来：%s" % e}
+        if not any(s.get("state") == "done" and prj.ok_file(d, s)
+                   for s in (proj.get("shots") or [])):
+            return {"ok": False, "msg": "还没有一段成功出片"}
+        if not self._ff():
+            return {"ok": False, "msg": "缺 FFmpeg：到「环境 → 基础」补上后再合成"}
+        self._film = proj
+        self._film_dir = d
+        if not self._launch("film_merge", lambda: self._film_merge_job(d, proj)):
+            return {"ok": False, "msg": self._busy_msg()}
+        self.st["film"] = self._film_view(proj, state="running", phase="合成",
+                                          status="合成中…")
+        return {"ok": True}
+
+    def _film_merge_job(self, d, proj):
+        t0 = time.time()
+        try:
+            self.st["status"] = "合成中…"
+            path = self._film_merge(d, proj)
+            self._film_publish(proj, path, round(time.time() - t0, 1))
+            self.st["film"] = self._film_view(proj, state="done", phase="完成",
+                                              status="✅ 成片完成", film=path,
+                                              merge_ok=bool(proj.get("merge_ok")))
+            self.st["status"] = "✅ 成片完成"
+            self._log("── 成片结束：%s ──" % path)
+        except Exception as e:
+            self.st["film"] = self._film_view(proj, state="done", phase="完成",
+                                              status="没合成",
+                                              msg="合成失败：%s" % str(e)[:200])
+            self.st["status"] = "合成失败"
+            self._log("❌ 合成失败：%s" % e)
+        finally:
+            self._release()
+
     # ------------------------------------------------------------ js_api：云端账号
     # 一只调试浏览器 + 多份登录态快照：换号只换 cookies/localStorage，不重启进程。
     # 浏览器只在登录/保活时起；启动路径不 import DrissionPage（与不 import torch 同理）。
@@ -2451,11 +3257,13 @@ class App(WindowCtl):
         except Exception as e:
             return {"ok": False, "msg": "体检没跑成：%s" % e}
         on = self._env_on()
-        is_on = lambda eid: on.get(eid, True)
+        tools = {e["id"] for e in self._spec().get("envs") or [] if e.get("tool")}
+        is_on = lambda eid: eid in tools or on.get(eid, True)
         r["items"] = [it for it in r["items"] if is_on(str(it.get("env") or "base"))]
-        # 开着的环境不再享受「可选＝默认别提醒」的待遇：开关就是本人的选择
+        # 开着的环境不再享受「可选＝默认别提醒」的待遇：开关就是本人的选择。
+        # 工具环境例外：它没有开关，miss 也只算「可选扩展没装」，不进待补总数。
         for it in r["items"]:
-            it["optional"] = False
+            it["optional"] = str(it.get("env") or "base") in tools
         todo = ec.fix_plan(r["items"])
         r["todo"] = [x["key"] for x in todo]
         r["gb"] = round(sum(float(x.get("gb") or 0) for x in todo), 1)
@@ -2498,7 +3306,7 @@ class App(WindowCtl):
             if not still:
                 self._release_engine(eng)
         self.env_probe_bg()
-        return {"ok": True, "env_on": self._env_on(), "cfg": self.cfg}
+        return {"ok": True, "env_on": self._env_on(), "cfg": self._cfg_public()}
 
     def _release_engine(self, eng):
         """这一路的环境全关了：把它占的显存还回去（后台做，桥线程里做会冻界面）。"""
@@ -2537,10 +3345,13 @@ class App(WindowCtl):
         try:
             from envkit import check as ec
             on = self._env_on()
+            tools = {e["id"] for e in self._spec().get("envs") or [] if e.get("tool")}
             items = [it for it in ec.check(ROOT, spec=self._spec())["items"]
-                     if on.get(str(it.get("env") or "base"), True)]
+                     if str(it.get("env") or "base") in tools
+                     or on.get(str(it.get("env") or "base"), True)]
             for it in items:
-                it["optional"] = False      # 同 env_check：开着就不算「可选」
+                # 同 env_check：开着就不算「可选」；工具环境保留可选（默认不整批补）
+                it["optional"] = str(it.get("env") or "base") in tools
         except Exception as e:
             self.st["env_busy"] = False
             return {"ok": False, "msg": "体检没跑成：%s" % e}
@@ -2590,6 +3401,8 @@ class App(WindowCtl):
                     ok = self._comfyui_clone(it["fix"])
                 elif kind == "comfyvenv":
                     ok = self._comfyui_venv(it["fix"])
+                elif kind == "tool":
+                    ok = self._env_tool_install(it["fix"])
                 elif kind == "dir":
                     os.makedirs(_abs_path(it["fix"]["path"]), exist_ok=True)
                     self._log("✅ 建好目录 %s" % it["fix"]["path"])
@@ -2655,6 +3468,26 @@ class App(WindowCtl):
     def _comfyui_venv(self, fix):
         from envkit import install as ei
         return ei.ensure_comfyui_venv(ROOT, fix, self._log, python=sys.executable)
+
+    def _env_tool_install(self, fix):
+        """可选工具（ffmpeg）：下载静态包→只解出可执行文件→跑一次 -version 自检。"""
+        from envkit import install as ei
+
+        def prog(ev):
+            self.st["dl"] = dict(ev or {})
+
+        self.st["dl"] = {"busy": True, "phase": "tool", "file": "", "done": 0,
+                         "total": 0, "speed": 0, "eta": 0,
+                         "files_done": 0, "files_total": 1}
+        try:
+            ok = ei.install_tool(ROOT, fix, self._log,
+                                 on_line=self._log, on_progress=prog)
+        except Exception as e:
+            self._log("❌ 工具安装出错：%s" % e)
+            ok = False
+        finally:
+            self.st["dl"] = {}
+        return ok
 
     def _env_model_dl(self, fix):
         """把一个环境的权重下到它清单里写的目录（同一个下载器，Motrix 可用时先交给它）。"""

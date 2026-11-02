@@ -55,6 +55,8 @@
     { "id": "moss", "label": "Moss", "icon": "wave", "engine": "moss",
       "runtime": "comfyui", "spec": "moss/env.json" },
     { "id": "h3", "label": "H3 视频", "icon": "film", "engine": "moss",
-      "runtime": "comfyui", "optional": true, "spec": "h3/env.json" }
+      "runtime": "comfyui", "optional": true, "spec": "h3/env.json" },
+    { "id": "ffmpeg", "label": "FFmpeg", "icon": "scissors", "engine": "",
+      "optional": true, "tool": true, "spec": "ffmpeg/env.json" }
   ]
 }

@@ -3,6 +3,7 @@
 comfyui/
 models/
 envs/*/models/
+envs/*/bin/
 outputs/
 logs/
 data/

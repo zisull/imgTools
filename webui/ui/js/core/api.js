@@ -69,6 +69,21 @@ MIC.api={
   envSet:(i,w)=>call('env_set',i,!!w),
   /* 视频：本地 H3 出一条成片（后端起线程，调用即返回；进度走 poll） */
   videoGen:p=>call('video_gen',p),
+  /* 文本 API：Key 只进不出（界面只拿 has_key）；拆分镜与润色各一个入口 */
+  aiState:()=>call('ai_state'),
+  aiSet:p=>call('ai_set',p),
+  aiKeyClear:()=>call('ai_key_clear'),
+  aiTest:()=>call('ai_test'),
+  aiPolish:(t,k)=>call('ai_polish',t,k||'image'),
+  /* 成片：拆分镜 → 逐段出片 → 合成；长活全在后台线程，进度走 poll 的 st.film */
+  filmPlan:p=>call('film_plan',p),
+  filmStart:p=>call('film_start',p),
+  filmStop:()=>call('film_stop'),
+  filmState:()=>call('film_state'),
+  filmList:()=>call('film_list'),
+  filmResume:d=>call('film_resume',d||''),
+  filmRedo:(i,deep)=>call('film_redo',i||1,!!deep),
+  filmMerge:d=>call('film_merge',d||''),
   /* 云端账号：一只共用浏览器 + 多份登录态快照；浏览器操作全部后台线程 */
   cloudState:()=>call('cloud_state'),
   /* 视频页云端那一格要的一句话实话（有几个号、缺不缺 DrissionPage、用的哪份工作流）：

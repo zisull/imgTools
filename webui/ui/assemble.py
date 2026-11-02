@@ -40,6 +40,7 @@ JS_ORDER = [
     "js/pages/edit.js",
     "js/pages/inpaint.js",
     "js/pages/video.js",
+    "js/pages/film.js",
     "js/pages/gallery.js",
     "js/pages/cloud.js",
     "js/pages/logs.js",

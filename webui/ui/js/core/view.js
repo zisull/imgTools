@@ -218,6 +218,8 @@ function tick(){
     else if(r==='vram')el.innerHTML=vramHTML();
     else if(r==='count')el.textContent=MIC.n(s[el.dataset.field||'img_count']);
     else if(r==='result')el.innerHTML=resultHTML();
+    /* 成片时间线：结构变了才重画，进度条/耗时每跳自己更新（见 film.js paint） */
+    else if(r==='film'){if(MIC.film&&MIC.film.paint)MIC.film.paint(el);}
     else if(r==='imgprev'){
       if(!s.last_image){el.innerHTML=`<div class="empty">尚无成图 · 出图后在这里预览，点图可打开文件夹</div>`;return;}
       /* 成片不内嵌播放：内联页放不了 file://，引视频解码依赖不值当——
@@ -291,10 +293,12 @@ let lastRun=null;
 function watchFinish(){
   const cur=MIC.s.st.running;
   if(cur===lastRun)return;
-  const ended=(lastRun==='gen'||lastRun==='video')&&cur===null;
+  const ended=(lastRun==='gen'||lastRun==='video'||
+               lastRun==='film'||lastRun==='film_merge')&&cur===null;
   lastRun=cur;
   if(ended){
     if(MIC.gal)MIC.gal.invalidate();   // 生成收尾：画廊缓存作废，下次进页重扫
+    if(MIC.film&&MIC.film.refresh)MIC.film.refresh();
     if(MIC.s.cfg.notify!==false)MIC.toast(MIC.s.st.status||'生成已结束');
   }
   if(skipForFocus())return;

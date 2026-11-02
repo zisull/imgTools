@@ -27,6 +27,7 @@ G_PY = "运行环境"
 G_PKG = "依赖包"
 G_MODEL = "模型权重"
 G_RUNTIME = "ComfyUI 运行时"
+G_TOOL = "扩展工具"
 G_DIR = "目录"
 G_MOSS = G_RUNTIME                      # 旧名字，别处还在用
 
@@ -349,6 +350,35 @@ def _check_runtime_venv(root, spec):
                  "ComfyUI 已在但没建 .venv（装它自己的 torch/依赖）", fix, env=env)
 
 
+def _check_tool(root, t, env=None, optional=False):
+    """可选扩展工具（ffmpeg 这类）：只看可执行文件在不在，不跑它。
+
+    工具不是模型：缺了不影响出图出片，只影响「多段合成」这种增强功能，
+    所以 state=miss 也带 optional，默认不进待补总数，点名了才装。
+    """
+    env = env or t.get("env") or sp.BASE
+    dest = str(t.get("dest") or ("envs/%s" % env))
+    names = [str(x) for x in (t.get("files") or [])]
+    base = _abs(root, dest)
+    have = [n for n in names if os.path.isfile(os.path.join(base, *n.split("/")))]
+    fix = {"kind": "tool", "key": str(t.get("key") or ""), "dest": dest,
+           "files": names, "urls": list(t.get("urls") or [])}
+    label = str(t.get("label") or t.get("key") or "扩展工具")
+    mb = t.get("size_mb")
+    size = "约 %s MB" % mb if mb else ""
+    if names and len(have) == len(names):
+        return _item("tool:" + str(t.get("key") or env), G_TOOL, label, "ok",
+                     "已装 · %s" % dest, fix, env=env, optional=optional)
+    if have:
+        return _item("tool:" + str(t.get("key") or env), G_TOOL, label, "part",
+                     "只装到 %d/%d 个文件（%s）· 重装一次补齐" % (len(have), len(names), dest),
+                     fix, env=env, optional=optional)
+    return _item("tool:" + str(t.get("key") or env), G_TOOL, label, "miss",
+                 "没装%s · %s" % (("（%s）" % size) if size else "",
+                                 t.get("note") or "点这项补上"),
+                 fix, env=env, optional=optional)
+
+
 def _check_dir(root, d):
     p = _abs(root, d["path"])
     env = str(d.get("env") or sp.BASE)
@@ -414,6 +444,9 @@ def check(root, spec=None, py_version=None, prefix=None, pkg_version=None,
     for m in spec.get("models") or []:
         env = m.get("env") or sp.BASE
         items.append(_check_model(root, m, env=env, optional=env in opt))
+    for t in spec.get("tools") or []:
+        env = t.get("env") or sp.BASE
+        items.append(_check_tool(root, t, env=env, optional=env in opt))
     if spec.get("runtimes"):
         env = str(((spec.get("runtimes") or {}).get("comfyui") or {}).get("env") or "moss")
         items.append(_check_runtime(root, spec))

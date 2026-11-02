@@ -127,6 +127,23 @@ MIC.registerPage('settings',{
     const sw=(id,label)=>{const on=MIC.nav.envOn()[id]!==false;
       return `<span class="envsw"><span class="sw ${on?'on':''}" title="关掉：不体检、不提醒、功能页收起"
           onclick="MIC.env.set('${id}',${on?0:1})"></span>${label}</span>`;};
+    /* 文本 API：拆镜与润色用。Key 不走 data-k——它不进配置回包、不回显，单独经 ai_set 存 */
+    const aiCard=C.card('文本 API','key',
+      C.field('接口地址',C.txt('ai.base','https://api.deepseek.com'),
+        'OpenAI 兼容的 /chat/completions；DeepSeek 与同类兼容端点都能接')+
+      C.field('模型',C.txt('ai.model','deepseek-chat'),'拆分镜和润色都用这个模型')+
+      C.field('温度',C.num('ai.temp','0~1.5'),'低=稳，高=更有想象力；拆镜用 0.7 左右')+
+      C.field('Key',
+        '<div class="inrow"><input class="inp" id="aiKey" type="password" autocomplete="off" '+
+        'placeholder="'+(s.ai_key?'已填写（不回显）':'sk-…')+'">'+
+        '<button class="btn" onclick="MIC.aiSrv.saveKey()">保存</button>'+
+        '<button class="btn gho" onclick="MIC.aiSrv.test()">测试</button>'+
+        '<button class="btn gho" onclick="MIC.aiSrv.clear()">清除</button></div>',
+        '只存本机 config.json，不进仓库与日志；也可以用环境变量 DEEPSEEK_API_KEY')+
+      `<div class="hint">${s.ai_key
+        ?'已配置：拆分镜、润色与一键成片都能用'
+        :'未配置：拆分镜和润色用不了；手动写好分镜仍可出片'}</div>`,
+      {note:s.ai_key?'已配置':'未配置'});
     return C.duo(
       C.card('引擎与目录','power',
         C.field('模型目录',C.pathrow('console.model_dir','envs/qwen/models/Qwen-Image-2.1-Turbo','dir'),'下载好的权重文件夹')+
@@ -142,6 +159,7 @@ MIC.registerPage('settings',{
           `<button class="btn" onclick="MIC.app.rename()">应用</button></div>`,
           '窗口与顶栏标题，也可双击左上角改名')+
         C.field('通知',C.chk('notify','任务结束时弹轻提示')))
+      +aiCard
       +C.card('关于','book',
         `<div class="kv"><span>版本</span><b>v${esc(MIC.s.version||'-')}</b></div>
          <div class="kv"><span>模型</span><b>Qwen-Image-2.1-Turbo（Qwen Research License，非商用）· MOSS-Image · MiniMax H3（后两个走内嵌 ComfyUI）</b></div>
@@ -180,5 +198,40 @@ MIC.apiSrv={
     MIC.view.copy(t,'令牌已复制');
   },
   copyDemo(){MIC.view.copy(curlText(),'curl 示例已复制');},
+};
+
+/* 文本 API 的 Key 只经 ai_set 写进本机配置；界面拿不到明文，只显示「有没有」 */
+MIC.aiSrv={
+  keep(r){
+    if(r&&r.has_key!=null)MIC.s.st.ai_key=!!r.has_key;
+    MIC.render();
+  },
+  saveKey(){
+    const el=MIC.$('aiKey');
+    const v=el?String(el.value||'').trim():'';
+    if(!v){MIC.toast('先把 Key 粘进来');return;}
+    MIC.api.aiSet({key:v}).then(r=>{
+      if(!r){MIC.toast('保存失败');return;}
+      if(el)el.value='';
+      MIC.aiSrv.keep(r);
+      MIC.toast('Key 已存到本机');
+    }).catch(()=>MIC.toast('保存失败'));
+  },
+  test(){
+    MIC.toast('测试中…');
+    MIC.api.aiTest().then(r=>{
+      if(!r||!r.ok){MIC.toast((r&&r.msg)||'测试失败');return;}
+      MIC.s.st.ai_key=true;
+      MIC.toast('可用 · '+(r.model||'')+(r.ms?' · '+r.ms+' ms':''));
+      MIC.render();
+    }).catch(()=>MIC.toast('测试失败'));
+  },
+  clear(){
+    if(!confirm('清除本机保存的文本 API Key？'))return;
+    MIC.api.aiKeyClear().then(r=>{
+      MIC.aiSrv.keep(r);
+      MIC.toast('已清除');
+    }).catch(()=>MIC.toast('清除失败'));
+  },
 };
 })();

@@ -95,7 +95,11 @@ MIC.registerPage('t2i',{
         (moss?'':C.field('KV 缓存',C.chk(K+'.kv_cache','长提示词更快'),'文本编码器缓存，提示词越长省得越多'));
     const params=
       mode+
-      C.field('提示词',C.ta(K+'.prompt',4,ph),'中文英文都行')+
+      C.field('提示词',
+        C.ta(K+'.prompt',4,ph)+
+        `<div class="btnrow" style="margin-top:6px"><button class="btn sm gho"`+
+        ` onclick="MIC.polish.prompt('${K}.prompt','image')">${ic('wand','s')}AI 润色</button></div>`,
+        '中文英文都行；「AI 润色」按专业构图补齐机位、景别、光线与材质')+
       MIC.inspire.box(K+'.prompt')+
       row+
       (custom?'<div class="grid4">'+
