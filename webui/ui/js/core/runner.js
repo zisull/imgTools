@@ -60,7 +60,7 @@ function again(target){
   const p=MIC.s.st.last_image;
   if(!p){MIC.toast('还没有成图');return;}
   if(MIC.nav.pageHidden&&MIC.nav.pageHidden(target)){
-    MIC.toast('控制台模式收起了「'+(MIC.pages[target]||{}).title+'」页，切回「两者兼有」再用');return;}
+    MIC.toast('「'+(MIC.pages[target]||{}).title+'」那一路的环境关着，到「环境」页开启后再接力');return;}
   if(target==='inpaint')MIC.inp.useImage(p);
   else if(target==='edit')MIC.edit.useImage(p);
   else{MIC.toast('不认识的接力目标：'+target);return;}

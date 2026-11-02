@@ -21,6 +21,7 @@ import io
 import json
 import os
 import re
+import shutil
 import sys
 import threading
 import time
@@ -113,7 +114,7 @@ except Exception:
         try:
             ctypes.windll.user32.MessageBoxW(
                 None,
-                "生图控制台起不来：依赖导入失败，请先跑 setup.bat。\n\n"
+                "生图控制台起不来：依赖导入失败，请先双击根目录的 启动.bat 补环境。\n\n"
                 + traceback.format_exc()[-1200:] + "\n\n完整堆栈见 logs\\run.log",
                 "Qwen 生图控制台", 0x10)
         except Exception:
@@ -130,15 +131,21 @@ WIN_W, WIN_H = 1280, 800
 MIN_W, MIN_H = 980, 620
 
 IMG_EXT = (".png", ".jpg", ".jpeg", ".webp")
+# H3 出片走 SaveVideo(format=auto) → mp4；其余几种是给人手动丢进输出目录的存量片也一起认
+VIDEO_EXT = (".mp4", ".webm", ".mov", ".mkv")
+MEDIA_EXT = IMG_EXT + VIDEO_EXT
 # pywebview 的过滤串：描述 + 括号内分号分隔的扩展名（空格分隔会被 parse_file_type 拒）
 _IMG_FILTER = "图片 (*" + ";*".join(IMG_EXT) + ")"
 
 # 导航结构版本：v3 起概览/透明素材/提示词工坊/API 服务四页并进了别的页，日志单开一页；
 # v4 把 Moss 生图并进生图页、导航改成不套分组的两字名称；
 # v5 按用户要求把分组收回来（名称仍统一两字，只归组、不改叫法）；
-# v6 词库并进生图页（灵感行 + 全览面板），少一页。
+# v6 词库并进生图页（灵感行 + 全览面板），少一页；
+# v7 加「视频」页（本地 H3），环境从一页拆成按模型的一组图；
+# v8 加「云端」页：多账号登录态与浏览器保活（生成仍走协议，浏览器只负责登录）。
+# v9 改叫「H3云端」（这页服务的是 H3/RunningHub 那条线）。
 # 比它旧的配置在载入时按新默认表重排一次（只把用户改过的标签名带过去），见 _restructure_nav。
-NAV_VER = 6
+NAV_VER = 9
 
 # 各版默认表用过的标签名。换代重排时，名字落在这张表里说明「用户没自己改过」，
 # 直接换成新默认名；不在表里的才是他改的，原样保留。
@@ -146,6 +153,8 @@ LEGACY_TAB_NAMES = {
     "概览", "文生图", "透明素材", "图像编辑", "局部编辑", "提示词工坊", "Moss 生图",
     "画廊", "环境与模型", "模型管理", "日志", "设置", "API 服务",
     "生图", "编辑", "重绘", "词库", "环境",
+    "视频", "基础", "千问",
+    "云端",
 }
 
 # 反向提示词的出厂默认：以前出厂是空的，多数人不会填，图就照着常见失败出。
@@ -168,9 +177,11 @@ DEFAULT_CFG = {
     "welcomed": False,
     # 当前激活的生图引擎：qwen（diffusers）| moss（内嵌 ComfyUI）。同一时间只有一个常驻显存。
     "engine": "qwen",
-    # 控制台模式：both=两者兼有 / qwen=仅千问 / moss=仅 Moss。整个界面只留所选引擎的功能页。
-    "console_mode": "both",
-    "console": {"model_dir": "models/Qwen-Image-2.1-Turbo", "output_dir": "outputs",
+    # 环境开关：{环境 id: true/false}。关掉的环境不体检、不进待补、不提醒，功能页一并收起。
+    # 这张表只管「人想要哪几路」，默认值由后端按清单算（必选=开，可选=装过才开），见 _env_on。
+    # 取代了旧的 console_mode（both/qwen/moss 三态表达不了「H3 单独开」）。
+    "env_on": {},
+    "console": {"model_dir": "envs/qwen/models/Qwen-Image-2.1-Turbo", "output_dir": "outputs",
                 "quant": "fp8", "offload": True},
     # Moss 引擎（MOSS-Image via ComfyUI）：档位 daily=日常质量档 / yield=让出显存档
     # size=custom 时走 cw/ch（前端折成 16 倍数的 WxH 再发）
@@ -187,21 +198,41 @@ DEFAULT_CFG = {
              "seed": -1, "count": 1, "kv_cache": True},
     "inpaint": {"prompt": "", "negative": NEG_DEFAULT, "res": "512", "steps": "8",
                 "seed": -1, "count": 1, "kv_cache": True, "brush": 48},
+    # 本地 H3 视频：秒数是模型帧数网格上的取值（24fps、17k+5），参考图留空＝文生视频
+    # exec=local 走本机 ComfyUI（占显存）；cloud 走 RunningHub 那份工作流（不占显存，要登录）
+    # 两条通道共用上面这四个键：换通道只换「在哪跑」，不换「跑什么」
+    # 尺寸只有一个来源＝size（WxH，界面那对 P 档×朝向落它）；老配置里的 tier/ratio 仍认，但不再写
+    "video": {"prompt": "", "seconds": 5, "size": "1344x768", "cw": 1344, "ch": 768,
+              "first": "", "seed": -1, "exec": "local", "cloud_acct": ""},
     "lib": {"cat": "person"},           # 生图页灵感行与词库全览共用的当前分类
     "api": {"enabled": False, "lan": False, "port": 8765,
             "token": "", "no_token": False,
             # API 不传 engine/model 时用谁：follow=跟随控制台当前激活的引擎
             "def_engine": "follow", "def_size": "1024x1024"},
+    # 云端账号：一只调试浏览器 + 多份登录态快照（data/cloud/），浏览器只负责登录与保活
+    # workflow=云端出片用的那份 H3 工作流（必须是这个号在网页上跑通过的）
+    "cloud": {"port": 9333, "base": "https://www.runninghub.cn", "login_url": "",
+              "browser": "", "domains": ["runninghub.cn"],
+              "keep": True, "keep_min": 30, "concurrency": 1,
+              "workflow": "", "wf_host": "", "exec_tag": "Plus", "poll_sec": 5, "gen_timeout": 1800},
     # 导航：分组套一页一个标签；组名与标签名统一两字，竖排对齐
     "nav": [
         {"id": "g_out", "type": "group", "name": "出图", "icon": "flower", "children": [
             {"id": "t_gen", "type": "tab", "name": "生图", "icon": "flower", "page": "t2i"},
             {"id": "t_edit", "type": "tab", "name": "编辑", "icon": "wand", "page": "edit"},
             {"id": "t_inp", "type": "tab", "name": "重绘", "icon": "brush", "page": "inpaint"},
+            {"id": "t_vid", "type": "tab", "name": "视频", "icon": "film", "page": "video"},
+        ]},
+        # 环境按模型一页一个：开关、明细、补齐都在自己那页，不再挤成一长串分区
+        {"id": "g_env", "type": "group", "name": "环境", "icon": "db", "children": [
+            {"id": "t_envb", "type": "tab", "name": "基础", "icon": "db", "page": "env_base"},
+            {"id": "t_envq", "type": "tab", "name": "千问", "icon": "flower", "page": "env_qwen"},
+            {"id": "t_envm", "type": "tab", "name": "Moss", "icon": "wave", "page": "env_moss"},
+            {"id": "t_envh", "type": "tab", "name": "H3", "icon": "film", "page": "env_h3"},
         ]},
         {"id": "g_sys", "type": "group", "name": "系统", "icon": "cog", "children": [
             {"id": "t_gal", "type": "tab", "name": "画廊", "icon": "image", "page": "gallery"},
-            {"id": "t_mod", "type": "tab", "name": "环境", "icon": "db", "page": "models"},
+            {"id": "t_cloud", "type": "tab", "name": "H3云端", "icon": "globe", "page": "cloud"},
             {"id": "t_log", "type": "tab", "name": "日志", "icon": "hist", "page": "logs"},
             {"id": "t_set", "type": "tab", "name": "设置", "icon": "cog", "page": "settings"},
         ]},
@@ -231,6 +262,15 @@ def _to_int(v, default, lo=1, hi=10 ** 6):
         return max(lo, min(hi, int(v)))
     except (TypeError, ValueError):
         return default
+
+
+def _snap16(x, lo=16, hi=2048):
+    """贴到 16 的倍数，四舍五入——必须和界面里的 C.a16 同一套舍入。
+
+    Python 的 round() 是「.5 向偶数」：宽填 840 时后端给 832、界面写 848，
+    差的那 16 像素正好落在「界面承诺」和「实际出片」之间，最难查。
+    """
+    return max(lo, min(hi, int(float(x) / 16.0 + 0.5) * 16))
 
 
 _seed_lock = threading.Lock()
@@ -293,6 +333,7 @@ class App(WindowCtl):
         self.cfg = json.loads(json.dumps(DEFAULT_CFG))
         # 锁要在读配置之前：导航换代（NAV_VER 涨了）会让 _load_cfg 当场回写一次盘
         self._cfg_lock = threading.RLock()   # 写 config.json：同一时刻只许一个线程碰 .tmp
+        self._env_spec = None    # 环境清单缓存：_load_cfg 要把开关默认值落到配置里，得先能读清单
         self._load_cfg()
         self._lock = threading.Lock()
         self._task_lock = threading.Lock()   # 「查空闲 + 占位」必须一气呵成
@@ -305,10 +346,20 @@ class App(WindowCtl):
         self.moss = None           # MossManager：切到 Moss 引擎时才建（拉 moss_mgr，纯 stdlib）
         self._api = None           # ApiServer：API 页开启时才 import（拉 fastapi）
         self._dl = None            # 模型下载线程（同一时间只允许一个）
+        self._cloudx = None        # 云端账号：DrissionPage/浏览器都在第一次用云端的页时才起
+        self._cloud_lock = threading.RLock()   # 账号操作互斥：并发固定 1（一只浏览器）
+        # 云端出片占着那只共用浏览器（点运行 + 轮询），这期间账号操作一律让路
+        self._cloud_gen = threading.Event()
+        self._h3cloud = None       # cloudkit.gen.CloudH3：真要用云端才建
         self._thumbs = OrderedDict()  # (path, mtime, wide) -> data url，缩略缓存（LRU 逐出）
         from store import Store
         self.store = Store(os.path.join(ROOT, "data", "history.db"))
         self.store.init()
+        # 删除撤销：文件先移进回收站而不是真删，栈里记着原路径与历史参数
+        self._trash_dir = os.path.join(ROOT, "data", "trash")
+        self._trash = []
+        self._trash_lock = threading.Lock()
+        self._trash_purge()
         self.st = {
             "running": None, "status": "就绪", "done": 0, "total": 0,
             "model_loaded": False, "model_name": "Qwen-Image-2.1-Turbo",
@@ -321,14 +372,23 @@ class App(WindowCtl):
             # 载入进度：黑框去掉后，权重加载这条唯一「看得见」的路就是这两个字段
             "load_pct": 0, "load_stage": "",
             # 环境补全：换电脑 clone 后缺包缺权重，靠这一项在界面上补齐
-            # 两个数按引擎拆开：首启那一屏要能说「这一路在这台机器上还差几项」
-            "env_busy": False, "env_todo": None, "env_todo_qwen": None, "env_todo_moss": None,
+            # env_todo_by 按环境拆：欢迎页与每个环境子页各读自己那一格；
+            # 关掉的环境恒为 0（体检那一步就没算它）。
+            # env_on 也当状态维护（改动时同步一次，不在每轮快照里现算）：
+            # 这张表决定导航里哪些功能页存在，界面每一处都读同一份。
+            "env_busy": False, "env_todo": None, "env_todo_by": {}, "env_on": {},
+            # 补全到第几步、这一步叫什么；dl 是当前下载的字节进度（由 envkit/download 回调写）
+            "env_step": 0, "env_steps": 0, "env_label": "", "dl": {},
             # 引擎与 Moss 档位：running/done/total/model_loaded/last_image 这些两引擎共用
             # moss_installed 三态：None=还没查过（界面不许拿它下结论）、True/False=查过
             "engine": "qwen", "moss_tier": "daily", "moss_installed": None,
             "comfyui_on": False, "comfyui_url": "", "comfyui_loaded": False,
+            # 云端账号：busy=正在做什么（空=闲），msg=上一条结果/错误（界面原样显示）
+            "cloud_busy": "", "cloud_msg": "",
         }
         self._refresh_gallery_count()
+        self._sync_env_on()
+        self._prepare_envs()
         self._log("就绪 · %s" % APP_NAME)
 
     # ------------------------------------------------------------ 配置
@@ -337,15 +397,113 @@ class App(WindowCtl):
             with open(CFG_PATH, "r", encoding="utf-8") as f:
                 saved = json.load(f)
         except (OSError, ValueError):
-            return
-        _deep_merge(self.cfg, saved)
-        # 透明素材并进文生图（gen.mode）后这一块没用了；老配置里留着只会让人以为还有那页
-        self.cfg.pop("rgba", None)
+            # 盘上还没有配置（首启／换机）：不能就此早退，否则 env_on 停在空表——
+            # 空表在体检里按「没写＝开」数待补、在开关那格按「没写＝关」归零，
+            # 两边对不上，连「千问环境已关闭」这句拦路话都会在首启冒出来。
+            saved = {}
+        if saved:
+            _deep_merge(self.cfg, saved)
+            # 透明素材并进文生图（gen.mode）后这一块没用了；老配置里留着只会让人以为还有那页
+            self.cfg.pop("rgba", None)
+        self._migrate_env_on(saved)
         # 导航结构以整块为准（用户可能重排过），但结构换代要按新默认表重排一次
         if int(saved.get("nav_ver") or 1) < NAV_VER and self._restructure_nav():
             self.cfg["nav_ver"] = NAV_VER
             self._save_cfg()
         self._repair_nav()
+
+    # ------------------------------------------------------------ 环境开关
+    def _migrate_env_on(self, saved):
+        """把旧的三态 console_mode 换成按环境逐个开的 env_on，并把默认值落实。
+
+        console_mode 表达不了「生图两路都要、但视频先关着」，而且它只管显示不管体检：
+        界面收走了功能页，环境页照旧提醒「还差 41 GB」——用户要的开关是「关掉就当它不存在」。
+        这里只在配置里从没写过 env_on 时按老值推一次，之后 env_on 就是唯一真源。
+        """
+        mode = str(self.cfg.pop("console_mode", "") or "")
+        raw = self.cfg.get("env_on")
+        if not isinstance(raw, dict):
+            raw = {}
+        on = dict(raw)
+        if not on:
+            want = {"both": ("qwen", "moss"), "qwen": ("qwen",), "moss": ("moss",)}.get(mode)
+            if want is not None:
+                for eid in ("qwen", "moss"):
+                    on[eid] = eid in want
+            # 开关表换代：老配置里那三种模式答不了新的欢迎页（三路各一颗开关），
+            # 把这一屏放回来问一次——老配置里 welcomed 早就为真，不重置就永远看不到。
+            self.cfg["welcomed"] = False
+        self.cfg["env_on"] = self._env_defaults(on)
+
+    def _env_defaults(self, on=None):
+        """开关表的完整形态：清单里每个环境一行，缺的按「必选=开 / 可选=装过才开」补。
+
+        落实成具体的 true/false 写回配置，是为了让 _snap 每 0.8 秒带出去时不必再碰盘，
+        也让 config.json 打开就能看懂自己开着哪几路。
+        """
+        on = dict(on or {})
+        try:
+            from envkit import spec as sp
+            spec = self._spec()
+        except Exception:
+            return on
+        for e in spec.get("envs") or []:
+            eid = e["id"]
+            if eid in on:
+                on[eid] = bool(on[eid])
+                continue
+            default = not e.get("optional")
+            if e.get("optional"):
+                try:
+                    default = sp.env_installed(ROOT, spec, eid)
+                except Exception:
+                    default = False
+            on[eid] = bool(default)
+        return on
+
+    def _env_on(self):
+        """当前开着的环境表（含 base 恒开）。配置里多出清单没有的 id 会被忽略。"""
+        out = {"base": True}
+        out.update({str(k): bool(v) for k, v in (self.cfg.get("env_on") or {}).items()})
+        return out
+
+    def _sync_env_on(self):
+        """把开关表刷进状态：_snap 每 0.8 秒原样带出去，不在这条路上现算。
+
+        只在配置真的改动时调（启动落实默认值、开关按下去、体检跑完）；
+        表整体换成一个新 dict，绝不原地改，快照那份共享引用才不会被后续改动带跑。
+        """
+        self.st["env_on"] = self._env_on()
+
+    # ------------------------------------------------------------ 环境目录
+    def _spec(self):
+        if self._env_spec is None:
+            from envkit import spec as sp
+            self._env_spec = sp.load_spec(ROOT)
+        return self._env_spec
+
+    def _prepare_envs(self):
+        """启动时把环境目录理顺：旧布局迁到 envs/、配置里的旧路径换新、权重目录写进 ComfyUI。
+
+        全是幂等操作（目标在就跳过），只做几次 listdir，不碰权重内容。
+        放在窗口起来之前：ComfyUI 起子进程时就要读 extra_model_paths.yaml。
+        """
+        try:
+            from envkit import spec as sp
+            spec = self._spec()
+            for e in spec.get("envs") or []:
+                os.makedirs(sp.env_models_dir(ROOT, spec, e["id"]), exist_ok=True)
+            acts = sp.migrate_layout(ROOT, spec=spec)
+            if acts:
+                self._log("📦 环境目录已整理：%d 项（详情见启动日志）" % len(acts))
+            before = json.dumps(self.cfg.get("console") or {}, sort_keys=True)
+            sp.migrate_cfg_paths(ROOT, self.cfg)
+            if json.dumps(self.cfg.get("console") or {}, sort_keys=True) != before:
+                self._save_cfg()
+            if os.path.isdir(sp.runtime_dir(ROOT, spec)):
+                sp.write_extra_model_paths(ROOT, spec)
+        except Exception as e:
+            self._log("⚠️ 环境目录没理好：%s" % e)
 
     @staticmethod
     def _nav_ids(nodes):
@@ -485,6 +643,7 @@ class App(WindowCtl):
 
     def _snap(self):
         s = dict(self.st)      # st 里全是标量，浅拷贝就够；每 0.8 秒一轮，别拿 json 来回序列化
+        s["dl"] = dict(self.st.get("dl") or {})   # 下载进度是 dict，浅拷贝后再给出去
         eng = str(self.cfg.get("engine", "qwen"))
         s["engine"] = eng
         s["moss_tier"] = str((self.cfg.get("moss") or {}).get("tier", "daily"))
@@ -655,6 +814,12 @@ class App(WindowCtl):
                 self.moss.stop(wait=4.0)   # 关掉内嵌 ComfyUI 子进程，别留孤儿进程占显存
             except Exception:
                 pass
+        if self._cloudx is not None:
+            try:
+                self._cloudx["keep"].stop()
+                self._cloudx["host"].close()   # 共用调试浏览器是我们拉起的，退出时一起收
+            except Exception:
+                pass
         self._save_cfg()
         return None
 
@@ -704,6 +869,19 @@ class App(WindowCtl):
                 extra_args=list((self.cfg.get("moss") or {}).get("extra_args") or []),
                 log=self._log)
         return self.moss
+
+    def _engine_gate(self, eng):
+        """这一路的环境关着就不许跑：返回给人的话要说清去哪儿开。
+
+        前端本来就不会把关掉的功能页画出来，这里管的是漏网的那两条路——
+        API 服务还认得 engine 参数，老标签页绑定了被收起的功能页也点得到。
+        """
+        on = self._env_on()
+        if eng == "qwen" and on.get("qwen") is False:
+            return "千问环境已关闭 · 到「环境 → 千问」那页开启"
+        if eng == "moss" and (on.get("moss") is False and on.get("h3") is False):
+            return "Moss 环境已关闭 · 到「环境 → Moss」那页开启"
+        return ""
 
     def _ensure_engine(self, name):
         """把常驻显存的引擎切到 name：切走的那个先释放显存，保证同一时间只激活一个。"""
@@ -806,7 +984,11 @@ class App(WindowCtl):
 
     def start_gen(self, payload=None):
         payload = payload or {}
-        if str(payload.get("engine") or "") == "moss":
+        eng = "moss" if str(payload.get("engine") or "") == "moss" else "qwen"
+        gate = self._engine_gate(eng)
+        if gate:
+            return {"ok": False, "msg": gate}
+        if eng == "moss":
             return self._start_moss_gen(payload)
         g = dict(self.cfg.get("gen") or {})
         g.update(payload or {})
@@ -974,6 +1156,8 @@ class App(WindowCtl):
         self.st["status"] = "停止中…"
         if self.st["running"] == "load":
             self._log("⏹ 已请求停止：模型载入是一次性动作，完成后将不再开始生成")
+        elif self._cloud_gen.is_set():
+            self._log("⏹ 已请求停止：这边不再等了，平台上那半截可能还在跑")
         else:
             self._log("⏹ 已请求停止：等当前这一步去噪完成后中断")
         return {"ok": True}
@@ -990,6 +1174,9 @@ class App(WindowCtl):
         按钮点下去什么都没发生、灯也一直灭着——现在同值也要把引擎补起来（幂等）。
         """
         name = "moss" if str(name) == "moss" else "qwen"
+        gate = self._engine_gate(name)
+        if gate:
+            return {"ok": False, "msg": gate}
         same = name == str(self.cfg.get("engine", "qwen"))
         if name == "moss":
             running = bool(self.moss and self.moss.alive())
@@ -1109,7 +1296,7 @@ class App(WindowCtl):
             self._log("Moss 引擎未运行：先拉起 ComfyUI，随后自动开始生成")
         return {"ok": True, "total": params["steps"]}
 
-    def _do_moss_load(self, chain_gen=None):
+    def _do_moss_load(self, chain_gen=None, chain_fn=None, label="Moss"):
         try:
             self._ensure_engine("moss")
             tier = str((self.cfg.get("moss") or {}).get("tier", "daily"))
@@ -1118,12 +1305,13 @@ class App(WindowCtl):
             self._get_moss().start(tier=tier, should_stop=self._stop.is_set)
             self._report_load(100, "已就绪")
             self.st["model_loaded"] = True
-            self.st["status"] = "Moss 就绪"
-            self._log("✅ Moss 引擎已就绪")
+            # 状态行是全局一份：从视频页拉起时也写「Moss 就绪」会让人以为在跑生图
+            self.st["status"] = "%s 就绪" % label
+            self._log("✅ %s 引擎已就绪" % label)
             if not chain_gen:
                 # 没接着出图才预热：要出图的话第一张本身就会把权重搬上卡，再插一个小图纯属抢队列
                 self._warm_moss_async()
-            if self._chain_gen(chain_gen, self._do_moss_gen, "启动"):
+            if self._chain_gen(chain_gen, chain_fn or self._do_moss_gen, "启动"):
                 return
         except Exception as e:
             self._log("❌ Moss 引擎启动失败：%s" % e)
@@ -1212,6 +1400,597 @@ class App(WindowCtl):
             self.st["status"] = "Moss 生成失败"
         finally:
             self._release()
+
+    # ------------------------------------------------------------ js_api：本地 H3 视频
+    H3_STEPS = 4          # 出厂权重里那条 4 步 Turbo LoRA：步数不是越多越好，多走会糊
+    H3_FPS = 24           # 模型按 24fps 训练，帧数网格 17k+5（124 帧 ≈ 5 秒）
+    H3_RATIOS = {"16:9": (16, 9), "9:16": (9, 16), "1:1": (1, 1),
+                 "4:3": (4, 3), "3:4": (3, 4), "21:9": (21, 9)}
+    # 原生画布是 1344×768（768P / 16:9），竖屏镜像 768×1344；
+    # 按 16 取整会算成 1360×768，所以这一档钉死成模板里的数
+    H3_NATIVE = {("768", "16:9"): (1344, 768), ("768", "9:16"): (768, 1344)}
+    # 短边上限分两路：本地停在 2048（12G 卡 + 768P 权重就是天花板），
+    # 云端放到 2560——官方 2K 就是短边 1440（2560×1440），往上没有档了。
+    H3_HI_LOCAL = 2048
+    H3_HI_CLOUD = 2560
+    H3_HI_MAX = 8192    # 换算阶段的防呆上限：通道上限留给 _h3_size 按比例缩，别在这儿单钳一边
+    TRASH_KEEP = 20       # 撤销栈最多留 20 条：再多就成回收站了，不是「防误删」
+    TRASH_DAYS = 3        # 重启后清掉超过 3 天的旧条目（撤销只活在这一次运行里）
+
+    def _h3_frames(self, seconds):
+        """秒数 → 模型认的帧数：向上贴到 17k+5 网格（照搬官方模板那颗数学节点）。
+
+        随手填 120 会落在网格外，采样出来时长不对；网格是训进去的，不是格式要求。
+        """
+        n = max(5, int(round(float(seconds or 5) * self.H3_FPS)))
+        return n + (5 - (n % 17)) % 17
+
+    def _h3_native(self, w, h):
+        """768P 的 16:9 原生画幅是 1344×768：按 16 取整会算成 1360，这一档贴回原生。
+
+        只认「短边正好是原生档的 P 数、长宽比也贴着原生」的尺寸；
+        用户自己填的 1400×768 不在这条线上，原样给他，别替人改画幅。
+        """
+        short, long_ = (h, w) if h < w else (w, h)
+        for (tier, _ratio), (nw, nh) in self.H3_NATIVE.items():
+            if int(tier) != short:
+                continue
+            want = float(max(nw, nh)) / float(min(nw, nh))
+            if abs(float(long_) / float(short) - want) < 0.03:
+                return (nw, nh) if nw >= nh else (nh, nw)
+        return w, h
+
+    def _h3_size(self, v, hi=None):
+        """清晰度（短边）× 画幅 → 宽高，两边各贴 16 的倍数、上限按通道给（hi）。
+
+        节点 latent 按 16 切，所以 720 这种不是 32 倍数的短边也能跑（云端 432×768 同理）；
+        反过来按 32 取整会把 720P 打成 704P，档位名就对不上了。
+        本地停在 2048（12G 卡 + 768P 权重就是天花板），云端放到 2560——
+        那是官方 2K 的长边（2K＝短边 1440），再往上平台没有档。
+        """
+        hi = hi or self.H3_HI_LOCAL
+        w, h = self._h3_size_raw(v)
+        long_ = max(w, h)
+        if long_ > hi:
+            # 只钳长边会把 16:9 钳成 2048×1440：画幅歪了，界面上写的数也和出片对不上
+            k = float(hi) / long_
+            w, h = self._h3_native(_snap16(w * k, hi=hi), _snap16(h * k, hi=hi))
+        return (w, h)
+
+    def _h3_size_raw(self, v):
+        """三处入口按优先级排：自定义宽高 → size 串（界面这一路只落 size，它才是最新的）
+        → 档位+画幅（历史配置与自测用例）。
+        顺序反过来的话，界面把 size 改成 1280×720 而 tier 还留着 768，出片就成了上一档的尺寸。
+        这里只贴 16 的倍数、不夹通道上限：夹在单边上会把画幅钳歪，缩放交给 _h3_size。
+        """
+        cap = self.H3_HI_MAX
+        a16 = lambda x: _snap16(x, hi=cap)
+        tier = _to_int(v.get("tier"), 0, 0, cap)
+        ratio = str(v.get("ratio") or "")
+        size = str(v.get("size") or "").strip().lower()
+        if size == "custom" or str(v.get("tier") or "").strip().lower() == "custom":
+            return self._h3_native(a16(_to_int(v.get("cw"), 1344, 16, cap)),
+                                   a16(_to_int(v.get("ch"), 768, 16, cap)))
+        wh = size.split("x")
+        if len(wh) == 2 and wh[0].isdigit() and wh[1].isdigit():
+            return self._h3_native(a16(int(wh[0])), a16(int(wh[1])))
+        native = self.H3_NATIVE.get((str(tier), ratio))
+        if native:
+            return native
+        if tier and ratio in self.H3_RATIOS:
+            aw, ah = self.H3_RATIOS[ratio]
+            # 「P」数指短边：横屏短边是高，竖屏短边是宽（720P = 1280×720 / 720×1280）
+            if aw >= ah:
+                h, w = float(tier), tier * aw / float(ah)
+            else:
+                w, h = float(tier), tier * ah / float(aw)
+            return self._h3_native(a16(w), a16(h))
+        # 三处都没给数：用自定义宽高兜底，缺啥按原生 1344×768
+        return self._h3_native(a16(_to_int(v.get("cw"), 1344, 16, cap)),
+                               a16(_to_int(v.get("ch"), 768, 16, cap)))
+
+    def _video_params(self, v):
+        """界面那几样（描述语 / 清晰度×画幅 / 秒数）折成一份 H3 工作流的参数。
+
+        首帧是可选的：给了就是首帧生视频，没给同一份模板走文生视频。
+        """
+        w, h = self._h3_size(v)
+        return {
+            "template": "workflow_h3.json",
+            "prompt": str(v.get("prompt", "")),
+            "negative": "",             # BasicGuider 没有 cfg 输入＝恒定 1，负向条件白跑一遍文本编码器
+            "width": w,
+            "height": h,
+            "length": self._h3_frames(v.get("seconds")),
+            "fps": float(self.H3_FPS),
+            "steps": self.H3_STEPS,
+            "cfg": 1.0,
+            "batch": 1,
+            "seed": 0,
+            "first_image": "",
+        }
+
+    def video_gen(self, payload=None):
+        """点「开始」：按通道选本地或云端，两条路出一样的片子、进同一个画廊。"""
+        v = dict(self.cfg.get("video") or {})
+        v.update(payload or {})
+        if not str(v.get("prompt", "")).strip():
+            return {"ok": False, "msg": "先写一句想要什么画面"}
+        # 云端不碰本机权重与 ComfyUI，所以 h3 那个开关管不到它：只管本地那一路
+        if str(v.get("exec") or "local") == "cloud":
+            return self._video_cloud(v)
+        if not self._env_on().get("h3"):
+            return {"ok": False, "msg": "H3 环境已关闭 · 到「环境 → H3」那页开启"}
+        p = self._video_params(v)
+        self.st["total"] = p["steps"]
+        need_start = not (self.moss is not None and self.moss.alive())
+        launch = ((lambda: self._do_moss_load(chain_gen=v, chain_fn=self._do_video_gen,
+                                              label="H3"))
+                  if need_start else (lambda: self._do_video_gen(v)))
+        if not self._launch("load" if need_start else "video", launch):
+            return {"ok": False, "msg": self._busy_msg()}
+        if need_start:
+            self._log("H3 引擎未运行：先拉起 ComfyUI，随后自动开始出片")
+        return {"ok": True, "total": p["steps"], "frames": p["length"]}
+
+    def _video_cloud(self, v):
+        """云端通道：不碰显存、不拉 ComfyUI，代价是要开浏览器、按平台计费。
+
+        这里先把「跑不动」的话说完再占任务位：账号没登录、缺 DrissionPage、
+        没工作流这三种情况各是一句话，让人知道差哪一步，而不是点了没反应。
+        """
+        g = self._cloud_h3()
+        if not self._dp_ready():
+            return {"ok": False, "msg": "云端要浏览器：到「环境 → 基础」补齐 DrissionPage 后重开软件"}
+        if self._cloud_gen.is_set():
+            return {"ok": False, "msg": "云端正有一段在跑：等它出片或先点停止"}
+        try:
+            row = g.account(str(v.get("cloud_acct") or ""))
+        except Exception as e:
+            return {"ok": False, "msg": "云端还没备好：%s" % e}
+        try:
+            kind, src = g.wf_src(str(v.get("cloud_wf") or ""))
+            wf = g.host_url() if kind == "file" else g.wf_url(src)
+        except Exception as e:
+            return {"ok": False, "msg": "%s" % e}
+        if not self._launch("video", lambda: self._do_video_cloud(v)):
+            return {"ok": False, "msg": self._busy_msg()}
+        w, h = self._h3_size(v, hi=self.H3_HI_CLOUD)
+        self._log("☁️ 云端出片：%ds · %dx%d · 号「%s」· %s（要开浏览器，按平台计费）"
+                  % (_to_int(v.get("seconds"), 5, 5, 15), w, h, row["name"],
+                     ("本地 · " + os.path.basename(src)) if kind == "file" else wf))
+        return {"ok": True, "total": 1, "exec": "cloud", "acct": row["name"]}
+
+    def _do_video_cloud(self, v):
+        self.st["running"] = "video"
+        self.st["video_exec"] = "cloud"
+        self.st["done"] = 0
+        self.st["total"] = 1
+        self.st["status"] = "云端准备中…"
+        self._cloud_gen.set()
+        t0 = time.time()
+        try:
+            w, h = self._h3_size(v, hi=self.H3_HI_CLOUD)
+            out_dir = _abs_path(self.cfg["console"]["output_dir"])
+            p = {"prompt": str(v.get("prompt") or ""),
+                 "seconds": _to_int(v.get("seconds"), 5, 5, 15),
+                 "width": w, "height": h,
+                 "first": self._ref_path(v.get("first") or ""),
+                 "acct": str(v.get("cloud_acct") or ""),
+                 "wf": str(v.get("cloud_wf") or ""),
+                 "out_dir": out_dir}
+            if (v.get("first") and not p["first"]):
+                # 和那条「静默变成文生视频」的旧坑同一个道理：说破，别让人以为参考图进去了
+                self._log("⚠️ 参考图不在了：%s · 这一段只按文字出片"
+                          % os.path.basename(str(v.get("first"))))
+            path = self._cloud_h3().run(p, on_progress=self._cloud_step,
+                                        should_stop=self._stop.is_set)
+            if self._stop.is_set():
+                self.st["status"] = "已停止"
+                return
+            self._publish(path, mode="h3", params=v, size="%dx%d" % (w, h),
+                          steps=self.H3_STEPS, seed=-1,
+                          sec=round(time.time() - t0, 1),
+                          name=os.path.basename(path))
+            self.st["done"] = 1
+            self.st["status"] = "✅ 完成"
+            self._log("── 结束 ──")
+        except Exception as e:
+            self.st["last_fail"] = str(e)
+            if self._stop.is_set():
+                self._log("⏹ 已停止：云端那半段可能还在平台上跑，去 H3云端 看一眼")
+                self.st["status"] = "已停止"
+            else:
+                self._log("❌ 云端出片失败：%s" % e)
+                self.st["status"] = "出片失败"
+        finally:
+            self._cloud_gen.clear()
+            self._release()
+
+    def _cloud_step(self, msg):
+        """云端只有一条「等多久」的路可报：没有步数刻度，就把实话写在状态行上。"""
+        if not self._stop.is_set():
+            self.st["status"] = str(msg or "云端出片中…")[:120]
+
+
+    def _do_video_gen(self, v):
+        self.st["running"] = "video"
+        self.st["video_exec"] = "local"
+        self.st["done"] = 0
+        self.st["status"] = "出片准备…"
+        v = v or {}
+        v.setdefault("_saved", [])
+        try:
+            self._ensure_engine("moss")
+            mgr = self._get_moss()
+            if not mgr.alive():
+                mgr.start(tier=str((self.cfg.get("moss") or {}).get("tier", "daily")),
+                          should_stop=self._stop.is_set)
+            params = self._video_params(v)
+            first = self._ref_path(v.get("first") or "")
+            if first:
+                params["first_image"] = mgr.upload_image(first)
+            out_dir = _abs_path(self.cfg["console"]["output_dir"])
+            os.makedirs(out_dir, exist_ok=True)
+            base = _to_int(v.get("seed"), -1, -1, 10 ** 12)
+            seed = _rand_seed() if base < 0 else base
+            params["seed"] = seed
+            self._log("🎬 开始出片：%ds（%d 帧）· %dx%d · %d 步 · %s%s"
+                      % (round(params["length"] / float(self.H3_FPS), 1), params["length"],
+                         params["width"], params["height"], params["steps"],
+                         "随机种子" if base < 0 else "种子 %d" % seed,
+                         " · 首帧 " + os.path.basename(first) if first else ""))
+            self.st["status"] = "采样中…"
+            t0 = time.time()
+            paths = mgr.generate(params,
+                                 on_progress=lambda d, t: self._report_step(d, t),
+                                 should_stop=self._stop.is_set,
+                                 out_dir=out_dir, out_prefix="h3")
+            if self._stop.is_set():
+                self._log("⏹ 已停止：这一段的半成品不落盘")
+                self.st["status"] = "已停止"
+                return
+            if not paths:
+                self.st["last_fail"] = "工作流跑完但没取回片子"
+                self.st["status"] = "没出片"
+                return
+            for path in paths:
+                self._publish(path, mode="h3", params=v,
+                              size="%dx%d" % (params["width"], params["height"]),
+                              steps=params["steps"], seed=seed,
+                              sec=round(time.time() - t0, 1),
+                              name=os.path.basename(path))
+            self.st["status"] = "✅ 完成"
+            self._log("── 结束 ──")
+        except Exception as e:
+            self.st["last_fail"] = str(e)
+            self._log("❌ 出片失败：%s" % e)
+            self.st["status"] = "出片失败"
+        finally:
+            self._release()
+
+    # ------------------------------------------------------------ js_api：云端账号
+    # 一只调试浏览器 + 多份登录态快照：换号只换 cookies/localStorage，不重启进程。
+    # 浏览器只在登录/保活时起；启动路径不 import DrissionPage（与不 import torch 同理）。
+    def _cloudkit(self):
+        # pywebview 每个 js_api 调用各起一个线程：冷启动时两个云端入口撞在一起，
+        # 没锁就会各建一套 store/host/keep，最后赋值盖掉，留下一条没人管的保活线程和一个浏览器
+        with self._cloud_lock:
+            if self._cloudx is None:
+                from cloudkit import browser as cb
+                from cloudkit import store as cs
+                cfg = self.cfg.setdefault("cloud", {})
+                store = cs.AccountStore(ROOT)
+                host = cb.BrowserHost(ROOT, cfg, log=self._log)
+                keep = cb.KeepAlive(host, store, cfg, log=self._log,
+                                    busy=lambda: bool(self.st.get("cloud_busy"))
+                                    or self._cloud_gen.is_set())
+                self._cloudx = {"store": store, "host": host, "keep": keep}
+                keep.start()   # 只等定时器；浏览器没开不会自己拉起
+            return self._cloudx
+
+    def _dp_ready(self):
+        try:
+            import importlib.util
+            return importlib.util.find_spec("DrissionPage") is not None
+        except (ImportError, ValueError):
+            return False
+
+    def _cloud_h3(self):
+        """云端出片那条线：账号库、共用浏览器、执行器都从 _cloudkit 那份取。"""
+        with self._cloud_lock:      # 与 _cloudkit 同一条：两个线程同时点开始不能各建一台
+            if self._h3cloud is None:
+                from cloudkit import gen as cg
+                h = self._cloudkit()
+                self._h3cloud = cg.CloudH3(ROOT, self.cfg.setdefault("cloud", {}),
+                                           h["store"], h["host"], log=self._log)
+            return self._h3cloud
+
+    def cloud_brief(self):
+        """视频页那格「云端」要用的一句话实话：有没有号、有没有 DrissionPage、用的哪份工作流。
+
+        只读档案，不起浏览器、不碰保活——在视频页看一眼通道不该顺手开出一个窗口。
+        """
+        c = self.cfg.setdefault("cloud", {})
+        out = {"dp": self._dp_ready(), "accts": [], "wf": str(c.get("workflow") or ""),
+               "busy": bool(self._cloud_gen.is_set())}
+        try:
+            from cloudkit import store as cs
+            st = cs.AccountStore(ROOT)
+            for a in st.list():
+                snap = st.load(a["id"]) or {}
+                if snap.get("cookies"):
+                    out["accts"].append({"id": a["id"], "name": a["name"]})
+        except Exception:
+            pass
+        out["ready"] = bool(out["dp"] and out["accts"])
+        return out
+
+    def cloud_state(self):
+        """给界面的账号表 + 浏览器/保活状态。不含任何凭据。"""
+        c = self.cfg.get("cloud") or {}
+        if self._cloudx is None and not self._dp_ready():
+            # 缺浏览器依赖也把档案列出来：名字和备份是本地数据，不该跟着一起消失
+            try:
+                from cloudkit import store as cs
+                accounts = cs.AccountStore(ROOT).list()
+            except Exception:
+                accounts = []
+            return {"ok": True, "dp": False, "accounts": accounts,
+                    "browser": {"on": False, "port": int(c.get("port") or 9333),
+                                "base": str(c.get("base") or ""), "account": ""},
+                    "busy": self.st.get("cloud_busy", ""),
+                    "msg": "缺 DrissionPage：到「环境 → 基础」补齐后重开这页",
+                    "keep": {"on": bool(c.get("keep", True)),
+                             "min": int(c.get("keep_min") or 30),
+                             "last": 0, "msg": "还没跑过"},
+                    "concurrency": 1, "page": str(c.get("base") or "")}
+        h = self._cloudkit()
+        keep = h["keep"]
+        return {
+            "ok": True, "dp": True,
+            "accounts": h["store"].list(),
+            "browser": {"on": h["host"].alive(), "port": h["host"].port,
+                        "base": h["host"].base, "account": h["host"].current},
+            "busy": self.st.get("cloud_busy", ""),
+            "msg": self.st.get("cloud_msg", ""),
+            "keep": {"on": bool((self.cfg.get("cloud") or {}).get("keep", True)),
+                     "min": int((self.cfg.get("cloud") or {}).get("keep_min") or 30),
+                     "last": int(keep.last), "msg": keep.last_msg,
+                     # 这只窗口现在被谁占着：''=空闲（保活能跑）/ login / gen / hold
+                     "purpose": str(h["host"].purpose or "")},
+            "concurrency": 1, "page": h["host"].base,
+        }
+
+    def _cloud_run(self, label, fn):
+        """浏览器操作一律进后台：pywebview 在 UI 线程派发 js_api，
+        起浏览器/加载页面动辄几秒，同步等会把消息泵饿死（界面先卡住）。"""
+        if self._cloud_gen.is_set():
+            # 云端出片那段占着同一只浏览器：这时候换号等于把正在跑的号顶掉
+            return False, "云端出片正占用浏览器：先等这一段跑完"
+        with self._cloud_lock:
+            if self.st.get("cloud_busy"):
+                return False, "H3云端正忙：%s" % self.st["cloud_busy"]
+            self.st["cloud_busy"] = label
+            self.st["cloud_msg"] = ""
+
+        def run():
+            try:
+                fn()
+            except Exception as e:
+                from cloudkit.store import brief_error
+                # 第三方库的报错常把它正在处理的值原样打回来（设 cookie 失败就是）：
+                # 这一句要进界面、日志、账号索引，先抹一遍再落地
+                msg = brief_error(e)
+                self.st["cloud_msg"] = msg
+                self._log("❌ H3云端：%s" % msg)
+            finally:
+                with self._cloud_lock:
+                    self.st["cloud_busy"] = ""
+        threading.Thread(target=run, daemon=True, name="cloud-" + label).start()
+        return True, ""
+
+    def _cloud_acct(self, aid):
+        h = self._cloudkit()
+        row = h["store"].get(aid)
+        return h, row
+
+    def cloud_new(self, name=""):
+        """新建一个登录档案：起共用浏览器，停在登录页；用户登好回来点「保存」。"""
+        if not self._dp_ready():
+            return {"ok": False, "msg": "缺 DrissionPage：到「环境 → 基础」补齐后重开这页",
+                    "state": self.cloud_state()}
+        h = self._cloudkit()
+        row = h["store"].create(name)
+        aid = row["id"]
+        h["store"].mark(aid, "pending", "等待登录")
+        # 新建档案要一块干净的登录页：共用浏览器里可能还留着上一个号的 cookie，
+        # 不清掉的话「新建登录」会直接看到旧号——保存下来就是重复的一份
+        ok, msg = self._cloud_run("打开登录页", lambda: h["host"].open_login({}, aid=aid))
+        if ok:
+            self._log("☁️ 新建登录：%s（在浏览器里登录后点「保存」）" % row["name"])
+        return {"ok": ok, "msg": msg, "account": row, "state": self.cloud_state()}
+
+    def cloud_login(self, aid=""):
+        h, row = self._cloud_acct(aid)
+        if not row:
+            return {"ok": False, "msg": "账号不存在"}
+        state = h["store"].load(aid)
+        h["store"].mark(aid, "pending", "等待登录")
+
+        def job():
+            h["host"].open_login(state, aid=aid)
+            self.st["cloud_msg"] = "登录完点「保存」；以后换号不用再登"
+        ok, msg = self._cloud_run("打开登录页", job)
+        return {"ok": ok, "msg": msg}
+
+    def cloud_save(self, aid="", name=""):
+        """把浏览器里当前的登录态存成这个账号的一份新快照（旧快照保留为备份）。"""
+        h, row = self._cloud_acct(aid)
+        if not row:
+            return {"ok": False, "msg": "账号不存在"}
+
+        def job():
+            from cloudkit.browser import login_state
+            # 整段一次取锁：读快照和判登录态必须是同一个号的同一次状态，
+            # 分两次取锁的话中间正好能插进一次保活换号
+            with h["host"].lock:
+                snap = h["host"].snapshot()
+                if not snap.get("cookies"):
+                    raise RuntimeError("没读到登录态：先在浏览器里登录，再点保存")
+                ts = h["store"].save(aid, snap["cookies"], snap["storage"], snap["url"])
+                st, detail = login_state(h["host"].tab())
+                h["store"].mark(aid, st, detail)
+                h["host"].purpose = ""   # 登录流程收尾，保活可以接着轮换
+            if name:
+                h["store"].rename(aid, name)
+            n = len(h["store"].backups(aid))
+            self.st["cloud_msg"] = "已保存 %s · 共 %d 份备份" % (row["name"], n)
+            self._log("☁️ 登录态已保存：%s（%d 份）" % (row["name"], n))
+            return ts
+        ok, msg = self._cloud_run("保存登录态", job)
+        return {"ok": ok, "msg": msg}
+
+    def cloud_apply(self, aid=""):
+        """用这个账号打开平台：换 cookie 后刷一次页面，人眼看得到是谁的号。"""
+        h, row = self._cloud_acct(aid)
+        if not row:
+            return {"ok": False, "msg": "账号不存在"}
+        state = h["store"].load(aid)
+        if not state or not state.get("cookies"):
+            return {"ok": False, "msg": "这个号还没保存登录态"}
+        ok, msg = self._cloud_run("切换账号", lambda: h["host"].open_base(state, aid=aid, hold=True))
+        if ok:
+            self._log("☁️ 切换到账号：%s" % row["name"])
+        return {"ok": ok, "msg": msg}
+
+    def cloud_check(self, aid=""):
+        h, row = self._cloud_acct(aid)
+        if not row:
+            return {"ok": False, "msg": "账号不存在"}
+
+        def job():
+            from cloudkit.browser import cookie_fp, login_state, snapshot_state
+            state = h["store"].load(aid)
+            with h["host"].lock:
+                # hold=True：这一段里保活不许插进来换号，否则检查的是别人的会话、
+                # 结论却记在这个号头上
+                h["host"].open_base(state, aid=aid, hold=True)
+                tab = h["host"].tab()
+                st, detail = login_state(tab)
+                snap = snapshot_state(tab, h["host"].domains)
+                h["host"].purpose = ""
+            # 没变就不写：反复点「检查」不该把 12 份备份挤成同一分钟的 12 份
+            if snap.get("cookies") and cookie_fp(snap["cookies"]) != cookie_fp((state or {}).get("cookies")):
+                h["store"].save(aid, snap["cookies"], snap["storage"], snap["url"])
+            h["store"].mark(aid, st, detail)
+            self.st["cloud_msg"] = "%s：%s" % (row["name"], detail)
+        ok, msg = self._cloud_run("检查登录", job)
+        return {"ok": ok, "msg": msg}
+
+    def cloud_delete(self, aid=""):
+        h, row = self._cloud_acct(aid)
+        if not row:
+            return {"ok": False, "msg": "账号不存在"}
+        if h["host"].current == aid:
+            h["host"].current = ""
+        h["store"].delete(aid)
+        self._log("☁️ 已删除账号：%s" % row["name"])
+        return {"ok": True, "state": self.cloud_state()}
+
+    def cloud_rename(self, aid="", name=""):
+        h, row = self._cloud_acct(aid)
+        if not row:
+            return {"ok": False, "msg": "账号不存在"}
+        if not h["store"].rename(aid, name):
+            return {"ok": False, "msg": "名字不能为空"}
+        return {"ok": True, "state": self.cloud_state()}
+
+    def cloud_backups(self, aid=""):
+        h, row = self._cloud_acct(aid)
+        if not row:
+            return {"ok": False, "msg": "账号不存在", "spots": []}
+        rows = []
+        for ts in h["store"].backups(aid):
+            try:
+                t = time.strptime(ts[:15], "%Y%m%d-%H%M%S")
+                label = time.strftime("%m-%d %H:%M", t)
+            except ValueError:
+                label = ts
+            rows.append({"ts": ts, "label": label})
+        return {"ok": True, "spots": rows, "name": row["name"]}
+
+    def cloud_restore(self, aid="", ts=""):
+        """回到某份备份：复制成最新一份再灌进浏览器，历史备份一份不删。"""
+        h, row = self._cloud_acct(aid)
+        if not row:
+            return {"ok": False, "msg": "账号不存在"}
+        state = h["store"].load(aid, ts)
+        if not state:
+            return {"ok": False, "msg": "这份备份不存在或已被轮换掉"}
+        new_ts = h["store"].restore(aid, ts)
+        if not new_ts:
+            return {"ok": False, "msg": "恢复失败"}
+
+        def job():
+            h["store"].mark(aid, "saved", "从备份恢复")
+            h["host"].open_base(state, aid=aid)
+            self.st["cloud_msg"] = "%s 已恢复到 %s" % (row["name"], ts)
+        ok, msg = self._cloud_run("恢复备份", job)
+        return {"ok": ok, "msg": msg}
+
+    def cloud_key_set(self, aid="", key=""):
+        """API Key 每号一条：协议侧的正牌凭证。只落盘，不回显、不进日志。"""
+        h, row = self._cloud_acct(aid)
+        if not row:
+            return {"ok": False, "msg": "账号不存在"}
+        if not h["store"].set_key(aid, key):
+            return {"ok": False, "msg": "Key 不能为空"}
+        self._log("☁️ 已保存 API Key：%s" % row["name"])
+        return {"ok": True, "state": self.cloud_state()}
+
+    def cloud_key_clear(self, aid=""):
+        h, row = self._cloud_acct(aid)
+        if not row:
+            return {"ok": False, "msg": "账号不存在"}
+        h["store"].clear_key(aid)
+        return {"ok": True, "state": self.cloud_state()}
+
+    def cloud_keep_now(self):
+        if not self._dp_ready():
+            return {"ok": False, "msg": "缺 DrissionPage：到「环境 → 基础」补齐后重开这页"}
+        h = self._cloudkit()
+        if not h["host"].alive():
+            return {"ok": False, "msg": "浏览器还没开：先点「打开平台」"}
+        ok, msg = self._cloud_run("保活", lambda: h["keep"].sweep(force=True))
+        return {"ok": ok, "msg": msg}
+
+    def cloud_browser_start(self):
+        if not self._dp_ready():
+            return {"ok": False, "msg": "缺 DrissionPage：到「环境 → 基础」补齐后重开这页"}
+        h = self._cloudkit()
+
+        def job():
+            h["host"].browser()
+            self.st["cloud_msg"] = "浏览器已启动（共用调试端口 %d）" % h["host"].port
+        ok, msg = self._cloud_run("启动浏览器", job)
+        return {"ok": ok, "msg": msg}
+
+    def cloud_browser_stop(self):
+        h = self._cloudkit()
+
+        def job():
+            h["host"].close()
+            self.st["cloud_msg"] = "浏览器已关闭"
+        ok, msg = self._cloud_run("关闭浏览器", job)
+        return {"ok": ok, "msg": msg}
+
+    def cloud_auth_names(self, aid=""):
+        """登录态里取得到的 Rh-* 鉴权头名字（只报名字，不报值）。"""
+        h, row = self._cloud_acct(aid)
+        if not row:
+            return {"ok": False, "msg": "账号不存在", "names": []}
+        return {"ok": True, "names": sorted(h["host"].headers(h["store"].load(aid)))}
 
     # ------------------------------------------------------------ js_api：API 服务
     def api_state(self):
@@ -1329,7 +2108,7 @@ class App(WindowCtl):
             return []
         files = []
         for name in os.listdir(out_dir):
-            if name.lower().endswith(IMG_EXT):
+            if name.lower().endswith(MEDIA_EXT):
                 p = os.path.join(out_dir, name)
                 try:
                     files.append((os.path.getmtime(p), p))
@@ -1339,6 +2118,7 @@ class App(WindowCtl):
         items = []
         for mt, p in files[:limit]:
             items.append({"file": p, "name": os.path.basename(p),
+                          "video": p.lower().endswith(VIDEO_EXT),
                           "t": time.strftime("%Y-%m-%d %H:%M", time.localtime(mt))})
         return items
 
@@ -1390,14 +2170,92 @@ class App(WindowCtl):
         p = self._in_output(path)
         if not p:
             return {"ok": False, "msg": "这个文件不在输出目录里，不动它"}
+        meta = self.store.get(p)
         try:
-            os.remove(p)
-            self.store.remove(p)
-            self._log("已删除：" + os.path.basename(p))
-            self._refresh_gallery_count()
-            return {"ok": True}
+            dst = self._trash_move(p)
         except OSError as e:
-            return {"ok": False, "msg": str(e)}
+            return {"ok": False, "msg": "删不动：%s" % e}
+        self.store.remove(p)
+        with self._trash_lock:
+            self._trash.append({"trash": dst, "file": p, "meta": meta,
+                                "name": os.path.basename(p)})
+            while len(self._trash) > self.TRASH_KEEP:
+                old = self._trash.pop(0)
+                try:
+                    os.remove(old["trash"])
+                except OSError:
+                    pass
+        self._log("已删除：%s（可撤销）" % os.path.basename(p))
+        self._refresh_gallery_count()
+        return {"ok": True, "undo": True}
+
+    def gallery_undo(self):
+        """撤销最近一次删除：文件搬回原处，历史参数（含收藏位与时间）原样插回去。"""
+        with self._trash_lock:
+            if not self._trash:
+                return {"ok": False, "msg": "没有可撤销的删除"}
+            it = self._trash.pop()
+        src, dst = it["trash"], it["file"]
+        if not os.path.isfile(src):
+            return {"ok": False, "msg": "撤不回来了：回收站里那份已经不在了"}
+        if os.path.exists(dst):
+            with self._trash_lock:
+                self._trash.append(it)
+            return {"ok": False, "msg": "原位置已经有同名文件，先处理掉它再撤销"}
+        try:
+            os.makedirs(os.path.dirname(dst), exist_ok=True)
+            shutil.move(src, dst)
+        except OSError as e:
+            with self._trash_lock:
+                self._trash.append(it)
+            return {"ok": False, "msg": "恢复失败：%s" % e}
+        if it.get("meta"):
+            self.store.restore(it["meta"])
+        self._log("已撤销删除：%s" % it["name"])
+        self._refresh_gallery_count()
+        return {"ok": True, "file": dst, "name": it["name"]}
+
+    def _trash_move(self, path):
+        """原文件搬进回收站：不留在输出目录，但字节还在，撤销时搬回来即可。"""
+        os.makedirs(self._trash_dir, exist_ok=True)
+        stamp = int(time.time() * 1000)
+        dst = os.path.join(self._trash_dir, "%d_%s" % (stamp, os.path.basename(path)))
+        n = 1
+        while os.path.exists(dst):
+            dst = os.path.join(self._trash_dir,
+                               "%d_%d_%s" % (stamp, n, os.path.basename(path)))
+            n += 1
+        shutil.move(path, dst)
+        return dst
+
+    def _trash_purge(self):
+        """启动时清回收站：撤销只活在这一次运行里，超过保留期的旧文件直接删掉。"""
+        try:
+            names = os.listdir(self._trash_dir)
+        except OSError:
+            return
+        ttl = time.time() - self.TRASH_DAYS * 86400
+        for name in names:
+            head = name.split("_", 1)[0]
+            if head.isdigit() and int(head) / 1000.0 >= ttl:
+                continue
+            try:
+                os.remove(os.path.join(self._trash_dir, name))
+            except OSError:
+                pass
+
+    def _trash_empty(self):
+        with self._trash_lock:
+            self._trash.clear()
+        try:
+            names = os.listdir(self._trash_dir)
+        except OSError:
+            return
+        for name in names:
+            try:
+                os.remove(os.path.join(self._trash_dir, name))
+            except OSError:
+                pass
 
     def gallery_clear(self):
         out_dir = _abs_path(self.cfg["console"]["output_dir"])
@@ -1408,13 +2266,16 @@ class App(WindowCtl):
         gone, left = 0, set()
         for name in entries:
             p = os.path.join(out_dir, name)
-            if not name.lower().endswith(IMG_EXT) or not os.path.isfile(p):
+            if not name.lower().endswith(MEDIA_EXT) or not os.path.isfile(p):
                 continue
             try:
                 os.remove(p)     # 直接扫目录：走 _gallery_items 会给每张图现做缩略图，清空时白烧几十秒 CPU
                 gone += 1
             except OSError:
                 left.add(os.path.normpath(p))   # 删不掉的（正被占用）留在盘上，它的参数记录也得留着
+        # 「清空」按确认框说的不进回收站：之前攒下的撤销条目也一并清掉，
+        # 否则清完还能撤回来一张，跟用户刚确认的那句话对不上
+        self._trash_empty()
         msg = "已清空输出目录：%d 张" % gone
         if left:
             msg += "，%d 张正被占用没删掉" % len(left)
@@ -1424,17 +2285,23 @@ class App(WindowCtl):
         return {"ok": True, "removed": gone}
 
     def _in_output(self, path):
-        """删除类操作只认输出目录里的图片路径（防止被当成任意文件删除器）。"""
+        """删除类操作只认输出目录里的成片（图或片）· 防止被当成任意文件删除器。"""
         out_dir = os.path.normpath(_abs_path(self.cfg["console"]["output_dir"]))
         p = os.path.normpath(str(path or ""))
-        if p.lower().endswith(IMG_EXT) and os.path.dirname(p) == out_dir and os.path.isfile(p):
+        if p.lower().endswith(MEDIA_EXT) and os.path.dirname(p) == out_dir and os.path.isfile(p):
             return p
         return None
 
     def thumb(self, path, wide=768):
         p = os.path.normpath(str(path or ""))
-        if not (p.lower().endswith(IMG_EXT) and os.path.isfile(p)):
+        if not os.path.isfile(p):
             return {"ok": False, "msg": "图还没落盘"}
+        if p.lower().endswith(VIDEO_EXT):
+            # 视频不做缩略：解码一帧要引一个视频库，而画廊那张本来就该是「点了就播」。
+            # 界面拿这个标记画一张带片名的影片砖，点开交给系统播放器。
+            return {"ok": True, "video": True, "url": ""}
+        if not p.lower().endswith(IMG_EXT):
+            return {"ok": False, "msg": "不是图片也不是视频"}
         # 宽度来自界面（画廊网格要 384、单张预览要 768）：夹住，别让一个怪字符串
         # 把 PIL 拖去解码 8000px 的原图
         wide = _to_int(wide, 768, 64, 1536)
@@ -1446,7 +2313,8 @@ class App(WindowCtl):
         return bool(re.fullmatch(r"[A-Za-z0-9._-]+", str(name or "")))
 
     def models_list(self):
-        root = _abs_path("models")
+        from envkit import spec as sp
+        root = sp.env_models_dir(ROOT, self._spec(), "qwen")
         active = os.path.normpath(_abs_path(
             str((self.cfg["console"] or {}).get("model_dir", ""))))
         items = []
@@ -1474,76 +2342,83 @@ class App(WindowCtl):
         return {"ok": True, "items": items, "dir": root}
 
     def models_set_active(self, name):
+        from envkit import spec as sp
         if not self._safe_name(name):
             return {"ok": False, "msg": "模型目录名只能是字母数字点横线下划线"}
-        d = _abs_path(os.path.join("models", name))
+        root = sp.env_models_dir(ROOT, self._spec(), "qwen")
+        d = os.path.join(root, name)
         if not os.path.isdir(d):
             return {"ok": False, "msg": "这个目录不存在"}
-        self.cfg["console"]["model_dir"] = "models/" + name
+        self.cfg["console"]["model_dir"] = os.path.relpath(d, ROOT).replace("\\", "/")
         self._save_cfg()
         self._log("已切换激活模型：%s%s" % (name,
                   "（显存里还是旧模型：重新载入才生效）" if self.st["model_loaded"] else ""))
         return {"ok": True, "cfg": self.cfg}
 
-    def _model_dl(self, repo, name):
-        """同步下载（hf-mirror 断点续传，瞬断自动重连 20 次）；起不起线程由调用方决定。"""
-        target = _abs_path(os.path.join("models", name))
-        os.makedirs(target, exist_ok=True)
-
-        def dir_gb(p):
-            t = 0
-            for base, _dirs, fs in os.walk(p):
-                for f in fs:
-                    try:
-                        t += os.path.getsize(os.path.join(base, f))
-                    except OSError:
-                        pass
-            return t / 2**30
-
-        os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
-        import huggingface_hub
-        self._log("📥 开始下载 %s → models/%s（hf-mirror，断点续传）" % (repo, name))
-        t0 = time.time()
-        stop_watch = threading.Event()
-
-        def watch():
-            while not stop_watch.wait(60):
-                self._log("…下载中：models/%s 当前 %.1f GB" % (name, dir_gb(target)))
-        threading.Thread(target=watch, daemon=True).start()
-        done = False
+    def _dl_config(self):
         try:
-            for attempt in range(1, 21):
-                try:
-                    huggingface_hub.snapshot_download(
-                        repo_id=repo, local_dir=target, max_workers=4,
-                        etag_timeout=60)
-                    done = True
-                    break
-                except Exception as e:
-                    wait = min(5 * attempt, 30)
-                    self._log("⚠️ 第 %d 次中断：%s · %d 秒后从断点续传" % (attempt, e, wait))
-                    time.sleep(wait)
+            from envkit import spec as sp
+            return dict((sp.load_spec(ROOT).get("download") or {}))
+        except Exception:
+            return {}
+
+    def _dl_event(self, ev):
+        """envkit/download 的进度回调：worker 线程直接写 st，轮询下一跳就能看见。"""
+        self.st["dl"] = dict(ev or {})
+
+    def _model_dl(self, repo, name):
+        """同步下载：多镜像自动选路 + 断点续传（装了 Motrix 先交给它）；起不起线程由调用方定。"""
+        from envkit import download as hd
+        from envkit import spec as sp
+        target = os.path.join(sp.env_models_dir(ROOT, self._spec(), "qwen"), name)
+        os.makedirs(target, exist_ok=True)
+        cfg = self._dl_config()
+        rel = os.path.relpath(target, ROOT).replace("\\", "/")
+        self._log("📥 下载 %s → %s（自动选镜像 · %d 线程 · 断点续传）"
+                  % (repo, rel, int(cfg.get("jobs") or 8)))
+        try:
+            res = hd.download(
+                repo, target,
+                jobs=int(cfg.get("jobs") or 8),
+                chunk_mb=int(cfg.get("chunk_mb") or 64),
+                retries=int(cfg.get("retries") or 20),
+                timeout=int(cfg.get("timeout") or 60),
+                probe_timeout=int(cfg.get("probe_timeout") or 8),
+                endpoints=cfg.get("endpoints"), config=cfg,
+                on_progress=self._dl_event, on_log=self._log)
+        except Exception as e:
+            res = {"ok": False, "error": str(e)}
         finally:
-            stop_watch.set()
-        if done:
-            self._log("✅ 下载完成 models/%s · 共 %.1f GB · 用时 %.1f 分钟"
-                      % (name, dir_gb(target), (time.time() - t0) / 60))
-        else:
-            self._log("❌ 下载失败：重试 20 次仍不通，检查网络或代理")
-        return done
+            self.st["dl"] = {}
+        if res.get("ok"):
+            self._log("✅ 下载完成 %s · %s · 用时 %.1f 分钟 · 镜像 %s"
+                      % (rel, hd.fmt_bytes(res.get("bytes") or 0),
+                         (res.get("seconds") or 0) / 60.0, res.get("endpoint") or "?"))
+            return True
+        self._log("❌ 下载失败：%s" % (res.get("error") or "未知错误"))
+        return False
 
     def models_download(self, repo, name=""):
         """模型管理页的下载器：后台线程跑 _model_dl，调用即返回。"""
-        if self._dl is not None and self._dl.is_alive():
-            return {"ok": False, "msg": "已经有一个下载在跑，等它结束"}
+        from envkit import spec as sp
         repo = str(repo or "").strip()
         name = str(name or "").strip() or repo.split("/")[-1]
         if not re.fullmatch(r"[\w.-]+/[\w.-]+", repo) or not self._safe_name(name):
             return {"ok": False, "msg": "repo 格式要 org/name；目录名只允许字母数字点横线下划线"}
-        target = _abs_path(os.path.join("models", name))
-        os.makedirs(target, exist_ok=True)
-        self._dl = threading.Thread(target=lambda: self._model_dl(repo, name), daemon=True)
-        self._dl.start()
+        with self._task_lock:
+            if self.st.get("env_busy"):
+                return {"ok": False, "msg": "环境补全正在跑，等它结束再下"}
+            if (self.st.get("dl") or {}).get("busy"):
+                return {"ok": False, "msg": "已经有一个下载在跑，等它结束"}
+            if self._dl is not None and self._dl.is_alive():
+                return {"ok": False, "msg": "已经有一个下载在跑，等它结束"}
+            target = os.path.join(sp.env_models_dir(ROOT, self._spec(), "qwen"), name)
+            os.makedirs(target, exist_ok=True)
+            self.st["dl"] = {"busy": True, "phase": "download", "repo": repo,
+                             "file": "", "done": 0, "total": 0, "speed": 0,
+                             "eta": 0, "files_done": 0, "files_total": 0}
+            self._dl = threading.Thread(target=lambda: self._model_dl(repo, name), daemon=True)
+            self._dl.start()
         return {"ok": True, "target": target}
 
     # ------------------------------------------------------------ js_api：环境体检与补全
@@ -1563,21 +2438,82 @@ class App(WindowCtl):
         threading.Thread(target=run, daemon=True).start()
 
     def env_check(self):
-        """按 ROOT/env.json 逐项体检：换电脑 clone 代码后，缺哪些包、缺哪份权重一眼看全。"""
+        """按 envs/ 清单逐项体检，只留开着的环境：关掉的那路当它不存在。
+
+        「关掉就不检测」必须断在这一处：待补数、横幅、欢迎页那几行「还差几项」、
+        一键补齐的清单全都从这一份 items 派生。界面上各过滤一遍迟早漏一处，
+        漏的结果就是用户反馈的那句「明明关掉了还一直提醒千问缺模型」。
+        """
+        from envkit import check as ec
         try:
-            import env_check as ec
-            r = ec.check(ROOT)
+            r = ec.check(ROOT, spec=self._spec())
         except Exception as e:
             return {"ok": False, "msg": "体检没跑成：%s" % e}
-        self.st["env_todo"] = len(r["todo"])
-        # 按引擎拆一份：首启那一屏要说得出「这一路在这台机器上还差几项」。
-        # 归属判法与前端 models.js 的 isMoss 一致（comfy:/moss: 前缀，或清单标了 Moss 环境的包）。
-        grp = {x["key"]: x.get("group") for x in r["items"]}
-        moss = [k for k in r["todo"]
-                if str(k).startswith(("comfy:", "moss:")) or grp.get(k) == ec.G_MOSS]
-        self.st["env_todo_moss"] = len(moss)
-        self.st["env_todo_qwen"] = len(r["todo"]) - len(moss)
+        on = self._env_on()
+        is_on = lambda eid: on.get(eid, True)
+        r["items"] = [it for it in r["items"] if is_on(str(it.get("env") or "base"))]
+        # 开着的环境不再享受「可选＝默认别提醒」的待遇：开关就是本人的选择
+        for it in r["items"]:
+            it["optional"] = False
+        todo = ec.fix_plan(r["items"])
+        r["todo"] = [x["key"] for x in todo]
+        r["gb"] = round(sum(float(x.get("gb") or 0) for x in todo), 1)
+        r["env_on"] = on
+        self._sync_env_on()
+        cnt = {}
+        for x in todo:
+            eid = str(x.get("env") or "base")
+            cnt[eid] = cnt.get(eid, 0) + 1
+        # 每一格都用体检这一份 is_on 判定，总数则由这些格相加：让「合计几项」和
+        # 各环境页那句「还差几项」不可能各说各话
+        self.st["env_todo_by"] = {eid: (cnt.get(eid, 0) if is_on(eid) else 0)
+                                  for eid in sorted(set(on) | set(cnt))}
+        self.st["env_todo"] = sum(self.st["env_todo_by"].values())
         return r
+
+    def env_set(self, env_id, on):
+        """开/关一个环境：开关落盘，顺手把不该再占显存的引擎放掉，然后后台重新体检。
+
+        关掉千问 = 千问的功能页与环境提醒一起消失；正在跑的那个引擎若已不属于任何
+        开着的环境，就把显存交还系统（Moss 停子进程，千问卸管线），不然界面收走了、
+        显存还占着。开启时什么都不装——只是把这一路重新放进体检。
+        """
+        from envkit import spec as sp
+        eid = str(env_id or "").strip()
+        spec = self._spec()
+        if eid == "base" or not sp.env_meta(spec, eid):
+            return {"ok": False, "msg": "没有这个环境：%s" % eid}
+        want = bool(on)
+        self.cfg.setdefault("env_on", {})[eid] = want
+        self._save_cfg()
+        self._sync_env_on()
+        self._log("🎚️ 环境%s：%s" % ("开启" if want else "关闭",
+                                    sp.env_meta(spec, eid).get("label") or eid))
+        if not want:
+            eng = str(self.cfg.get("engine", "qwen"))
+            on = self._env_on()
+            # Moss 引擎同时服务 moss 与 h3 两个环境（共用同一个 ComfyUI 子进程）
+            still = on.get("qwen") if eng == "qwen" else (on.get("moss") or on.get("h3"))
+            if not still:
+                self._release_engine(eng)
+        self.env_probe_bg()
+        return {"ok": True, "env_on": self._env_on(), "cfg": self.cfg}
+
+    def _release_engine(self, eng):
+        """这一路的环境全关了：把它占的显存还回去（后台做，桥线程里做会冻界面）。"""
+        def run():
+            try:
+                if eng == "moss":
+                    if self.moss is not None and self.moss.occupying():
+                        self.moss.stop()
+                        self._log("🪫 环境已关闭：Moss（ComfyUI 子进程）停止，显存交还系统")
+                elif self.mgr is not None and getattr(self.mgr, "pipe", None) is not None:
+                    self.mgr.unload()
+                    self._log("🪫 环境已关闭：千问模型卸载，显存交还系统")
+                self.st["model_loaded"] = False
+            except Exception as e:
+                self._log("⚠️ 释放显存没成功：%s" % e)
+        threading.Thread(target=run, daemon=True, name="env-release").start()
 
     def env_fix(self, keys=None):
         """一键补齐：pip 装包 / hf-mirror 续传权重 / 建目录，全在后台线程，逐行推进日志。
@@ -1586,16 +2522,24 @@ class App(WindowCtl):
         """
         if getattr(sys, "frozen", False):
             return {"ok": False, "msg": "打包版改不了自己的环境（pip 会装到 exe 外面）· "
-                                        "请 clone 源码用 setup.bat 那条路"}
+                                        "请 clone 源码，用根目录的 启动.bat 补环境"}
         # 「查有没有在跑」和「标记在跑」得在一把锁里：pywebview 每次 js_api 单起线程，
         # 连点两下「一键补齐」能同时通过检查，然后两条 pip 一起动同一个 venv。
         with self._task_lock:
             if self.st["env_busy"]:
                 return {"ok": False, "msg": "补全还在跑，看下面的日志"}
+            if (self.st.get("dl") or {}).get("busy"):
+                return {"ok": False, "msg": "手动下载还在跑，等它结束再补环境"}
+            if self._dl is not None and self._dl.is_alive():
+                return {"ok": False, "msg": "手动下载还在跑，等它结束再补环境"}
             self.st["env_busy"] = True
         try:
-            import env_check as ec
-            items = ec.check(ROOT)["items"]
+            from envkit import check as ec
+            on = self._env_on()
+            items = [it for it in ec.check(ROOT, spec=self._spec())["items"]
+                     if on.get(str(it.get("env") or "base"), True)]
+            for it in items:
+                it["optional"] = False      # 同 env_check：开着就不算「可选」
         except Exception as e:
             self.st["env_busy"] = False
             return {"ok": False, "msg": "体检没跑成：%s" % e}
@@ -1603,6 +2547,10 @@ class App(WindowCtl):
         if not todo:
             self.st["env_busy"] = False
             return {"ok": True, "msg": "没有需要补的", "count": 0}
+
+        self.st["env_steps"] = len(todo)
+        self.st["env_step"] = 0
+        self.st["env_label"] = ""
 
         def run():
             try:
@@ -1613,6 +2561,10 @@ class App(WindowCtl):
             finally:
                 # 任何一条路走崩都不能把「补全中」永久挂在界面上
                 self.st["env_busy"] = False
+                self.st["env_steps"] = 0
+                self.st["env_step"] = 0
+                self.st["env_label"] = ""
+                self.st["dl"] = {}
 
         threading.Thread(target=run, daemon=True).start()
         return {"ok": True, "count": len(todo),
@@ -1622,19 +2574,21 @@ class App(WindowCtl):
         ok_n, bad_n = 0, 0
         self._log("🔧 开始补全 %d 项：%s"
                   % (len(todo), "、".join(x["label"] for x in todo)))
-        for it in todo:
+        for i, it in enumerate(todo, 1):
             kind = it["fix"]["kind"]
+            self.st["env_step"] = i
+            self.st["env_label"] = it["label"]
+            self.st["dl"] = {}
+            self._log("[%d/%d] %s" % (i, len(todo), it["label"]))
             try:
                 if kind == "pip":
                     ok = self._pip_fix(it)
                 elif kind == "model":
-                    ok = self._model_dl(it["fix"]["repo"], it["fix"]["name"])
+                    ok = self._env_model_dl(it["fix"])
                 elif kind == "comfyui":
                     ok = self._comfyui_clone(it["fix"])
                 elif kind == "comfyvenv":
                     ok = self._comfyui_venv(it["fix"])
-                elif kind == "mossmodel":
-                    ok = self._mossmodel_dl(it["fix"])
                 elif kind == "dir":
                     os.makedirs(_abs_path(it["fix"]["path"]), exist_ok=True)
                     self._log("✅ 建好目录 %s" % it["fix"]["path"])
@@ -1649,7 +2603,7 @@ class App(WindowCtl):
                 self._log("❌ %s 补全出错：%s" % (it["label"], e))
                 bad_n += 1
         try:
-            left = len(ec.fix_plan(ec.check(ROOT)["items"]))
+            left = len(ec.fix_plan(ec.check(ROOT, spec=self._spec())["items"]))
         except Exception:
             left = -1
         self._log("%s 补全结束：成功 %d · 失败 %d · 还差 %d 项"
@@ -1658,7 +2612,7 @@ class App(WindowCtl):
 
     def _pip_fix(self, item):
         """pip 子进程装一个包，输出只留关键行进日志（全量刷进来人反而看不见）。"""
-        import env_check as ec
+        from envkit import check as ec
         import subprocess
 
         argv = ec.pip_argv(item, python=sys.executable)
@@ -1684,180 +2638,58 @@ class App(WindowCtl):
                       "直连不稳就先开代理再点一次" % (item["label"], rc))
         return rc == 0
 
-    # ------------------------------------------------------------ Moss 内嵌 ComfyUI 一键补全
+    # ------------------------------------------------------------ 内嵌 ComfyUI 与各环境权重
     def _run_stream(self, argv, cwd=None, keep=None, env=None):
         """跑一条命令，命中 keep 正则的行才进日志；返回退出码（起不了返回 -1）。"""
-        import subprocess
-
-        keep = keep or re.compile(r".")
-        try:
-            p = subprocess.Popen(argv, cwd=cwd, stdout=subprocess.PIPE,
-                                 stderr=subprocess.STDOUT, text=True,
-                                 encoding="utf-8", errors="replace",
-                                 env=env or dict(os.environ, PYTHONIOENCODING="utf-8"),
-                                 creationflags=NO_CONS)
-        except OSError as e:
-            self._log("❌ 起不了命令：%s" % e)
-            return -1
-        for line in p.stdout:
-            line = line.rstrip()
-            if line and keep.search(line):
-                self._log(line)
-        return p.wait()
+        from envkit import install as ei
+        return ei.run_stream(argv, cwd=cwd, keep=keep, env=env, log=self._log)
 
     def _comfyui_clone(self, fix):
-        import subprocess
-
-        target = _abs_path("comfyui")
-        repo = str(fix.get("repo") or "https://github.com/Comfy-Org/ComfyUI.git")
-        branch = str(fix.get("branch") or "master")
-        if os.path.isfile(os.path.join(target, "main.py")):
-            self._log("ComfyUI 已在 comfyui/，跳过 clone")
-            return True
-        try:
-            subprocess.run(["git", "--version"], capture_output=True, check=True,
-                           creationflags=NO_CONS)
-        except (OSError, subprocess.SubprocessError):
-            self._log("❌ 系统里没有 git：装好 Git 再点一次（内嵌 ComfyUI 用 git clone 拉取）")
-            return False
-        os.makedirs(os.path.dirname(target), exist_ok=True)
-        self._log("🌿 clone ComfyUI（%s → comfyui/，约 100MB，只拉代码不拉权重）…" % branch)
-        argv = ["git", "clone", "--depth", "1", "--branch", branch, repo, target]
-        keep = re.compile(r"Cloning|Receiving|Resolving|fatal|error", re.I)
-        if self._run_stream(argv, cwd=os.path.dirname(target), keep=keep) != 0:
-            self._log("⚠️ 直连 github 不稳：挂代理再点一次，或把 env.json 的 moss.comfyui.branch 改成镜像分支")
-            return False
-        return os.path.isfile(os.path.join(target, "main.py"))
+        from envkit import install as ei
+        return ei.clone_comfyui(ROOT, fix, self._log)
 
     _PIP_KEEP = re.compile(r"Collecting|Downloading|Download|Installing|Successfully|"
                            r"Requirement already|Building|Uninstalling|ERROR|error:", re.I)
 
-    def _torch_gpu_specs(self):
-        """从 env.json 摘出主环境那套 CUDA torch 的版本与索引，给内嵌 ComfyUI 复用。
-
-        只取 index=="torch" 的包（走 --index-url 的 cuNNN 索引），版本钉死：
-        不钉版本的话 pip 看见已装的 2.14.1+cpu 会当成「Requirement already satisfied」，
-        换不动轮子，CPU 版就一直留在那儿。
-        moss.comfyui.torch_index 可以把内嵌 ComfyUI 单独指到另一个 cuNNN 索引
-        （int8/w4a8 权重的 CUDA 内核要 cu130+，见 env.json 那段的 torch_note），
-        千问那套仍走 indexes.torch，两边互不影响。
-        """
-        try:
-            import env_check as ec
-
-            spec = ec.load_spec(ROOT)
-            idx = str((spec.get("indexes") or {}).get("torch") or "")
-            mine = str(((spec.get("moss") or {}).get("comfyui") or {})
-                       .get("torch_index") or "")
-            pkgs = ["%s==%s" % (p["name"], p["version"])
-                    for p in spec.get("packages") or []
-                    if p.get("index") == "torch" and p.get("version")]
-            return (mine or idx), pkgs
-        except Exception:
-            return "", []
-
     def _comfyui_venv(self, fix):
-        import env_check as ec
+        from envkit import install as ei
+        return ei.ensure_comfyui_venv(ROOT, fix, self._log, python=sys.executable)
 
-        target = _abs_path("comfyui")
-        vdir = _abs_path(str(fix.get("dir") or "comfyui/.venv"))
-        req = os.path.join(target, "requirements.txt")
-        py = os.path.join(vdir, "Scripts" if os.name == "nt" else "bin",
-                          "python.exe" if os.name == "nt" else "python")
-        if not os.path.isfile(req):
-            self._log("❌ 找不到 %s：ComfyUI 本体还没 clone 好" % req)
-            return False
-        if not os.path.isfile(py):
-            self._log("🐍 给内嵌 ComfyUI 建独立 .venv（与千问环境完全隔离）…")
-            if self._run_stream([sys.executable, "-m", "venv", vdir]) != 0:
-                return False
-        # torch 必须先单独装 CUDA 版：ComfyUI 的 requirements.txt 里 torch 是裸名，
-        # Windows 上从 PyPI 镜像拿到的是 CPU 轮子，ComfyUI 一起步就
-        # 「Torch not compiled with CUDA enabled」崩掉，且崩得跟慢启动很难区分。
-        idx, gpu_pkgs = self._torch_gpu_specs()
-        fl = ec.torch_flavor(py)
-        # 「是 CUDA 版」还不够：cu128 也是 CUDA 版，可 int8_convrot / w4a8_gptq 那套
-        # kitchen CUDA 内核在 cu128 上被整体 disable，只能走 eager 反量化，出图慢 5 倍
-        # （根因在 ComfyUI 的 comfy/quant_ops.py，详见 env.json 里 moss.comfyui.torch_note）。
-        # 只换 local 标记（2.11.0+cu128 → +cu130）时 pip 当成「已满足」，所以必须强制重装。
-        want = re.search(r"cu\d+", str(idx or ""))
-        stale = bool(fl["cuda"]) and bool(want) and want.group(0) not in str(fl["version"])
-        if fl["cuda"] and not stale:
-            self._log("🔧 ComfyUI 的 torch 已是 CUDA 版（%s），跳过" % fl["version"])
-        elif not (idx and gpu_pkgs):
-            self._log("❌ env.json 里没有 index=torch 的包：装不出 CUDA 版 torch，"
-                      "Moss 起不来。先补主环境的 torch 再来补这一项")
-            return False
-        else:
-            why = ("还没装" if not fl["installed"] else
-                   "现有的是 CPU 版 " + (fl["version"] or "?") if not fl["cuda"] else
-                   "现有 %s 跑不动 int8/w4a8 内核，换 %s"
-                   % (fl["version"], want.group(0)))
-            self._log("🔧 给内嵌 ComfyUI 装 CUDA 版 torch（%s：%s）…"
-                      % (why, " ".join(gpu_pkgs)))
-            argv = [py, "-m", "pip", "install", "--disable-pip-version-check", "--no-input",
-                    "--index-url", idx] + gpu_pkgs
-            if stale:
-                argv += ["--force-reinstall", "--no-deps"]
-            if self._run_stream(argv, cwd=target, keep=self._PIP_KEEP) != 0:
-                self._log("❌ CUDA 版 torch 没装上：Moss 出图必须有 GPU 轮子，"
-                          "download.pytorch.org 不稳就开代理重点这一项")
-                return False
-            if not ec.torch_flavor(py)["cuda"]:
-                self._log("❌ 装完还是 CPU 轮子：多半是索引被 pip 缓存/镜像劫了，"
-                          "看上面 Collecting torch 那行来自哪个地址")
-                return False
-        mirror = ""
-        try:
-            mirror = (ec.load_spec(ROOT).get("indexes") or {}).get("aliyun", "")
-        except Exception:
-            pass
-        argv = [py, "-m", "pip", "install", "--disable-pip-version-check", "--no-input",
-                "-r", req]
-        if mirror:
-            argv += ["-i", mirror]
-        self._log("📦 装 ComfyUI 其余依赖（torch 已就位，不会再被 CPU 版覆盖）…")
-        if self._run_stream(argv, cwd=target, keep=self._PIP_KEEP) != 0:
-            self._log("❌ ComfyUI 依赖没装完：看上面报错，网络不稳就开代理重点这一项")
-            return False
-        self._log("✅ ComfyUI 独立环境就绪：%s" % os.path.relpath(py, ROOT))
-        return os.path.isfile(py)
-
-    def _mossmodel_dl(self, fix):
-        """用主 .venv 的 hf-mirror 下载器，把指定权重灌进 comfyui/models 子目录。"""
+    def _env_model_dl(self, fix):
+        """把一个环境的权重下到它清单里写的目录（同一个下载器，Motrix 可用时先交给它）。"""
+        from envkit import download as hd
+        from envkit import spec as sp
         repo = str(fix.get("repo") or "")
-        reldir = str(fix.get("name") or "")
+        reldir = str(fix.get("dir") or "")
         target = _abs_path(reldir)
         os.makedirs(target, exist_ok=True)
+        allow = [str(a) for a in (fix.get("allow") or []) if a] or None
+        cfg = self._dl_config()
+        self._log("📥 下载 %s → %s（%d 个文件 · %d 线程 · 断点续传）"
+                  % (repo, reldir, len(allow or []), int(cfg.get("jobs") or 8)))
         try:
-            import env_check as ec
-
-            moss = ec.load_spec(ROOT).get("moss") or {}
-        except Exception:
-            moss = {}
-        must = {}
-        for m in moss.get("models") or []:
-            if m.get("repo") == repo:
-                must = m.get("must") or {}
-                break
-        allow = sorted(must.keys()) or [str(a) for a in (fix.get("allow") or []) if a]
-        os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
-        import huggingface_hub
-
-        self._log("📥 下载 %s → %s（hf-mirror 断点续传，共 %d 个文件）"
-                  % (repo, reldir, len(allow)))
-        for attempt in range(1, 21):
+            res = hd.download(
+                repo, target, allow=allow,
+                jobs=int(cfg.get("jobs") or 8),
+                chunk_mb=int(cfg.get("chunk_mb") or 64),
+                retries=int(cfg.get("retries") or 20),
+                timeout=int(cfg.get("timeout") or 60),
+                probe_timeout=int(cfg.get("probe_timeout") or 8),
+                endpoints=cfg.get("endpoints"), config=cfg,
+                on_progress=self._dl_event, on_log=self._log)
+        except Exception as e:
+            res = {"ok": False, "error": str(e)}
+        finally:
+            self.st["dl"] = {}
+        if res.get("ok"):
+            self._log("✅ 权重就位：%s · %s"
+                      % (reldir, hd.fmt_bytes(res.get("bytes") or 0)))
             try:
-                huggingface_hub.snapshot_download(
-                    repo_id=repo, local_dir=target, allow_patterns=allow,
-                    max_workers=4, etag_timeout=60)
-                self._log("✅ 权重就位：%s" % reldir)
-                return True
-            except Exception as e:
-                wait = min(5 * attempt, 30)
-                self._log("⚠️ 第 %d 次中断：%s · %d 秒后从断点续传" % (attempt, e, wait))
-                time.sleep(wait)
-        self._log("❌ 权重下载失败：重试 20 次仍不通，检查网络或代理")
+                sp.write_extra_model_paths(ROOT, self._spec())
+            except Exception:
+                pass
+            return True
+        self._log("❌ 权重下载失败：%s" % (res.get("error") or "未知错误"))
         return False
 
     # ------------------------------------------------------------ js_api：杂项
@@ -1923,7 +2755,7 @@ class App(WindowCtl):
         out_dir = _abs_path(self.cfg["console"]["output_dir"])
         try:
             self.st["img_count"] = sum(1 for n in os.listdir(out_dir)
-                                       if n.lower().endswith(IMG_EXT))
+                                       if n.lower().endswith(MEDIA_EXT))
         except OSError:
             self.st["img_count"] = 0
 

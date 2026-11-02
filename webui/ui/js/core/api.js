@@ -55,15 +55,40 @@ MIC.api={
   thumb:(p,wide)=>call('thumb',p,wide),
   galleryList:()=>call('gallery_list'),
   galleryDelete:f=>call('gallery_delete',f||''),
+  galleryUndo:()=>call('gallery_undo'),
   galleryFav:(f,on)=>call('gallery_fav',f,!!on),
   galleryClear:()=>call('gallery_clear'),
   /* 模型管理：列表/切换激活/hf-mirror 断点续传下载 */
   modelsList:()=>call('models_list'),
   modelsSetActive:n=>call('models_set_active',n),
   modelsDownload:(r,n)=>call('models_download',r,n||''),
-  /* 环境体检与一键补全：清单在 ROOT/env.json，缺的包与权重由后端后台补齐 */
+  /* 环境体检与一键补全：清单在 ROOT/envs/，缺的包与权重由后端后台补齐 */
+  /* 环境：体检/补全 + 每条模型一路的开关（关掉＝后端不体检、功能页一并收起） */
   envCheck:()=>call('env_check'),
   envFix:k=>call('env_fix',k||null),
+  envSet:(i,w)=>call('env_set',i,!!w),
+  /* 视频：本地 H3 出一条成片（后端起线程，调用即返回；进度走 poll） */
+  videoGen:p=>call('video_gen',p),
+  /* 云端账号：一只共用浏览器 + 多份登录态快照；浏览器操作全部后台线程 */
+  cloudState:()=>call('cloud_state'),
+  /* 视频页云端那一格要的一句话实话（有几个号、缺不缺 DrissionPage、用的哪份工作流）：
+     只读档案，绝不为「看一眼」拉起浏览器 */
+  cloudBrief:()=>call('cloud_brief'),
+  cloudNew:n=>call('cloud_new',n||''),
+  cloudLogin:id=>call('cloud_login',id||''),
+  cloudSave:(id,n)=>call('cloud_save',id||'',n||''),
+  cloudApply:id=>call('cloud_apply',id||''),
+  cloudCheck:id=>call('cloud_check',id||''),
+  cloudDelete:id=>call('cloud_delete',id||''),
+  cloudRename:(id,n)=>call('cloud_rename',id||'',n||''),
+  cloudBackups:id=>call('cloud_backups',id||''),
+  cloudRestore:(id,ts)=>call('cloud_restore',id||'',ts||''),
+  cloudKeySet:(id,k)=>call('cloud_key_set',id||'',k||''),
+  cloudKeyClear:id=>call('cloud_key_clear',id||''),
+  cloudKeepNow:()=>call('cloud_keep_now'),
+  cloudBrowserStart:()=>call('cloud_browser_start'),
+  cloudBrowserStop:()=>call('cloud_browser_stop'),
+  cloudAuthNames:id=>call('cloud_auth_names',id||''),
   openPath:p=>call('open_path',p),
   openUrl:u=>call('open_url',u),
   /* API 服务：状态/开关/令牌（后端即时重启监听，都返回最新 state） */

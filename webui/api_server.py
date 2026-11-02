@@ -46,13 +46,25 @@ import uvicorn
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse
 
+# 界面上的 P 档也放进清单：P=短边，横/方/竖 = 16:9 / 1:1 / 9:16；
+# 宽高贴 16 的倍数，和 App 的折算规则同一条。老尺寸继续保留，调用方不用改。
+_P_IMG = (480, 512, 720, 768, 1024)
+_P_ASPECT = ((16, 9), (1, 1), (9, 16))
+
+
+def _p_size(p, aw, ah):
+    long = max(64, min(4096, int(p * max(aw, ah) / float(min(aw, ah)) / 16 + 0.5) * 16))
+    return "%dx%d" % ((long, p) if aw >= ah else (p, long))
+
+
+_P_SIZES = {_p_size(p, aw, ah) for p in _P_IMG for aw, ah in _P_ASPECT}
 GEN_SIZES = {"512x512", "768x768", "1024x1024", "576x1024",
-             "1024x1536", "1536x1024", "1536x1536"}
+             "1024x1536", "1536x1024", "1536x1536"} | _P_SIZES
 EDIT_RES = {"512", "768"}
 IMG_SUFFIX = (".png", ".jpg", ".jpeg", ".webp")
 # Moss（内嵌 ComfyUI）：尺寸须是 16 的倍数（非倍数会自动就近对齐）；12G 卡稳的是 1MP 级，2M 级会触发 offload 变慢
 MOSS_SIZES = {"512x512", "768x768", "1024x1024", "832x1216",
-              "1216x832", "1024x1536", "1536x1024"}
+              "1216x832", "1024x1536", "1536x1024"} | _P_SIZES
 # 与 app.MOSS_TIERS 同键（那张表是权威：模板/步数/CFG 都在那边定）；
 # 这里只拿来给 API 明确回 400，而不是像界面那样静默回落成极速档。
 MOSS_QUALITY = {"fast": "8 步极速", "mid": "25 步均衡", "full": "50 步精修"}

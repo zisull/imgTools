@@ -6,15 +6,16 @@ const MIC=window.MIC=window.MIC||{};
 const C=MIC.form, ic=MIC.ic, esc=MIC.esc;
 
 const RES=[
-  {code:'512',name:'512² 草图'},
-  {code:'768',name:'768² 更清晰'},
+  {code:'512',name:'512P : 跟随原图'},
+  {code:'768',name:'768P : 跟随原图'},
 ];
 let base='';          // 原图绝对路径
 let bgData='';        // 原图缩略 data-uri（当画布背景）
 let paint=null;       // 涂抹层的离屏副本：#view 每次 render 都会换掉 canvas 节点，不存这里就被抹平
 let painted=false;    // 涂过没有：没涂就别发任务（后端只会拿到一张全保留的蒙版）
 let undoStack=[];     // 每一笔开始前的涂抹层副本，最多 10 步
-let area=0;           // 已涂面积百分比（提示用，也是「涂太少」的报警器）
+let area=0;           // 已涂面积百分比（提示用，也是「涂太少」报警器）
+let brushPx=48;       // 画笔粗细：配置里的 inpaint.brush，画布每次重定尺寸都按它来
 
 /* 改尺寸会清空 canvas，先把已有的涂抹层缩放搬过去 */
 function resizeKeep(cv,w,h){
@@ -113,8 +114,14 @@ MIC.inp={
   setBase(p){
     base=String(p||'');bgData='';painted=false;paint=null;undoStack=[];area=0;
     if(!base){MIC.render();return;}
-    MIC.api.thumb(base).then(function(r){if(r&&r.ok)bgData=r.url;MIC.render();})
-      .catch(function(){MIC.render();});
+    MIC.api.thumb(base).then(function(r){
+      if(!r||!r.ok){MIC.render();return;}
+      bgData=r.url;
+      /* 缩略图回来只换那一张 <img>：整页重画会把正在打的指令吃掉，
+         而 bg 的 load 事件本来就挂着画布尺寸钩子，节点还在就能接上 */
+      const bg=document.getElementById('paintBg');
+      if(bg)bg.src=bgData;else MIC.render();
+    }).catch(function(){MIC.render();});
   },
   pickBase(){
     MIC.api.pick('file').then(function(p){if(p)MIC.inp.setBase(p);}).catch(function(){});
@@ -137,7 +144,8 @@ MIC.inp={
       const w=Math.round(bg.clientWidth||nw||640);
       const h=Math.round(bg.clientHeight||(nw&&nh?w*nh/nw:0)||w*0.75);
       resizeKeep(cv,w,h);
-      ctx.lineWidth=40;ctx.lineCap='round';ctx.lineJoin='round';
+      /* 粗细只有这一个来源：写死 40 会把人调过的画笔在每次图幅变化时顶掉 */
+      ctx.lineWidth=brushPx;ctx.lineCap='round';ctx.lineJoin='round';
       ctx.strokeStyle='rgba(255,72,72,0.85)';
       restore(cv);            // 每次 render 都是一张新节点：把离屏涂抹层贴回来，否则画两笔就没了
       remember(cv);
@@ -161,9 +169,10 @@ MIC.inp={
     const up=()=>{if(!drawing)return;drawing=false;measure(cv);};
     cv.addEventListener('pointerup',up);cv.addEventListener('pointerleave',up);
     MIC.inp._cv=cv;
-    // 画笔粗细改一下实时生效
+    // 画笔粗细改一下实时生效（并记住它：画布重定尺寸时按这个数，不回落 40）
     const bw=document.querySelector('#view [data-k="inpaint.brush"]');
-    if(bw){const apply=()=>{ctx.lineWidth=Math.max(4,parseFloat(bw.value)||40);};bw.addEventListener('input',apply);apply();}
+    if(bw){const apply=()=>{brushPx=Math.max(4,parseFloat(bw.value)||brushPx);ctx.lineWidth=brushPx;};
+      bw.addEventListener('input',apply);apply();}
   },
   clearPaint(){
     pushUndo();

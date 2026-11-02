@@ -6,8 +6,8 @@ const MIC=window.MIC=window.MIC||{};
 const C=MIC.form, ic=MIC.ic, esc=MIC.esc;
 
 const RES=[
-  {code:'512',name:'512² 草图'},
-  {code:'768',name:'768² 更清晰'},
+  {code:'512',name:'512P : 跟随原图'},
+  {code:'768',name:'768P : 跟随原图'},
 ];
 
 let imgs=[];          // 已选参考图绝对路径
@@ -18,12 +18,25 @@ function grid(){
   if(!imgs.length)return '';
   return '<div class="ggrid">'+imgs.map(function(p,i){
     const t=thumbs[p]||'';
+    /* 两个节点都带 data-f：缩略图回来时按这个找得到自己那一格，
+       不必整页重画（整页重画会把正在打的指令吃掉） */
     return '<div class="gcell">'+
-      (t?'<img src="'+t+'">':'<div class="gph">载入中…</div>')+
+      (t?'<img data-f="'+esc(p)+'" src="'+t+'">':'<div class="gph" data-f="'+esc(p)+'">载入中…</div>')+
       '<div class="gi">图 '+(i+1)+' · '+esc(p.split(/[\\/]/).pop())+'</div>'+
       '<button class="gdel" onclick="MIC.edit.del('+i+')">'+ic('close','s')+'</button>'+
     '</div>';
   }).join('')+'</div>';
+}
+
+function paintThumb(p,url){
+  const nodes=document.querySelectorAll('#view [data-f]');
+  for(let k=0;k<nodes.length;k++){
+    if(nodes[k].dataset.f!==p)continue;
+    if(nodes[k].tagName==='IMG')nodes[k].src=url;
+    else nodes[k].outerHTML='<img data-f="'+esc(p)+'" src="'+url+'">';
+    return true;
+  }
+  return false;
 }
 
 function loadThumb(p){
@@ -32,7 +45,10 @@ function loadThumb(p){
   if(p in thumbs)return;
   thumbs[p]='';
   MIC.api.thumb(p).then(function(r){
-    if(r&&r.ok){thumbs[p]=r.url;MIC.render();}
+    if(!r||!r.ok)return;
+    thumbs[p]=r.url;
+    /* 只换这一格；这一屏不在视频/编辑页了（找不到节点）才重画一次 */
+    if(!paintThumb(p,r.url))MIC.render();
   }).catch(function(){});
 }
 

@@ -15,12 +15,21 @@ MIC.mset=(o,p,v)=>{const ks=p.split('.');const last=ks.pop();
   let t=o;ks.forEach(k=>{if(typeof t[k]!=='object'||t[k]===null)t[k]={};t=t[k];});t[last]=v;};
 
 let toastTimer=null;
-MIC.toast=(msg,kind)=>{
+/* act={label,fn,ms}：提示上带一颗按钮（删除的「撤销」走这里）。
+   点按钮先收起再执行——回调里失败会自己再弹一条，别让这条作废的提示继续挂着。 */
+MIC.toast=(msg,kind,act)=>{
   const el=MIC.$('toast');if(!el)return;
-  el.className='toast '+(kind||'');
-  el.textContent=msg;
+  const on=!!(act&&act.label);
+  el.className='toast '+(kind||'')+(on?' act':'');
+  el.innerHTML=MIC.esc(msg)+(on?'<button class="tact" type="button">'+MIC.esc(act.label)+'</button>':'');
   clearTimeout(toastTimer);
-  toastTimer=setTimeout(()=>el.classList.add('hide'),2600);
+  toastTimer=setTimeout(()=>el.classList.add('hide'),(act&&act.ms)||2600);
+  if(on&&typeof act.fn==='function'){
+    el.querySelector('.tact').onclick=()=>{
+      clearTimeout(toastTimer);el.classList.add('hide');
+      act.fn();
+    };
+  }
 };
 
 /* 浮层定位：贴着锚点元素，越界自动翻到上方 */

@@ -14,7 +14,7 @@ function load(tree,open){
   TREE=Array.isArray(tree)&&tree.length?JSON.parse(JSON.stringify(tree)):[];
   if(open)S.open=Object.assign({},open);
   S.sel=findId(S.sel)||findId(MIC.s.cfg.last_tab)||firstTab()||(TREE[0]&&TREE[0].id);
-  ensureSel();                       // 控制台模式下当前页可能被收走了，换到第一张可见页
+  ensureSel();                       // 环境关掉后当前页可能被收走了，换到第一张可见页
 }
 function save(){MIC.api.save({nav:TREE,open:S.open}).catch(()=>{});}
 function walk(nodes,fn,parent,depth){
@@ -29,19 +29,27 @@ function firstTab(){const t=allTabs().filter(n=>!pageHidden(n.page));return t.le
 function isDesc(grp,id){let f=false;if(grp.children)walk(grp.children,n=>{if(n.id===id)f=true;});return f;}
 
 /* ---------- 渲染 ---------- */
-/* 控制台模式（cfg.console_mode：both/qwen/moss）：整个界面只留所选引擎用得上的功能页。
-   生图页两个引擎共用所以永远在；编辑与重绘只有千问那条流水线支持。
-   只在显示层过滤，TREE 本身不动——切回「两者兼有」时自定义的分组结构原样回来。 */
+/* 环境开关（cfg.env_on + 后端镜像 st.env_on）：关掉的那一路连功能页都不出现。
+   以前这里是「控制台模式」三选一，问题在于开关只管界面、体检照跑，
+   于是关掉千问还会一直被「生图模型缺失」提醒——现在判定按模型环境走，
+   后端 env_check 也按同一份过滤，关掉＝这台机器上当它不存在。
+   只在显示层过滤，TREE 本身不动——重新开启时自定义的分组结构原样回来。
+   环境页自己永远可见：不然关了以后再想开回来就没有门了。 */
+const PAGE_ENV={t2i:['qwen','moss'],edit:['qwen'],inpaint:['qwen']};
+/* 视频页两个通道：本地那一路归 h3 环境，云端那一路只要一个登录号（不碰本机权重）。
+   所以 h3 关掉不能把整页收走——否则「只想用云端出片」这条路连门都没了；
+   缺哪一路的环境在页里那一格自己说（与「提示只挂对应页」同一条规矩）。 */
+function envOn(){return MIC.s.st.env_on||MIC.s.cfg.env_on||{};}
 function pageHidden(p){
-  const m=String((MIC.s.cfg||{}).console_mode||'both');
-  if(m==='moss')return p==='edit'||p==='inpaint';
-  return false;
+  const need=PAGE_ENV[p];
+  if(!need)return false;
+  const o=envOn();
+  return !need.some(id=>o[id]!==false);
 }
-/* 功能页的引擎归属：编辑/重绘只有千问那条流水线认，其余两引擎都走得通。
-   两边都在界面里时把归属标在行尾——切到「仅 Moss」会凭空少两页，
-   先说在哪一页上，省得人到设置页去猜是谁收走的。 */
-const QW_ONLY={edit:1,inpaint:1};
-function pageEng(p){return QW_ONLY[p]?'千问':'';}
+/* 功能页的引擎归属：标在行尾，关掉的页凭空消失前先说清归谁——
+   省得人到设置页去猜是谁收走的。 */
+const PAGE_ENG={edit:'千问',inpaint:'千问',video:'H3',t2i:'千问/Moss'};
+function pageEng(p){return PAGE_ENG[p]||'';}
 function visNodes(nodes){
   const out=[];
   (nodes||[]).forEach(n=>{
@@ -86,7 +94,7 @@ function tabHTML(n){
   const path=S.layout==='flat'?pathOf(n.id).slice(0,-1).join(' / '):'';
   const eng=pageEng(n.page);
   const tag=path||eng;
-  const tip=path||'这一页只有'+eng+'走得通';
+  const tip=path||('这一页要用的环境：'+eng+' · 关掉环境会一并收起');
   return `<div class="node tab ${S.sel===n.id?'sel':''}" data-id="${n.id}" data-type="tab" draggable="true"
       onclick="MIC.nav.click('${n.id}')" ondblclick="MIC.nav.startRename('${n.id}')">
     ${ic(n.icon||'tool','ni')}
@@ -319,10 +327,10 @@ MIC.nav={
   newGroup,dissolve,dissolveAll,resetNav,moveTo,moveBefore,setOpenAll,
   bindPage,doBind,nodeMenu,mAddGrp,movePop,menu,
   pageOf(){const f=find(S.sel);return (f&&f.node.page)||'__blank__';},
-  pageHidden,
+  pageHidden,envOn,pageEng,
   tabIdFor(page){const t=allTabs().filter(n=>n.page===page);return t.length?t[0].id:null;},
   goto(page){if(pageHidden(page))return;const id=this.tabIdFor(page);if(id)this.click(id);},
-  /* 设置页切控制台模式后走这里：先修好选中页与侧栏，主区由调用方重画 */
+  /* 环境开关切换后走这里：先修好选中页与侧栏，主区由调用方重画 */
   applyMode(){ensureSel();renderTree();},
 };
 })();

@@ -7,7 +7,8 @@
 .wbtn .ic{width:14px;height:14px;stroke-width:1.6}
 .wc-close:hover{background:rgba(255,120,100,.14);color:var(--danger);border-color:transparent}
 
-/* 一圈透明手柄：frameless 之后系统边框没了，鼠标到这 6px 带上就能拉尺寸。
+/* 一圈透明手柄：frameless 之后系统边框没了，鼠标到这 6px 带上就是窗口边界。
+   四条直边按下是「拖窗」（用户习惯抓边移窗），四角才是拉尺寸。
    #rzg 整层不吃事件（pointer-events:none），只有手柄自己收。 */
 #rzg{position:fixed;inset:0;z-index:210;pointer-events:none}
 .rz{position:absolute;pointer-events:auto}
@@ -15,6 +16,7 @@
 .rz[data-edge="s"]{left:10px;right:10px;bottom:0;height:6px;cursor:ns-resize}
 .rz[data-edge="w"]{top:10px;bottom:10px;left:0;width:6px;cursor:ew-resize}
 .rz[data-edge="e"]{top:10px;bottom:10px;right:0;width:6px;cursor:ew-resize}
+.rz[data-move]{cursor:grab}
 .rz[data-edge="nw"]{left:0;top:0;width:14px;height:14px;cursor:nwse-resize}
 .rz[data-edge="ne"]{right:0;top:0;width:14px;height:14px;cursor:nesw-resize}
 .rz[data-edge="sw"]{left:0;bottom:0;width:14px;height:14px;cursor:nesw-resize}

@@ -47,6 +47,13 @@ function pgText(){
   const s=MIC.s.st;
   if(!s.running)return s.status||'';
   if(s.running==='load')return `载入 ${Number(s.load_pct)||0}%${s.load_stage?' · '+s.load_stage:''} · ${elText()}`;
+  /* 出片只有 4 步（烘在 Turbo LoRA 里）：按步数走的百分比每步跨度太大，
+     这一段更该看的是已经跑了多久，进度条就按步数粗算 */
+  if(s.running==='video'){
+    /* 云端没有步数刻度：平台只报「到哪一步了」，这里能给的准数只有等了多久 */
+    if(s.video_exec==='cloud')return `云端出片中 · ${elText()}`;
+    return `出片 ${s.done||0}/${s.total||0} 步 · ${elText()}`;
+  }
   return `去噪 ${s.done||0}/${s.total||0} · ${pct()}% · ${elText()}`;
 }
 /* 显存条：>90% 变警告色——12G 卡上这就是「要不要降档」的决策线 */
@@ -59,7 +66,8 @@ function vramHTML(){
     `<span class="mut fine">${used.toFixed(1)} / ${tot} GB${hot?' · 接近上限，建议降一档':''}</span>`;
 }
 /* 顶栏三盏灯按「千问 / Moss / 系统」分类摆：两个引擎各有各的常驻态，
-   混在一颗灯里就看不出「现在这张卡到底被谁占着」。仅单引擎模式下另一盏不出现。
+   混在一颗灯里就看不出「现在这张卡到底被谁占着」。
+   环境关掉的那一路灯也不出现——和导航同一套判定，别让页面上残留一个开不了的开关。
    引擎灯三段：进程活着 ≠ 权重上卡，所以 Moss 分「已停 / 搬权重 / 已常驻」。 */
 /* 一盏灯 = 图标 + 类名 + 灯 + 状态字：三段各有用处，
    图标与类名认得出是哪一路，灯看活没活，状态字说活到哪一步。 */
@@ -68,15 +76,14 @@ function engPill(name,icon,on,txt,tip){
     `<span class="dot ${on?'ok':'off'}"></span><i>${esc(txt)}</i></span>`;
 }
 function pillsHTML(){
-  const s=MIC.s.st,m=String(MIC.s.cfg.console_mode||'both');
-  const pills=[];
-  if(m!=='moss')
+  const s=MIC.s.st,o=MIC.nav.envOn(),pills=[];
+  if(o.qwen!==false)
     pills.push(engPill('千问','flower',!!s.model_loaded,s.model_loaded?'已载入':'未载入',
       '千问（diffusers 直跑）：权重在显存才谈得上秒出'));
-  if(m!=='qwen')
+  if(o.moss!==false||o.h3!==false)
     pills.push(engPill('Moss','wave',!!s.comfyui_loaded,
       s.comfyui_on?(s.comfyui_loaded?'已常驻':'搬权重'):'已停',
-      'Moss（内嵌 ComfyUI）：已停=没起进程，搬权重=正在把权重上显存'));
+      'Moss / H3（内嵌 ComfyUI）：已停=没起进程，搬权重=正在把权重上显存'));
   pills.push(engPill('系统','cog',!!s.running,
     '显存 '+(Number(s.vram_used)||0).toFixed(1)+'/'+(s.vram_total||12)+'G · '+(s.running?'出图中':'空闲'),
     '整卡显存与任务队列；两个引擎共用这一张卡，同一时间只可能一边在载'));
@@ -90,53 +97,99 @@ function showPrev(){prevHidden='';MIC.render();}
 
 /* 失败轮次不许被一张旧图盖住：状态里写的是失败，就把失败摊在结果行上 */
 function failed(){return /失败|没出图/.test(String(MIC.s.st.status||''));}
+const VIDEO_EXT=/\.(mp4|webm|mov|mkv)$/i;
+function isVideo(p){return VIDEO_EXT.test(String(p||''));}
 function resultHTML(){
   const s=MIC.s.st;
   if(failed())
     return `<b class="bad">❌ 本轮失败</b>${s.last_fail?'：'+esc(s.last_fail):''} · `+
-      (s.last_image?'画面仍是上一张':'尚无成图');
-  return `上一张 <b>${(Number(s.last_sec)||0).toFixed(1)}</b> 秒 · `+
+      (s.last_image?(isVideo(s.last_image)?'成片仍是上一段':'画面仍是上一张'):'尚无成图');
+  return (isVideo(s.last_image)?'上一段':'上一张')+' <b>'+(Number(s.last_sec)||0).toFixed(1)+'</b> 秒 · '+
     (s.last_image?`输出 <b>${esc(String(s.last_image).split(/[\\/]/).pop())}</b>`:'尚无输出')+
     (s.dup_last?' · <span class="warn">与上一张相同（种子固定，填 -1 每轮随机）</span>':'');
 }
 
 /* 环境补全收尾：后端把 env_busy 落下来的那一刻重新体检一次，
-   否则卡片会一直停在「补全中…」，得人手点「重新体检」才更新 */
-let lastEnv=false;
+   否则卡片会一直停在「补全中…」，得人手点「重新体检」才更新。
+   手动下载没有 env_busy，单独看 dl.busy 的落沿。 */
+let lastEnv=false, lastDl=false;
 function watchEnv(){
-  const b=!!MIC.s.st.env_busy;
+  const b=!!MIC.s.st.env_busy, db=!!(MIC.s.st.dl||{}).busy;
   if(lastEnv&&!b){
     if(MIC.env&&MIC.env.check)MIC.env.check();else MIC.render();
   }
-  lastEnv=b;
+  if(lastDl&&!db&&!b&&!lastEnv){
+    if(MIC.models&&MIC.models.refresh)MIC.models.refresh();
+    if(MIC.env&&MIC.env.check)MIC.env.check();
+  }
+  lastEnv=b;lastDl=db;
 }
 
-/* 环境横幅：只在「环境」页显示——两个引擎各自管各自的环境，齐一个就能单独用，
-   别的页不拿「还差几项」挡视线（明细、逐项补、一键补齐都在环境页）。
-   挂在 data-role 插槽上而不是整页重画：体检数是从轮询并进来的，八秒内自己就变了。 */
+function fmtB(n){
+  n=Number(n)||0;const u=['B','KB','MB','GB','TB'];let i=0;
+  while(n>=1024&&i<u.length-1){n/=1024;i++;}
+  return (i?n.toFixed(1):Math.round(n))+' '+u[i];
+}
+function fmtT(s){
+  s=Number(s)||0;if(!s||s>86400*7)return '';
+  if(s<60)return Math.round(s)+' 秒';
+  if(s<3600)return Math.round(s/60)+' 分';
+  return Math.floor(s/3600)+' 小时 '+Math.round((s%3600)/60)+' 分';
+}
+function hostOf(u){return String(u||'').replace(/^https?:\/\//,'').split('/')[0];}
+
+/* 环境横幅：只在「环境」那几页显示（基础/千问/Moss/H3 各一页）。
+   数字也按页取：在 H3 那页只报 H3 还差几项，不拿别的环境的欠账烦人。
+   补全/下载进行中时，这里换成步骤 + 百分比 + 速度 + 剩余时间的那条。
+   挂在 data-role 插槽上而不是整页重画：进度是从轮询并进来的，八百毫秒自己就变了。 */
 function envBarHTML(){
   const s=MIC.s.st;
-  if(!(MIC.nav&&MIC.nav.pageOf&&MIC.nav.pageOf()==='models'))return '';
-  if(s.env_busy)
+  const page=MIC.nav&&MIC.nav.pageOf?MIC.nav.pageOf():'';
+  if(page.indexOf('env_')!==0)return '';
+  const d=s.dl||{};
+  if(s.env_busy||d.busy){
+    const st=Number(s.env_step)||0, n=Number(s.env_steps)||0;
+    const head=(n?'步骤 '+(st||'—')+'/'+n+' · ':'')+
+      esc(s.env_label||(d.repo?'下载 '+d.repo:'补全中'));
+    const total=Number(d.total)||0, done=Number(d.done)||0;
+    const p=total?Math.max(0,Math.min(100,Math.round(done/total*100))):null;
+    const bits=[];
+    if(total)bits.push(fmtB(done)+' / '+fmtB(total));
+    if(d.speed)bits.push(fmtB(d.speed)+'/s');
+    const eta=fmtT(d.eta);if(eta)bits.push('剩 '+eta);
+    if(d.files_total)bits.push((d.files_done||0)+'/'+d.files_total+' 文件');
+    if(d.endpoint)bits.push(esc(hostOf(d.endpoint)));
     return `<div class="envbar busy"><span class="tic">${ic('refresh','s')}</span>
-      <b>环境补全中…</b><span class="mut fine">装包 / 下载权重的进度逐行滚</span><span class="grow"></span>
+      <b>${head}</b>${p===null?'':`<div class="prog"><i style="width:${p}%"></i></div>`}
+      <span class="mut fine">${bits.join(' · ')||'准备中…'}</span><span class="grow"></span>
       <button class="btn sm gho" onclick="MIC.nav.goto('logs')">${ic('hist','s')}看日志</button></div>`;
-  const n=Number(s.env_todo)||0;
+  }
+  const n=Number((s.env_todo_by||{})[page.slice(4)])||0;
   if(!n)return '';
   return `<div class="envbar warn"><span class="tic">${ic('tool','s')}</span>
-    <b>环境还差 ${n} 项</b>
-    <span class="mut fine">两个引擎互相独立，齐一个就能先用一个</span><span class="grow"></span>
-    <button class="btn sm pri" onclick="MIC.env.fixAll()">${ic('down','s')}一键补齐</button></div>`;
+    <b>这一路还差 ${n} 项</b>
+    <span class="mut fine">各环境互相独立，齐一个就能先用一个</span><span class="grow"></span>
+    <button class="btn sm pri" onclick="MIC.env.fixZone('${page.slice(4)}')">${ic('down','s')}一键补齐</button></div>`;
 }
 
 /* 每次轮询后调用：只刷新页面上存在的插槽 */
-/* 左上角那一行跟着控制台模式走：一眼看出这套界面是哪一路的 */
-const MODE_TXT={both:'千问 + Moss · 本地生图',qwen:'仅千问 · 本地生图',moss:'仅 Moss · 本地生图'};
+/* 左上角那一行跟着开着的环境走：一眼看出这台机器现在管得了哪几路 */
+function envKey(){
+  const o=MIC.nav.envOn();
+  return ['qwen','moss','h3'].map(k=>o[k]===false?'0':'1').join('');
+}
+function brandSub(){
+  const o=MIC.nav.envOn(),names=[];
+  if(o.qwen!==false)names.push('千问');
+  if(o.moss!==false)names.push('Moss');
+  if(o.h3!==false)names.push('H3');
+  return names.length?names.join(' + ')+' · 本地生图': '所有模型环境都关着';
+}
 function tick(){
   const s=MIC.s.st;
   MIC.$('pills').innerHTML=pillsHTML();
   const bs=MIC.$('brandSub');
-  if(bs)bs.textContent=MODE_TXT[String(MIC.s.cfg.console_mode||'both')]||MODE_TXT.both;
+  if(bs)bs.textContent=brandSub();
   /* 环境横幅在全局插槽上（不在 #view 里）：哪一页都跟着刷新 */
   const slot=MIC.$('envslot');if(slot)slot.innerHTML=envBarHTML();
   document.querySelectorAll('#view [data-role]').forEach(el=>{
@@ -154,6 +207,10 @@ function tick(){
         if(lp>0){bar.classList.remove('indet');el.style.width=lp+'%';}
         else{bar.classList.add('indet');el.style.width='';}
       }
+      else if(s.running==='video'&&s.video_exec==='cloud'){
+        /* 本地那 4 步给得出粗刻度，云端给不出：不装成有百分比，走不确定动画 */
+        bar.classList.add('indet');el.style.width='';
+      }
       else{bar.classList.remove('indet');el.style.width=pct()+'%';}
     }
     else if(r==='pgtext')el.textContent=pgText();
@@ -163,6 +220,17 @@ function tick(){
     else if(r==='result')el.innerHTML=resultHTML();
     else if(r==='imgprev'){
       if(!s.last_image){el.innerHTML=`<div class="empty">尚无成图 · 出图后在这里预览，点图可打开文件夹</div>`;return;}
+      /* 成片不内嵌播放：内联页放不了 file://，引视频解码依赖不值当——
+         给一颗按钮把成片交给系统播放器，缩略同理不做 */
+      if(isVideo(s.last_image)){
+        const sig='V|'+s.last_image;
+        if(el.dataset.sig===sig)return;
+        el.dataset.sig=sig;
+        el.innerHTML=`<div class="empty">${ic('film','s')} 成片已生成 · `+
+          `<b>${esc(String(s.last_image).split(/[\\/]/).pop())}</b><br>`+
+          `<button class="btn sm pri" onclick="MIC.api.openPath(MIC.s.st.last_image)">${ic('play','s')}打开成片</button></div>`;
+        return;
+      }
       if(prevHidden===s.last_image){
         el.innerHTML=`<div class="empty">预览已收起 · 删图去画廊 · `+
           `<button class="btn sm gho" onclick="MIC.view.showPrev()">重新显示</button></div>`;return;
@@ -223,7 +291,7 @@ let lastRun=null;
 function watchFinish(){
   const cur=MIC.s.st.running;
   if(cur===lastRun)return;
-  const ended=lastRun==='gen'&&cur===null;
+  const ended=(lastRun==='gen'||lastRun==='video')&&cur===null;
   lastRun=cur;
   if(ended){
     if(MIC.gal)MIC.gal.invalidate();   // 生成收尾：画廊缓存作废，下次进页重扫
@@ -241,7 +309,8 @@ function watchStruct(){
   const s=MIC.s.st;
   /* env_todo 也算结构：它决定欢迎页/生图页那条环境提示在不在，
      开机体检晚半秒到，到了一屏字得自己补上。 */
-  const k=[s.engine,s.moss_tier,s.comfyui_on,s.comfyui_loaded,s.moss_installed,s.env_todo].join('|');
+  const k=[s.engine,s.moss_tier,s.comfyui_on,s.comfyui_loaded,s.moss_installed,
+           s.env_todo,envKey()].join('|');
   if(k===lastStruct)return;
   const first=lastStruct==="";
   lastStruct=k;
@@ -274,5 +343,5 @@ function refreshStats(){
 }
 
 MIC.view={tick,watchFinish,watchStruct,logHTML,logText,fillLog,copy:copyText,
-  pct,refreshStats,vramHTML,hidePrev,showPrev,envBarHTML};
+  pct,refreshStats,vramHTML,hidePrev,showPrev,envBarHTML,isVideo};
 })();

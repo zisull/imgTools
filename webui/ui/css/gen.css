@@ -51,6 +51,10 @@
   background:var(--panel);transition:border-color .12s,transform .12s}
 .gcell:hover{border-color:var(--ac-line);transform:translateY(-1px)}
 .gcell img{display:block;width:100%;aspect-ratio:1/1;object-fit:cover;cursor:zoom-in;background:var(--track)}
+/* 成片砖：不做缩略帧（要引视频解码依赖，不值当），给一颗放映图标，点了交系统播放器 */
+.gcell .gvid{display:flex;align-items:center;justify-content:center;width:100%;aspect-ratio:16/9;
+  background:var(--track);cursor:pointer;color:var(--fg3)}
+.gcell .gvid .ic{width:30px;height:30px;color:var(--ac)}
 .gi{padding:6px 10px 0;font-size:12px;color:var(--fg2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .gf{padding:2px 10px 8px;font-size:11px;color:var(--fg3);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 /* 移除按钮常显：只在 hover 现形的 × 会被当成「没有删除功能」 */
@@ -70,6 +74,11 @@
   background:rgba(0,0,0,.45);color:#fff;border:0}
 .gcell:hover .gfill{opacity:1}
 .gfill:hover{background:var(--ac)}
+.gsend{position:absolute;top:6px;right:70px;width:26px;height:26px;padding:0;display:flex;
+  align-items:center;justify-content:center;border-radius:8px;opacity:0;transition:opacity .12s;
+  background:rgba(0,0,0,.45);color:#fff;border:0}
+.gcell:hover .gsend{opacity:1}
+.gsend:hover{background:var(--ac)}
 
 /* 参考图/原图选择：虚线可点可拖的落区（在 .f>.c 的 flex 里要占满一行，不然拖区缩成一小块） */
 .refdrop{flex:1 1 100%;display:flex;align-items:center;justify-content:center;gap:8px;min-height:64px;
@@ -114,7 +123,9 @@
   border-radius:10px;background:var(--well);font-size:13px}
 .envbar.warn{border-left-color:var(--warn)}
 .envbar.busy{border-left-color:var(--ac)}
-.envbar b{font-size:13.5px}
+.envbar b{font-size:13.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:380px}
+.envbar .prog{flex:0 1 220px;min-width:110px;max-width:280px}
+.envbar .mut.fine{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .envbar .grow{flex:1}
 
 /* 灵感行：提示词框下面一排精选完整提示词卡，点一下整句填入 */
@@ -145,7 +156,7 @@
 /* 卡片里的裸提示行（.f 之外也生效） */
 .hint{font-size:12px;color:var(--fg3);line-height:1.6}
 
-/* ── 首启欢迎页：一张牌一路模型，点哪张界面就变成那一套 ── */
+/* ── 首启欢迎页：一张牌一路模型，点牌 = 开 / 关那一路 ── */
 .welcome{max-width:840px;margin:20px auto 0}
 .whead{text-align:center;margin-bottom:16px}
 .whead .ic.wl{width:32px;height:32px;color:var(--ac)}
@@ -157,6 +168,7 @@
   cursor:pointer;transition:.16s}
 .wcard:hover{border-color:var(--ac-line);background:var(--ac-soft);transform:translateY(-2px)}
 .wcard .ic.wi{width:26px;height:26px;color:var(--ac);margin-bottom:5px}
+.wcard .sw{margin-bottom:7px}
 .wcard b{font-size:15px;color:var(--fg)}
 .wt{font-size:11px;color:var(--ac);background:var(--ac-soft);border:1px solid var(--ac-line);
   padding:1px 8px;border-radius:999px}
@@ -167,4 +179,6 @@
 .wr.ok{color:var(--ok)}
 .wr.bad{color:var(--warn)}
 .wfoot{margin-top:14px;text-align:center}
+/* 设置页那一排模型环境开关：三个并排，label 跟在开关后面 */
+.envsw{display:inline-flex;align-items:center;gap:7px;margin:0 16px 4px 0;font-size:12.5px;color:var(--fg2)}
 @media (max-width:860px){.wgrid{grid-template-columns:1fr}}

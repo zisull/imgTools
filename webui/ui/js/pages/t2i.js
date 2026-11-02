@@ -6,26 +6,9 @@
 const MIC=window.MIC=window.MIC||{};
 const C=MIC.form, ic=MIC.ic, esc=MIC.esc;
 
-const QW_SIZES=[
-  {code:'512x512',name:'512×512 草图'},
-  {code:'768x768',name:'768×768 中幅'},
-  {code:'1024x1024',name:'1024×1024 标准'},
-  {code:'576x1024',name:'576×1024 竖 9:16'},
-  {code:'1024x1536',name:'1024×1536 竖 2:3'},
-  {code:'1536x1024',name:'1536×1024 横 3:2'},
-  {code:'1536x1536',name:'1536×1536 高清'},
-  {code:'custom',name:'自定义宽 × 高'},
-];
-const MOSS_SIZES=[
-  {code:'512x512',name:'512×512 草图'},
-  {code:'768x768',name:'768×768 中幅'},
-  {code:'1024x1024',name:'1024×1024 标准'},
-  {code:'832x1216',name:'832×1216 竖版'},
-  {code:'1216x832',name:'1216×832 横版'},
-  {code:'1024x1536',name:'1024×1536 竖 2:3'},
-  {code:'1536x1024',name:'1536×1024 横 3:2'},
-  {code:'custom',name:'自定义宽 × 高'},
-];
+/* 两台引擎共用一套 P 档：P=短边，横/方/竖由选项旁的朝向决定。
+   12G 上日常到 1024P（16:9 约 1824×1024）就够；再大用自定义。 */
+const P_IMG=MIC.form.P_IMG;
 
 /* 引擎那条灯：进程活着不等于权重上卡，说清是没跑、在搬权重、还是已常驻 */
 function engineNote(s,on){
@@ -36,11 +19,11 @@ function engineNote(s,on){
   return 'ComfyUI 在跑，权重已常驻';
 }
 
+/* 引擎条只列开着的环境：关掉千问就不该剩一颗点得动的「千问」按钮 */
 function engineBar(){
-  const s=MIC.s.st,m=String(MIC.s.cfg.console_mode||'both');
-  const both=m==='both';
+  const s=MIC.s.st,o=MIC.nav.envOn();
   const seg='<div class="seg">'+
-    [['qwen','千问'],['moss','Moss']].filter(x=>both||x[0]===m).map(([v,label])=>
+    [['qwen','千问'],['moss','Moss']].filter(x=>o[x[0]]!==false).map(([v,label])=>
       `<button class="${s.engine===v?'on':''}" onclick="MIC.engine.set('${v}')">${label}</button>`).join('')+
     '</div>';
   return `<div class="enginebar">${seg}
@@ -87,7 +70,6 @@ MIC.registerPage('t2i',{
   title:'生图',sub:liveSub,icon:'flower',
   render(){
     const s=MIC.s.st,run=!!s.running,moss=s.engine==='moss',K=moss?'moss':'gen';
-    const installed=s.moss_installed;
     const rgba=!moss&&String(MIC.mget(MIC.s.cfg,'gen.mode'))==='rgba';
     /* 透明档不是抠图：全靠提示词里那句「纯透明背景」，所以提示词的示范也换一个写法 */
     /* 切档要整页重画：示范提示词和提醒都跟着换，seg 的 rr 标记就是干这个的 */
@@ -96,18 +78,18 @@ MIC.registerPage('t2i',{
       '透明底的图标、贴纸切这一档；透明底靠提示词写「纯透明背景」，不是抠图');
     const ph=rgba?'一枚扁平矢量图标，纯透明背景，边缘干净'
         :(moss?'银发少女，柔和棚拍光，眼睛细节清晰':'雨夜的霓虹小巷，湿路面反光，电影感光线');
-    const sizes=moss?MOSS_SIZES:QW_SIZES;
     const custom=String(MIC.mget(MIC.s.cfg,K+'.size'))==='custom';
     const row='<div class="grid4">'+
-        C.field('尺寸',C.sizeSel(K+'.size',sizes,'',true),moss
-          ?'Moss 512 约 1 秒、1024 约 3.3 秒；自定义宽高自动取整到 16 的倍数'
-          :'千问 1024 约 28 秒、1536 约 77 秒；2048 在 12G 上会溢出')+
+        C.field('尺寸',C.pSizeSel(K+'.size',P_IMG,{cw:K+'.cw',ch:K+'.ch'}),moss
+          ?'P=短边，横版 16:9 / 方形 1:1 / 竖版 9:16；Moss 512P 约 1 秒、1024P 约 3.3 秒'
+          :'P=短边，横版 16:9 / 方形 1:1 / 竖版 9:16；千问 1024P 约 28 秒，再大更慢')+
         C.field(moss?'档位':'步数',moss?gradeSel():C.sel(K+'.steps',
           [{code:'8',name:'极速 · 8 步'},{code:'40',name:'精细 · 40 步'}]),
           moss?'极速最快，25 步均衡，50 步最细；「让出显存」停掉引擎，切回来会自动重新拉起'
               :'8 步够用，40 步更细（慢 5 倍）')+
         C.field('种子',C.seedRow(K+'.seed'),'开着每次换一张新图；关掉就固定这个数，同参数复现同图')+
-        C.field('张数',C.num(K+'.count','张'),'连发这么多张，每张一个不同种子')+
+        C.field('张数',C.num(K+'.count','张'),
+          '连发这么多张，每张一个不同种子'+(moss?'；Moss 一轮最多 4 张，再多会被压回 4':''))+
       '</div>';
     const adv=C.field('反向提示词',C.ta(K+'.negative',2,MIC.lib.NEG_BASE),'空着时点灵感卡会自动配一条通用的')+
         (moss?'':C.field('KV 缓存',C.chk(K+'.kv_cache','长提示词更快'),'文本编码器缓存，提示词越长省得越多'));
@@ -128,20 +110,19 @@ MIC.registerPage('t2i',{
       ?'<button class="btn sm gho" onclick="MIC.gen.openDir(true)">'+ic('folder','s')+'Moss 输出目录</button>'
       :'<button class="btn sm gho" onclick="MIC.runner.load()">载入模型</button>'+
         '<button class="btn sm gho" onclick="MIC.runner.unload()">卸载模型</button>';
-    /* Moss 那套环境（内嵌 ComfyUI 与权重）没补齐时给一条短提示，明细都留在环境页 */
-    const envNote=moss&&installed===false
-      ?`<div class="notebar">${ic('db','s')}<b>Moss 环境还没补齐</b><span class="grow"></span>`+
-        `<button class="btn sm pri" onclick="MIC.nav.goto('models')">去补齐</button></div>`
+    /* Moss 那套环境（内嵌 ComfyUI 与权重）没补齐时给一条短提示，明细都留在环境页。
+       数从开机体检的 env_todo_by 里取——以前要进过一次 Moss 页才拿到 installed，
+       提示永远慢一拍 */
+    const todo=Number((s.env_todo_by||{}).moss)||0;
+    const envNote=moss&&todo
+      ?`<div class="notebar">${ic('db','s')}<b>Moss 环境还差 ${todo} 项</b><span class="grow"></span>`+
+        `<button class="btn sm pri" onclick="MIC.nav.goto('env_moss')">去补齐</button></div>`
       :'';
     return engineBar()+envNote+C.duo(
       C.card('生成参数','flower',C.lock(run,params)+MIC.runner.action()),
       MIC.runner.runCard('',{btns:btns}));
   },
-  mount(){
-    /* moss_installed 是进过一次 Moss 才有的数：这一页第一次打开先问一次，
-       不然环境提示永远等不到显示（老版 Moss 页的 mount 就是干这个的） */
-    if(MIC.s.st.engine==='moss'&&MIC.s.st.moss_installed==null)MIC.engine.refresh();
-  },
+  mount(){MIC.engine.refresh();},
 });
 
 /* 引擎切换与档位：都是后端的长活，点完先给一句话，状态由轮询跟上来 */

@@ -1,0 +1,321 @@
+# -*- coding: utf-8 -*-
+"""共用一只调试浏览器：换号只换数据（cookies + localStorage），不重启、不换端口。
+
+Chromium 的 user-data-dir 是启动参数，进程活着就改不了；调试端口也只能对一个进程。
+所以多账号不是「多开浏览器」，而是「一只浏览器 + 多份快照」：
+  apply(id)   清空当前存储 → 灌入该账号快照 → 刷新
+  snapshot(id) 把当前存储抽出来（cookie 带域名/过期时间）
+  sweep()     挨个换号访问平台，把服务端刷新后的 cookie 再存回去（保活）
+
+浏览器只在真要登录/保活时才启动（DrissionPage 也只在那一刻 import）；
+启动路径上不碰它，跟「App() 里不 import torch」是同一条规矩。
+"""
+import os
+import re
+import threading
+import time
+
+from .store import (auth_headers, brief_error, clean_cookies, cloud_dir,
+                    filter_cookies)
+
+# 页面刷新后判断「登录还在不在」：先看强信号，再看登录入口；
+# 两边都没有就老实说「没验证」——不拿猜的结论写进账号状态。
+_JS_BODY = "return (document.body && document.body.innerText || '').slice(0, 4000)"
+_RE_OK = re.compile(r"退出登录|个人中心|我的账号|账户设置")
+_RE_OUT = re.compile(r"登录\s*/\s*注册|立即登录|扫码登录|手机号登录")
+
+
+def cookie_fp(cookies):
+    """只比「换号真正相关」的字段：Chrome 每次回读的顺序/附加字段会变。"""
+    rows = []
+    for c in clean_cookies(cookies):
+        rows.append((c.get("name"), c.get("domain"), c.get("path"),
+                     c.get("value"), c.get("expires")))
+    return sorted(rows, key=lambda x: tuple(str(v) for v in x))
+
+
+def apply_state(tab, state):
+    """把一份快照灌进当前标签页：先清空，再逐条设 cookie，最后对齐 localStorage。
+
+    清空是必须的：共用一只浏览器，残留的上一个账号 cookie 会让平台认错人。
+    """
+    state = state or {}
+    cookies = clean_cookies(state.get("cookies"))
+    storage = {str(k): str(v) for k, v in (state.get("storage") or {}).items()}
+    try:
+        tab.set.cookies.clear()
+    except Exception:
+        pass
+    if cookies:
+        try:
+            tab.set.cookies(cookies)
+        except Exception as e:      # 个别字段（sameSite 枚举）不被接受时逐条退让
+            for c in cookies:
+                try:
+                    tab.set.cookies(c)
+                except Exception:
+                    continue
+    try:
+        cur = tab.local_storage() or {}
+    except Exception:
+        cur = {}
+    for k in list(cur):
+        if k not in storage:
+            try:
+                tab.set.local_storage(k, False)
+            except Exception:
+                pass
+    for k, v in storage.items():
+        try:
+            tab.set.local_storage(k, v)
+        except Exception:
+            pass
+
+
+def snapshot_state(tab, domains=None):
+    try:
+        raw = tab.cookies(all_domains=True, all_info=True) or []
+    except Exception:
+        raw = []
+    rows = []
+    for c in raw:
+        try:
+            rows.append(dict(c))
+        except (TypeError, ValueError):
+            continue
+    try:
+        storage = dict(tab.local_storage() or {})
+    except Exception:
+        storage = {}
+    return {"cookies": filter_cookies(rows, domains), "storage": storage,
+            "url": str(getattr(tab, "url", "") or "")}
+
+
+def login_state(tab):
+    """返回 (state, detail)：ok / expired / unknown。"""
+    url = str(getattr(tab, "url", "") or "")
+    if "/login" in url.lower():
+        return "expired", "跳到了登录页"
+    try:
+        body = str(tab.run_js(_JS_BODY) or "")
+    except Exception:
+        body = ""
+    if _RE_OK.search(body):
+        return "ok", "页面有登录后的入口"
+    if _RE_OUT.search(body):
+        return "expired", "页面只有登录入口"
+    return "unknown", "已保存，页面没有明确信号"
+
+
+class BrowserHost:
+    def __init__(self, root, cfg=None, log=None):
+        self.root = root
+        self.cfg = cfg if isinstance(cfg, dict) else {}
+        self.log = log or (lambda *_: None)
+        self.port = int(self.cfg.get("port") or 9333)
+        self.base = str(self.cfg.get("base") or "https://www.runninghub.cn").rstrip("/")
+        self.profile = os.path.join(cloud_dir(root), "browser")
+        self.domains = [str(s).lstrip(".").lower()
+                        for s in (self.cfg.get("domains") or ["runninghub.cn"]) if s]
+        self._b = None
+        self._lock = threading.RLock()
+        self.current = ""
+        # 这段浏览器的用途：login=人正在登录/看，gen=云端出片占着，''=空闲。
+        # 保活与手动操作都先看它，别再拿一个布尔猜来猜去。
+        self.purpose = ""
+
+    @property
+    def lock(self):
+        return self._lock
+
+    # ---------- 进程 ----------
+    def _opts(self):
+        from DrissionPage import ChromiumOptions
+        co = ChromiumOptions(read_file=False)   # 不读用户级 ini，端口/路径只认这里
+        co.set_local_port(self.port)
+        co.set_user_data_path(self.profile)
+        path = str(self.cfg.get("browser") or "").strip()
+        if path:
+            co.set_browser_path(path)
+        co.set_load_mode("eager")
+        co.set_timeouts(base=10, page_load=30, script=20)
+        co.set_argument("--no-default-browser-check")
+        co.set_argument("--disable-features=Translate,MediaRouter")
+        # 登录页弹「保存密码」会挡住按钮；这是浏览器自己的提示，不影响平台判定
+        co.set_pref("credentials_enable_service", False)
+        co.set_pref("profile.password_manager_enabled", False)
+        return co
+
+    def browser(self):
+        with self._lock:
+            if self._b is None:
+                from DrissionPage import Chromium
+                os.makedirs(self.profile, exist_ok=True)
+                self._b = Chromium(self._opts())
+            return self._b
+
+    def alive(self):
+        """读的是 self._b 这份共享状态：与 browser()/close() 同一把锁，不然就是数据竞争。"""
+        with self._lock:
+            if self._b is None:
+                return False
+            try:
+                _ = self._b.tabs_count
+                return True
+            except Exception:
+                self._b = None
+                return False
+
+    def tab(self):
+        return self.browser().latest_tab
+
+    def close(self):
+        with self._lock:
+            b, self._b = self._b, None
+            self.current = ""
+            self.purpose = ""
+            if b is None:
+                return
+            try:
+                b.quit(timeout=5, force=False)
+            except Exception:
+                pass
+
+    def occupied(self):
+        """这只浏览器被人占着（登录 / 云端出片）＝保活必须让路。"""
+        return bool(self.purpose)
+
+    # ---------- 换号 ----------
+    def apply(self, state, aid="", reload=True):
+        """灌入快照并刷新。调用方负责串行（lock/App 侧的任务锁）。"""
+        with self._lock:
+            tab = self.tab()
+            tab.get(self.base)          # 先在目标域上，cookie 才挂得到正确域名
+            apply_state(tab, state)
+            if reload:
+                tab.get(self.base)
+            self.current = aid or ""
+            return tab.url
+
+    def open_login(self, state=None, aid=""):
+        url = str(self.cfg.get("login_url") or self.base)
+        with self._lock:
+            tab = self.tab()
+            if state is not None:
+                tab.get(self.base)
+                apply_state(tab, state)
+            self.purpose = "login"      # 人正在这个窗口里登录，保活别来顶号
+            tab.get(url)
+            self.current = aid or ""
+            return tab.url
+
+    def open_base(self, state=None, aid="", hold=False):
+        with self._lock:
+            tab = self.tab()
+            if state is not None:
+                tab.get(self.base)
+                apply_state(tab, state)
+            # hold：这次访问是「用户在软件里点的」，读完之前不让保活插进来换号
+            self.purpose = "hold" if hold else ""
+            tab.get(self.base)
+            self.current = aid or ""
+            return tab.url
+
+    def snapshot(self):
+        with self._lock:
+            return snapshot_state(self.tab(), self.domains)
+
+    def check(self):
+        with self._lock:
+            return login_state(self.tab())
+
+    def headers(self, state):
+        """从快照派生协议侧鉴权头（Rh-*）；只给内部用，别打日志。"""
+        return auth_headers((state or {}).get("cookies"), (state or {}).get("storage"))
+
+
+class KeepAlive:
+    """后台保活：每 keep_min 分钟把每个账号轮着用一遍。
+
+    并发固定 1（一只浏览器）：轮换、不要并行——并行换 cookie 等于互相顶号。
+    浏览器没开就跳过并记一句，绝不自己偷偷拉起一个窗口。
+    """
+
+    def __init__(self, host, store, cfg, log=None, busy=None):
+        self.host = host
+        self.store = store
+        self.cfg = cfg if isinstance(cfg, dict) else {}
+        self.log = log or (lambda *_: None)
+        # 有人在手动操作账号 / 云端正在出片：这两个都不许保活插进来换号
+        self.busy = busy or (lambda: False)
+        self.last = 0
+        self.last_msg = "还没跑过"
+        self._stop = threading.Event()
+        self._thread = None
+
+    def start(self):
+        if self._thread is not None and self._thread.is_alive():
+            return
+        self._thread = threading.Thread(target=self._loop, daemon=True, name="cloud-keep")
+        self._thread.start()
+
+    def stop(self):
+        self._stop.set()
+
+    def _loop(self):
+        while not self._stop.wait(60):
+            if not self.cfg.get("keep", True):
+                continue
+            mins = max(5, int(self.cfg.get("keep_min") or 30))
+            if time.time() - self.last < mins * 60:
+                continue
+            try:
+                self.sweep()
+            except Exception as e:
+                self.last_msg = "保活出错：%s" % e
+
+    def sweep(self, force=False):
+        """返回这轮成功的账号数；浏览器没开或被占着时返回 0 并把原因写进 last_msg。
+
+        force=True 是人在界面上点了「立即保活」：他自己就是那个 busy 的人，
+        但云端出片（purpose=gen）那段照样不让插。
+        """
+        if not self.host.alive():
+            self.last_msg = "浏览器没开，保活暂停"
+            return 0
+        if self.host.purpose == "gen":
+            self.last_msg = "云端出片占着浏览器，保活先让路"
+            return 0
+        if not force and self.busy():
+            self.last_msg = "有人在动这只浏览器，保活先让路"
+            return 0
+        done = 0
+        for a in self.store.list():
+            # 号一个一个换：中途有人开登录页/要出片就停在这，别把剩下的号也换一遍。
+            # 直接 return（不写 self.last）：下一分钟就该重试，而不是等满一个保活周期
+            if self.host.occupied():
+                self.last_msg = "保活让路：已跑 %d 个账号" % done
+                return done
+            aid = a["id"]
+            state = self.store.load(aid)
+            if not state or not state.get("cookies"):
+                continue
+            try:
+                with self.host.lock:
+                    self.host.apply(state, aid=aid)
+                    tab = self.host.tab()
+                    tab.get(self.host.base)
+                    st, detail = login_state(tab)
+                    snap = snapshot_state(tab, self.host.domains)
+                    # cookie 没变就不写盘：每 30 分钟一份把 12 份备份挤没了
+                    if cookie_fp(snap["cookies"]) != cookie_fp(state.get("cookies")):
+                        self.store.save(aid, snap["cookies"], snap["storage"], snap["url"])
+                self.store.mark(aid, st, detail)
+                done += 1
+            except Exception as e:
+                self.store.mark(aid, "error", brief_error(e))
+        self.last = time.time()
+        self.last_msg = "保活完成：%d 个账号" % done
+        if done:
+            self.log("☁️ 浏览器保活：%d 个账号" % done)
+        return done

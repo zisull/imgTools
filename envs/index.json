@@ -1,0 +1,60 @@
+{
+  "_note": "环境注册表：python/镜像/下载参数是公共的；每个环境一份 envs/<id>/env.json。装哪个环境由 envs 列表 + 各清单的 models 决定，体检与界面分区都按它走。",
+  "python": { "min": "3.11", "max": "3.13", "best": "3.12" },
+  "indexes": {
+    "pypi": "https://mirrors.aliyun.com/pypi/simple/",
+    "aliyun": "https://mirrors.aliyun.com/pypi/simple/",
+    "torch": "https://download.pytorch.org/whl/cu128"
+  },
+  "download": {
+    "_note": "下载器：装了 Motrix 就先把任务交给它的 aria2（自动读 %APPDATA%/Motrix/settings.json 的端口与密钥，失败自动回落）；否则走内置的多镜像分段下载。chunk_mb/jobs/retries 只作用于内置下载器。",
+    "endpoints": ["https://hf-mirror.com", "https://huggingface.co"],
+    "jobs": 8,
+    "chunk_mb": 64,
+    "retries": 20,
+    "timeout": 60,
+    "probe_timeout": 8,
+    "motrix": true
+  },
+  "runtimes": {
+    "comfyui": {
+      "label": "ComfyUI 运行时",
+      "env": "moss",
+      "repo": "https://github.com/Comfy-Org/ComfyUI.git",
+      "branch": "v0.42.1",
+      "dir": "comfyui",
+      "min_commit": "e087d8f6cb7c6cdb11b59dc7c9bf17c79f8d877d",
+      "venv": "comfyui/.venv",
+      "requirements": "comfyui/requirements.txt",
+      "torch_index": "https://download.pytorch.org/whl/cu130",
+      "torch_note": "Moss 与 H3 共用这一个 ComfyUI 子进程与 .venv。int8/w4a8 的 CUDA 内核要 cu130+（quant_ops 在 torch.version.cuda < 13 时把 kitchen 后端整组禁用），千问那套仍走 indexes.torch 的 cu128。"
+    }
+  },
+  "packages": [
+    { "name": "pywebview", "version": "6.2.1", "index": "pypi",
+      "note": "桌面壳本体" },
+    { "name": "huggingface-hub", "version": "2.2.0", "index": "pypi",
+      "note": "权重清单与兜底下载" },
+    { "name": "pillow", "version": "12.3.0", "index": "pypi" },
+    { "name": "numpy", "version": "2.5.4", "index": "pypi" },
+    { "name": "fastapi", "version": "0.143.0", "index": "pypi", "optional": true,
+      "note": "设置页里的 API 服务用；不装也能生图" },
+    { "name": "uvicorn", "version": "0.54.0", "index": "pypi", "optional": true },
+    { "name": "python-multipart", "version": "0.0.32", "index": "pypi", "optional": true },
+    { "name": "DrissionPage", "version": "4.1.1.4", "index": "pypi", "optional": true,
+      "note": "云端账号页用：共用调试浏览器登录/保活；不装只影响「云端」页，不影响本地出图" }
+  ],
+  "dirs": [
+    { "path": "outputs", "note": "成图输出目录" },
+    { "path": "data", "note": "历史库（删了不丢图，只是丢收藏与参数回填）" },
+    { "path": "logs", "note": "运行日志" }
+  ],
+  "envs": [
+    { "id": "qwen", "label": "千问", "icon": "flower", "engine": "qwen",
+      "spec": "qwen/env.json" },
+    { "id": "moss", "label": "Moss", "icon": "wave", "engine": "moss",
+      "runtime": "comfyui", "spec": "moss/env.json" },
+    { "id": "h3", "label": "H3 视频", "icon": "film", "engine": "moss",
+      "runtime": "comfyui", "optional": true, "spec": "h3/env.json" }
+  ]
+}

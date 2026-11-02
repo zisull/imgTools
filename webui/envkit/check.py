@@ -1,10 +1,9 @@
 # -*- coding: utf-8 -*-
-"""
-env_check.py —— 按 env.json 清单体检运行环境，并给出「缺什么、怎么补」
+"""check.py —— 按 envs/ 清单体检运行环境，并给出「缺什么、怎么补」
 ====================================================================
-存在的意义：换电脑时只有代码是跟着 git 走的，`.venv/` 和 30GB 的 `models/` 都不进版本库。
-所以「跑起来需要什么」必须写成一份机器可读的清单（ROOT/env.json），由这里逐项核对，
-壳上的「环境」页据此提供一键补齐。
+存在的意义：换电脑时只有代码是跟着 git 走的，`.venv/` 和几十 GB 的权重都不进版本库。
+所以「跑起来需要什么」写成按环境拆开的清单（envs/index.json + envs/<id>/env.json），
+由这里逐项核对，壳上的「环境」页据此按环境分区提供一键补齐。
 
 三条口径：
   · 检测是纯函数 + 可注入探针（单测不装包、不碰真权重）
@@ -17,32 +16,19 @@ import re
 import shutil
 import sys
 
-SPEC_FILE = "env.json"
+_WEBUI = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _WEBUI not in sys.path:
+    sys.path.insert(0, _WEBUI)
+
+from envkit import spec as sp          # noqa: E402
 
 # 分组名（前端按这个顺序显示）
 G_PY = "运行环境"
 G_PKG = "依赖包"
 G_MODEL = "模型权重"
-G_MOSS = "Moss 环境"
+G_RUNTIME = "ComfyUI 运行时"
 G_DIR = "目录"
-
-
-class SpecError(Exception):
-    """env.json 读不了或不成形。"""
-
-
-def load_spec(root):
-    p = os.path.join(root, SPEC_FILE)
-    try:
-        with open(p, "r", encoding="utf-8") as f:
-            spec = json.load(f)
-    except OSError as e:
-        raise SpecError("读不到 %s：%s" % (p, e))
-    except ValueError as e:
-        raise SpecError("%s 不是合法 JSON：%s" % (SPEC_FILE, e))
-    if not isinstance(spec.get("packages"), list) or not isinstance(spec.get("models"), list):
-        raise SpecError("%s 缺 packages 或 models 段" % SPEC_FILE)
-    return spec
+G_MOSS = G_RUNTIME                      # 旧名字，别处还在用
 
 
 # ---------------------------------------------------------------- 探针（可注入）
@@ -82,8 +68,6 @@ def torch_flavor(python_exe):
             txt = f.read()
     except OSError:
         return out
-    import re
-
     ver = re.search(r"^__version__\s*=\s*['\"]([^'\"]+)['\"]", txt, re.M)
     cud = re.search(r"^cuda\b[^=\n]*=\s*['\"]([^'\"]+)['\"]", txt, re.M)
     out["installed"] = True
@@ -155,9 +139,10 @@ def _ver_ge(have, want):
 
 
 # ---------------------------------------------------------------- 单项检测
-def _item(key, group, label, state, detail, fix=None, **extra):
+def _item(key, group, label, state, detail, fix=None, env=sp.BASE, optional=False, **extra):
     it = {"key": key, "group": group, "label": label, "state": state,
-          "detail": detail, "fix": fix or {"kind": "none"}}
+          "env": env, "optional": bool(optional), "detail": detail,
+          "fix": fix or {"kind": "none"}}
     it.update(extra)
     return it
 
@@ -176,7 +161,7 @@ def _check_python(root, spec, py_version):
     else:
         st, d = "ok", "当前 %s（要求 %s~%s）" % (cur, lo or "-", hi or "-")
     return _item("python", G_PY, "Python 解释器", st,
-                 d + " · 换解释器请用 setup.bat 建 .venv")
+                 d + " · 换解释器请用根目录的 启动.bat 重建 .venv")
 
 
 def _in_venv(prefix, root):
@@ -196,11 +181,10 @@ def _check_venv(root, prefix):
 def _git_commit(name):
     """装包时记录的 git commit（pip 从 git+URL 装才会有）；查不到返回 None。"""
     import importlib.metadata as md
-    import json as _json
 
     try:
         raw = md.distribution(name).read_text("direct_url.json")
-        vi = (_json.loads(raw or "{}") or {}).get("vcs_info") or {}
+        vi = (json.loads(raw or "{}") or {}).get("vcs_info") or {}
         return vi.get("commit_id") or None
     except Exception:
         return None
@@ -212,39 +196,40 @@ def _check_pkg(spec, name, have, cuda, gitc=None):
     minv = str(name.get("min") or want)
     pin = str(name.get("commit") or "")
     optional = bool(name.get("optional"))
-    # 分组默认「依赖包」（=千问分区）；只服务某一个引擎的包在清单里标 group 归到它那边
-    group = str(name.get("group") or G_PKG)
+    env = str(name.get("env") or sp.BASE)
     label = "%s %s" % (name["name"], pin[:8] if pin else want)
     key = "pkg:" + name["name"]
     idx = (spec.get("indexes") or {}).get(name.get("index") or "")
     fix = {"kind": "pip", "spec": _pip_spec(name), "index": idx or "",
            "index_url": bool(name.get("index") == "torch")}
     if have is None:
-        return _item(key, group, label, "warn" if optional else "miss",
-                     "没装" + ("（可选，只影响设置里的 API 服务）" if optional else ""), fix)
+        return _item(key, G_PKG, label, "warn" if optional else "miss",
+                     "没装" + ("（可选，点名可补）" if optional else ""),
+                     fix, env=env)
     if pin:
         # 钉死 commit 的开发版：版本号（0.41.0.dev0）比不出任何东西，只能核对装的是哪个 commit
         got = (gitc or _git_commit)(name["name"])
         if not got:
-            return _item(key, group, label, "warn",
+            return _item(key, G_PKG, label, "warn",
                          "已装 %s，但查不出装的是哪个 commit（清单钉 %s）· "
-                         "出图异常时点这项重装" % (have, pin[:8]), fix)
+                         "出图异常时点这项重装" % (have, pin[:8]), fix, env=env)
         if got[:len(pin)] != pin and pin[:len(got)] != got:
-            return _item(key, group, label, "part",
-                         "已装 %s，但 commit 是 %s，清单钉的是 %s" % (have, got[:8], pin[:8]), fix)
-        return _item(key, group, label, "ok", "已装 %s · commit %s" % (have, got[:8]))
+            return _item(key, G_PKG, label, "part",
+                         "已装 %s，但 commit 是 %s，清单钉的是 %s" % (have, got[:8], pin[:8]),
+                         fix, env=env)
+        return _item(key, G_PKG, label, "ok", "已装 %s · commit %s" % (have, got[:8]), env=env)
     if not _ver_ge(have, minv):
-        return _item(key, group, label, "part", "已装 %s，要求 ≥%s" % (have, minv), fix)
+        return _item(key, G_PKG, label, "part", "已装 %s，要求 ≥%s" % (have, minv), fix, env=env)
     if name.get("cuda"):
         ok_cuda, built = cuda
         if ok_cuda is None:
-            return _item(key, group, label, "part", "已装 %s 但 import 不了" % have, fix)
+            return _item(key, G_PKG, label, "part", "已装 %s 但 import 不了" % have, fix, env=env)
         if not ok_cuda:
-            return _item(key, group, label, "part",
+            return _item(key, G_PKG, label, "part",
                          "已装 %s，但 CUDA 用不了%s——多半是从 PyPI 默认索引装的 CPU 轮子，"
                          "得走 %s 重装" % (have, "（编译时 CUDA=%s）" % built if built else "",
-                                          idx or "cu128 索引"), fix)
-    return _item(key, group, label, "ok", "已装 %s" % have)
+                                          idx or "cu128 索引"), fix, env=env)
+    return _item(key, G_PKG, label, "ok", "已装 %s" % have, env=env)
 
 
 def _pip_spec(pkg):
@@ -254,34 +239,43 @@ def _pip_spec(pkg):
     return "%s==%s" % (pkg["name"], v) if v else pkg["name"]
 
 
-def _check_model(root, m):
+def _model_key(m):
+    return "model:" + str(m.get("key") or m.get("dir") or "?")
+
+
+def _check_model(root, m, env=None, optional=False):
     rel = str(m.get("dir") or "")
-    d = os.path.join(root, *rel.split("/"))
+    d = sp.model_dir(root, m)
     label = "%s（%s）" % (m.get("label") or rel, m.get("repo") or "")
-    fix = {"kind": "model", "repo": m.get("repo"), "name": os.path.basename(rel.rstrip("/"))}
+    allow = sorted((m.get("must") or {}).keys()) or [str(a) for a in (m.get("allow") or [])]
+    fix = {"kind": "model", "repo": m.get("repo"), "dir": rel, "allow": allow}
+    env = env or m.get("env") or sp.BASE
     if not os.path.isdir(d):
-        return _item("model:" + str(m.get("key") or rel), G_MODEL, label, "miss",
-                     "目录不存在：%s · 约 %s GB" % (rel, m.get("gb", "?")), fix, gb=m.get("gb"))
-    bad, lost = [], []
+        return _item(_model_key(m), G_MODEL, label, "miss",
+                     "目录不存在：%s · 约 %s GB" % (rel, m.get("gb", "?")),
+                     fix, env=env, optional=optional, gb=m.get("gb"))
+    lost, bad = [], []
     for f, size in (m.get("must") or {}).items():
-        p = os.path.join(d, *f.split("/"))
+        p = os.path.join(d, *str(f).split("/"))
         try:
             got = os.path.getsize(p)
         except OSError:
             lost.append(f)
             continue
         if int(size) and got != int(size):
-            bad.append("%s（%d / 应 %d 字节）" % (f, got, int(size)))
+            bad.append("%s（%d / 应 %d）" % (f, got, int(size)))
     if lost or bad:
         bits = []
         if lost:
             bits.append("缺 %d 个文件（%s）" % (len(lost), "、".join(lost[:2])))
         if bad:
             bits.append("%d 个文件字节数不对（%s）" % (len(bad), bad[0]))
-        return _item("model:" + str(m.get("key") or rel), G_MODEL, label, "part",
-                     "权重不完整：" + "；".join(bits) + " · 续传补齐即可", fix)
-    return _item("model:" + str(m.get("key") or rel), G_MODEL, label, "ok",
-                 "文件齐全（%d 项校验过）" % len(m.get("must") or {}), fix)
+        return _item(_model_key(m), G_MODEL, label, "part",
+                     "权重不完整：" + "；".join(bits) + " · 续传补齐即可",
+                     fix, env=env, optional=optional, gb=m.get("gb"))
+    return _item(_model_key(m), G_MODEL, label, "ok",
+                 "权重齐全（%d 项校验过）" % len(m.get("must") or {}),
+                 fix, env=env, optional=optional, gb=m.get("gb"))
 
 
 def _abs(root, rel):
@@ -299,131 +293,99 @@ def _comfyui_version(d):
         return ""
 
 
-def _check_comfyui(root, moss, probe):
-    cx = moss.get("comfyui") or {}
-    rel = cx.get("dir") or "comfyui"
-    d = _abs(root, rel)
-    fix = {"kind": "comfyui", "repo": cx.get("repo"), "branch": cx.get("branch")}
+def _check_runtime(root, spec):
+    rt = (spec.get("runtimes") or {}).get("comfyui") or {}
+    env = str(rt.get("env") or "moss")
+    d = sp.runtime_dir(root, spec)
+    rel = os.path.relpath(d, root).replace("\\", "/")
+    fix = {"kind": "comfyui", "repo": rt.get("repo"), "branch": rt.get("branch"),
+           "dir": rel}
+    label = "%s（%s）" % (rt.get("label") or "ComfyUI 运行时", rel)
     if os.path.isfile(os.path.join(d, "main.py")):
         # 「main.py 在」不等于「认得 moss_image」：原生支持是 v0.42.0 才进的（PR#17095）。
         # 拿 min_commit 做 git 祖先判断又慢又脆（用户可能不用 git 方式拿代码），
-        # 直接看那个节点文件在不在最准——缺它的版本一起步就会在出图时报「未知 class_type」，
-        # 那正是「换机 clone → 打开即出图」这条链上最难查的静默失败。
+        # 直接看那个节点文件在不在最准——缺它的版本一起步就会在出图时报「未知 class_type」。
         if not os.path.isfile(os.path.join(d, "comfy_extras", "nodes_moss_image.py")):
-            return _item("comfy:app", G_MOSS, "内嵌 ComfyUI（%s）" % rel, "part",
+            return _item("comfy:app", G_RUNTIME, label, "part",
                          "已有 ComfyUI（版本 %s）但不认 moss_image：原生支持要 v0.42+，"
                          "一键补全会拉到 %s" % (_comfyui_version(d) or "未知",
-                                                cx.get("branch") or "v0.42.1"), fix)
-        return _item("comfy:app", G_MOSS, "内嵌 ComfyUI（%s）" % rel, "ok",
+                                                rt.get("branch") or "v0.42.1"), fix, env=env)
+        return _item("comfy:app", G_RUNTIME, label, "ok",
                      "main.py 就位 · %s · 含 moss_image 节点" % (
                          _comfyui_version(d) and "v" + _comfyui_version(d)
-                         or "版本未知"))
-    if probe is None:
-        return _item("comfy:app", G_MOSS, "内嵌 ComfyUI（%s）" % rel, "miss",
-                     "还没 clone（约 100MB · %s）" % (cx.get("repo") or "Comfy-Org/ComfyUI"),
-                     fix)
-    return _item("comfy:app", G_MOSS, "内嵌 ComfyUI（%s）" % rel, "miss",
-                 probe(d), fix)
+                         or "版本未知"), env=env)
+    return _item("comfy:app", G_RUNTIME, label, "miss",
+                 "还没 clone（约 100MB · %s）" % (rt.get("repo") or "Comfy-Org/ComfyUI"),
+                 fix, env=env)
 
 
-def _check_comfyvenv(root, moss, probe):
-    v = moss.get("venv") or {}
-    cx = moss.get("comfyui") or {}
-    d = _abs(root, cx.get("dir") or "comfyui")
-    py = os.path.join(d, ".venv", "Scripts" if os.name == "nt" else "bin",
-                      "python.exe" if os.name == "nt" else "python")
-    fix = {"kind": "comfyvenv", "dir": v.get("dir") or "comfyui/.venv",
-           "requirements": v.get("requirements") or "comfyui/requirements.txt"}
+def _check_runtime_venv(root, spec):
+    rt = (spec.get("runtimes") or {}).get("comfyui") or {}
+    env = str(rt.get("env") or "moss")
+    d = sp.runtime_dir(root, spec)
+    vrel = str(rt.get("venv") or "comfyui/.venv")
+    py = _abs(root, os.path.join(vrel, "Scripts" if os.name == "nt" else "bin",
+                                 "python.exe" if os.name == "nt" else "python"))
+    fix = {"kind": "comfyvenv", "dir": vrel,
+           "requirements": rt.get("requirements") or "comfyui/requirements.txt"}
+    label = "%s · 独立 venv" % (rt.get("label") or "ComfyUI 运行时")
     if os.path.isfile(py):
         # 「有 python.exe」不等于「能用」：Windows 上按 ComfyUI 的 requirements 直装
         # 会拿到 CPU 版 torch，ComfyUI 一起步就 AssertionError 崩掉——所以这里必须看轮子颜色。
         fl = torch_flavor(py)
         if not fl["installed"]:
-            return _item("comfy:venv", G_MOSS, "ComfyUI 独立环境", "part",
-                         ".venv 建好了但依赖没装（里面没有 torch）", fix)
+            return _item("comfy:venv", G_RUNTIME, label, "part",
+                         ".venv 建好了但依赖没装（里面没有 torch）", fix, env=env)
         if not fl["cuda"]:
-            return _item("comfy:venv", G_MOSS, "ComfyUI 独立环境", "part",
+            return _item("comfy:venv", G_RUNTIME, label, "part",
                          "torch 装成了 CPU 版（%s）：ComfyUI 起不来，点补齐换 CUDA 轮子"
-                         % (fl["version"] or "版本未知"), fix)
-        return _item("comfy:venv", G_MOSS, "ComfyUI 独立环境", "ok",
-                     ".venv 已建 · torch %s（CUDA %s）" % (fl["version"], fl["cuda"]))
+                         % (fl["version"] or "版本未知"), fix, env=env)
+        return _item("comfy:venv", G_RUNTIME, label, "ok",
+                     ".venv 已建 · torch %s（CUDA %s）" % (fl["version"], fl["cuda"]), env=env)
     if not os.path.isfile(os.path.join(d, "main.py")):
-        return _item("comfy:venv", G_MOSS, "ComfyUI 独立环境", "miss",
-                     "要先有 ComfyUI 本体才能建它的环境", fix)
-    return _item("comfy:venv", G_MOSS, "ComfyUI 独立环境", "miss",
-                 "ComfyUI 已在但没建 .venv（装它自己的 torch/依赖）", fix)
-
-
-def _check_moss_model(root, m, probe):
-    rel = str(m.get("dir") or "")
-    d = _abs(root, rel)
-    label = "%s（%s）" % (m.get("label") or rel, m.get("repo") or "")
-    key = "moss:" + str(m.get("key") or rel)
-    fix = {"kind": "mossmodel", "repo": m.get("repo"), "name": rel,
-           "allow": m.get("allow") or []}
-    if not os.path.isdir(d):
-        return _item(key, G_MOSS, label, "miss",
-                     "目录不存在：%s · 约 %s GB" % (rel, m.get("gb", "?")), fix, gb=m.get("gb"))
-    lost, bad = [], []
-    for f, size in (m.get("must") or {}).items():
-        p = os.path.join(d, *str(f).split("/"))
-        try:
-            got = os.path.getsize(p)
-        except OSError:
-            lost.append(f)
-            continue
-        if int(size) and got != int(size):
-            bad.append("%s（%d / 应 %d）" % (f, got, int(size)))
-    if lost or bad:
-        why = probe(d) if probe else ""
-        bits = []
-        if lost:
-            bits.append("缺 %d 个文件（%s）" % (len(lost), "、".join(lost[:2])))
-        if bad:
-            bits.append("%d 个字节数不对（%s）" % (len(bad), bad[0]))
-        det = "权重不完整：" + "；".join(bits) + " · 续传补齐即可"
-        if why:
-            det += " · " + why
-        return _item(key, G_MOSS, label, "part", det, fix, gb=m.get("gb"))
-    return _item(key, G_MOSS, label, "ok",
-                 "权重齐全（%d 项校验过）" % len(m.get("must") or {}), fix)
-
-
-def _moss_checks(root, spec, probe=None):
-    """Moss 一组的体检项：ComfyUI 本体 / 独立环境 / 两组权重。"""
-    moss = spec.get("moss")
-    if not isinstance(moss, dict):
-        return []
-    items = [_check_comfyui(root, moss, probe),
-             _check_comfyvenv(root, moss, probe)]
-    for m in moss.get("models") or []:
-        items.append(_check_moss_model(root, m, probe))
-    return items
+        return _item("comfy:venv", G_RUNTIME, label, "miss",
+                     "要先有 ComfyUI 本体才能建它的环境", fix, env=env)
+    return _item("comfy:venv", G_RUNTIME, label, "miss",
+                 "ComfyUI 已在但没建 .venv（装它自己的 torch/依赖）", fix, env=env)
 
 
 def _check_dir(root, d):
-    p = os.path.join(root, *str(d["path"]).split("/"))
+    p = _abs(root, d["path"])
+    env = str(d.get("env") or sp.BASE)
     fix = {"kind": "dir", "path": d["path"]}
     if os.path.isdir(p):
         try:
-            with open(os.path.join(p, ".qic_write"), "w") as f:
+            probe = os.path.join(p, ".qic_write")
+            with open(probe, "w") as f:
                 f.write("x")
-            os.remove(os.path.join(p, ".qic_write"))
+            os.remove(probe)
         except OSError as e:
             return _item("dir:" + d["path"], G_DIR, d["path"] + "/", "warn",
-                         "目录在但写不进去：%s" % e, fix)
-        return _item("dir:" + d["path"], G_DIR, d["path"] + "/", "ok", "可写", fix)
+                         "目录在但写不进去：%s" % e, fix, env=env)
+        return _item("dir:" + d["path"], G_DIR, d["path"] + "/", "ok", "可写", fix, env=env)
     return _item("dir:" + d["path"], G_DIR, d["path"] + "/", "miss",
-                 "还没有这个目录（%s）" % (d.get("note") or ""), fix)
+                 "还没有这个目录（%s）" % (d.get("note") or ""), fix, env=env)
 
 
-def _check_disk(root, spec, free_gb):
-    need = sum(float(m.get("gb") or 0) for m in spec.get("models") or [])
-    for m in ((spec.get("moss") or {}).get("models") or []):
-        need += float(m.get("gb") or 0)
+def _check_disk(root, spec, free_gb, need=None):
+    """磁盘只算「这次真要装的」：已在盘上的权重不重复占额度，可选环境没装也不占。
+
+    need 传 None 时按清单总额估算（给不跑完整体检的场景兜底）。
+    """
+    if need is None:
+        installed = {e["id"] for e in spec.get("envs") or []
+                     if sp.env_installed(root, spec, e["id"])}
+        need = 0.0
+        for m in spec.get("models") or []:
+            env = m.get("env") or sp.BASE
+            meta = sp.env_meta(spec, env)
+            if meta.get("optional") and env not in installed:
+                continue
+            need += float(m.get("gb") or 0)
     f = float(free_gb or 0)
     if f >= need * 1.15:
-        return _item("disk", G_PY, "磁盘空间", "ok", "本盘剩余 %.1f GB（权重共约 %.1f GB）" % (f, need))
+        return _item("disk", G_PY, "磁盘空间", "ok",
+                     "本盘剩余 %.1f GB（待补权重约 %.1f GB）" % (f, need))
     return _item("disk", G_PY, "磁盘空间", "warn",
                  "剩余 %.1f GB，装不下约 %.1f GB 的权重 · 先腾地方再补全" % (f, need))
 
@@ -432,7 +394,7 @@ def _check_disk(root, spec, free_gb):
 def check(root, spec=None, py_version=None, prefix=None, pkg_version=None,
           cuda=None, free_gb=None, git_commit=None):
     """体检一遍。所有探针都能注入，单测据此造「假机器」。"""
-    spec = spec or load_spec(root)
+    spec = spec or sp.load_spec(root)
     pv = pkg_version or _pkg_version
     cu = cuda() if callable(cuda) else (cuda or _cuda_state())
     if free_gb is None:
@@ -440,34 +402,62 @@ def check(root, spec=None, py_version=None, prefix=None, pkg_version=None,
             free_gb = shutil.disk_usage(root).free / 2 ** 30
         except OSError:
             free_gb = 0.0
+    opt = {e["id"] for e in spec.get("envs") or [] if e.get("optional")}
+    installed = {e["id"] for e in spec.get("envs") or []
+                 if sp.env_installed(root, spec, e["id"])}
     items = [
         _check_python(root, spec, py_version),
         _check_venv(root, prefix or sys.prefix),
-        _check_disk(root, spec, free_gb),
     ]
     for pkg in spec.get("packages") or []:
         items.append(_check_pkg(spec, pkg, pv(pkg["name"]), cu, gitc=git_commit))
     for m in spec.get("models") or []:
-        items.append(_check_model(root, m))
-    items.extend(_moss_checks(root, spec))
+        env = m.get("env") or sp.BASE
+        items.append(_check_model(root, m, env=env, optional=env in opt))
+    if spec.get("runtimes"):
+        env = str(((spec.get("runtimes") or {}).get("comfyui") or {}).get("env") or "moss")
+        items.append(_check_runtime(root, spec))
+        items.append(_check_runtime_venv(root, spec))
+        for it in items:
+            if it["key"].startswith("comfy:"):
+                it["optional"] = env in opt
     for d in spec.get("dirs") or []:
         items.append(_check_dir(root, d))
+    # 磁盘额度只看「还没在盘上的」：已装的权重不重复占，没装的 H3 也不占
+    need = 0.0
+    for it in items:
+        if it["group"] != G_MODEL or it["state"] == "ok":
+            continue
+        if it.get("optional") and it["env"] not in installed:
+            continue
+        need += float(it.get("gb") or 0)
+    items.insert(2, _check_disk(root, spec, free_gb, need))
     todo = fix_plan(items)
     return {"ok": True, "items": items, "todo": [x["key"] for x in todo],
             "gb": round(sum(float(x.get("gb") or 0) for x in todo), 1),
-            "spec": SPEC_FILE}
+            "envs": sp.envs_meta(spec), "spec": spec.get("spec") or sp.INDEX}
 
 
-def fix_plan(items, keys=None):
-    """挑出「能自动补」的条目；keys=None 表示全部。"""
+def fix_plan(items, keys=None, include_optional=False):
+    """挑出「能自动补」的条目。
+
+    keys=None 表示「全部该补的」，默认跳过可选环境（H3 这类）——
+    不想要视频功能的人不该一直被提示「还差 41 GB」。
+    """
     want = None if keys is None else set(keys)
     out = []
     for it in items:
+        named = want is not None and it["key"] in want
         if it["state"] not in ("miss", "part"):
-            continue
+            # 可选包没装只是 warn：一键补齐/分区补齐不碰它，点名了才装
+            if not (named and it["state"] == "warn"):
+                continue
         if it["fix"]["kind"] == "none":
             continue
-        if want is not None and it["key"] not in want:
+        if want is not None:
+            if not named:
+                continue
+        elif it.get("optional") and not include_optional:
             continue
         out.append(it)
     return out
@@ -483,11 +473,12 @@ def pip_argv(item, python=None):
     return argv
 
 
-if __name__ == "__main__":  # 命令行体检：python webui/env_check.py [root]
-    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if __name__ == "__main__":  # 命令行体检：python webui/envkit/check.py [root]
+    root = os.path.dirname(_WEBUI)
     if len(sys.argv) > 1:
         root = os.path.abspath(sys.argv[1])
     r = check(root)
     for it in r["items"]:
-        print("%-5s %-6s %-34s %s" % (it["state"].upper(), it["group"], it["label"], it["detail"]))
+        print("%-5s %-6s %-8s %-34s %s"
+              % (it["state"].upper(), it["env"], it["group"], it["label"], it["detail"]))
     print("\n可自动补齐 %d 项：%s" % (len(r["todo"]), "、".join(r["todo"]) or "无"))

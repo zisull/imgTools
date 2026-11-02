@@ -6,9 +6,9 @@ MIC.s={
   cfg:null,                       // 后端 DEFAULT_CFG 合并后的配置
   version:'',
   st:{
-    running:null,                 // null | 'load' | 'gen'
+    running:null,                 // null | 'load' | 'gen' | 'video'
     status:'就绪',
-    done:0,total:0,               // 去噪步数进度（8 或 40）
+    done:0,total:0,               // 去噪步数进度（8 / 40 / 出片 4）
     model_loaded:false,
     model_name:'',
     quant:'fp8',

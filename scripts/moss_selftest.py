@@ -10,7 +10,7 @@
   · 引擎「没起来」时的三种退场：进程崩、用户按停止、失败路径的锁可重入
   · 报错只引用本轮那一段日志（旧崩溃不会被当成这一轮的根因），等待期间有心跳
   · /ws 与 /prompt 的先后顺序、事件整批丢失时的 history 兜底
-  · env_check 的 Moss 段（comfyui/comfyvenv/mossmodel 三类可修项）
+  · envkit 体检的 Moss 段（comfyui/comfyvenv/model 三类可修项）
   · 内嵌 ComfyUI 的 torch 索引单独指 cu130+（int8/w4a8 内核的开关，千问那套不动）
   · 旧版 ComfyUI（main.py 在但没有 moss_image 节点）要报「可修」，不能报绿灯
   · 对外 API 的长跑上限：参考图分块拦截、任务单淘汰、排队满了回 429
@@ -274,24 +274,30 @@ def test_ws_order_and_loss():
 
 
 def test_env_moss():
-    import env_check as ec
+    from envkit import check as ec
+    from envkit import spec as sp
 
-    spec = ec.load_spec(ROOT)
-    assert isinstance(spec.get("moss"), dict), "env.json 要有 moss 段"
+    spec = sp.load_spec(ROOT)
+    assert sp.env_meta(spec, "moss"), "注册表里要有 moss 环境"
     # 拿一个空的临时根目录当「干净机器」：本机可能已经补全过了，
     # 拿真实 ROOT 断言「该有 comfyui/comfyvenv 可修」就成了看运气。
     clean = tempfile.mkdtemp(prefix="moss_selftest_env_")
     try:
-        items = ec._moss_checks(clean, spec)
+        r = ec.check(clean, spec=spec, pkg_version=lambda n: None,
+                     cuda=(None, None), free_gb=500.0, git_commit=lambda n: None)
     finally:
         shutil.rmtree(clean, ignore_errors=True)
+    items = [it for it in r["items"] if it["env"] == "moss"]
     kinds = {it["fix"]["kind"] for it in items}
-    assert {"comfyui", "comfyvenv", "mossmodel"} <= kinds, kinds
-    assert all(it["group"] == "Moss 环境" for it in items)
+    assert {"comfyui", "comfyvenv", "model"} <= kinds, kinds
+    assert all(it["group"] in (ec.G_RUNTIME, ec.G_MODEL, ec.G_PKG) for it in items), items
     plan = {it["key"] for it in ec.fix_plan(items)}
-    assert {"comfy:app", "comfy:venv", "moss:moss-comfy", "moss:moss-lora"} <= plan, plan
+    assert {"comfy:app", "comfy:venv", "model:moss-comfy",
+            "model:moss-lora"} <= plan, plan
     # 权重清单必须带精确字节数（断点续传靠它判完整）
-    for m in spec["moss"]["models"]:
+    for m in spec["models"]:
+        if m.get("env") != "moss":
+            continue
         assert m.get("must") and all(int(v) > 1000 for v in m["must"].values()), m["key"]
     print("  ✓ env 体检：Moss 段 4 项可修，权重清单带精确字节数")
 
@@ -303,21 +309,21 @@ def test_comfyui_torch_index():
     comfy/quant_ops.py 在 torch.version.cuda < 13 时把整套 kitchen CUDA 后端
     disable 掉，只走 eager 反量化。同一张 12G 卡热 512²/8 步实测 4.3 秒 → 0.9 秒。
     """
-    import env_check as ec
+    from envkit import spec as sp
 
     def cu(s):
         m = re.search(r"cu(\d+)", str(s or ""))
         return int(m.group(1)) if m else 0
 
-    spec = ec.load_spec(ROOT)
+    spec = sp.load_spec(ROOT)
     qwen = str((spec.get("indexes") or {}).get("torch") or "")
-    mine = str(((spec.get("moss") or {}).get("comfyui") or {}).get("torch_index") or "")
+    mine = str(((spec.get("runtimes") or {}).get("comfyui") or {}).get("torch_index") or "")
     assert cu(mine) >= 130, "内嵌 ComfyUI 的 torch 没指到 cu130+：int8/w4a8 内核会被整组关掉，出图慢 5 倍"
     assert cu(qwen) < cu(mine), "千问那套不跑 int8/w4a8 内核，索引不该跟着一起换"
 
-    # 只改 env.json 不改 app.py 等于没改：这两行断言盯的是「代码真读了这个键」
-    src = open(os.path.join(ROOT, "webui", "app.py"), encoding="utf-8").read()
-    assert "torch_index" in src, "app.py 里没人读 moss.comfyui.torch_index"
+    # 只改清单不改代码等于没改：这两行断言盯的是「代码真读了这个键」
+    src = open(os.path.join(ROOT, "webui", "envkit", "install.py"), encoding="utf-8").read()
+    assert "torch_index" in src, "envkit/install.py 里没人读 runtimes.comfyui.torch_index"
     assert "--force-reinstall" in src, "只换 local 标记（+cu128→+cu130）时 pip 当成已满足，必须强制重装"
     print("  ✓ 内嵌 ComfyUI 的 torch 单独指 cu130+ 索引，千问那套照旧 cu%d" % cu(qwen))
 
@@ -328,15 +334,15 @@ def test_comfyui_moss_nodes():
     跨机迁移最容易踩的静默失败：clone 时代码是旧的，main.py 明明在、体检却绿灯，
     直到点出图才炸「未知 class_type」。极速档加载要 1~2 分钟，用户根本猜不到是版本问题。
     """
-    import env_check as ec
+    from envkit import check as ec
+    from envkit import spec as sp
 
-    spec = ec.load_spec(ROOT)
-    moss = spec["moss"]
+    spec = sp.load_spec(ROOT)
     root = tempfile.mkdtemp(prefix="moss_selftest_cx_")
     try:
-        cx_dir = os.path.join(root, moss["comfyui"].get("dir") or "comfyui")
+        cx_dir = sp.runtime_dir(root, spec)
         d = lambda *p: os.makedirs(os.path.join(cx_dir, *p), exist_ok=True)
-        item = lambda: ec._check_comfyui(root, moss, None)
+        item = lambda: ec._check_runtime(root, spec)
 
         assert item()["state"] == "miss", item()
         d("comfy_extras")
@@ -712,7 +718,8 @@ def test_job_gc():
 
 def test_nav_migration():
     """导航换代：v2 那份带分组、还单列着概览/透明/工坊/API 的老配置，
-    要自动重排成 v6 的 7 页两组（出图 / 系统）、Moss 并进生图页、词库也并进生图页、
+    要自动重排成 v8 的 12 页三组（出图 / 环境 / 系统）——Moss 与词库都并进了生图页、
+    环境按模型拆成四页、本地 H3 有「视频」页、系统组里多了「云端」（多账号登录态与保活），
     标签名统一两字，且第二次启动不许再动它。
 
     换机/升级后用户只点一次「启动」，界面结构就得跟代码走；他改过的标签名是唯一
@@ -758,21 +765,24 @@ def test_nav_migration():
         c1 = launch(v2)
         rows = flat(c1)
         pages = [p for _, p, _ in rows]
+        names = dict((p, n) for _, p, n in rows)
         assert c1["nav_ver"] == webapp.NAV_VER, c1["nav_ver"]
-        assert sorted(pages) == sorted(["t2i", "edit", "inpaint",
-                                         "gallery", "models", "logs", "settings"]), pages
-        assert dict((p, n) for _, p, n in rows)["t2i"] == "我的出图页", rows
-        # 「图像编辑」是历代默认名之一＝用户没改过，换成 v4 的统一两字名
-        assert dict((p, n) for _, p, n in rows)["edit"] == "编辑", rows
+        assert sorted(pages) == sorted(["t2i", "edit", "inpaint", "video",
+                                        "env_base", "env_qwen", "env_moss", "env_h3",
+                                        "gallery", "cloud", "logs", "settings"]), pages
+        assert names["t2i"] == "我的出图页", rows
+        # 「图像编辑」是历代默认名之一＝用户没改过，换成新版的统一两字名
+        assert names["edit"] == "编辑", rows
         assert c1["last_tab"] == webapp.DEFAULT_CFG["last_tab"], c1["last_tab"]  # t_ov 没了要回落
         assert c1["layout"] == "tree", c1["layout"]
         assert "rgba" not in c1, "老的 rgba 配置块该清掉"
-        # v5 把分组收回来、v6 把词库收进生图页：七页全在「出图 / 系统」两组底下，顶层只剩分组本身
+        # 三组各管一段：出图是活、环境是开关与体检、系统是老几样
         groups = [n["name"] for n in c1["nav"] if n.get("type") == "group"]
-        assert groups == ["出图", "系统"], groups
+        assert groups == ["出图", "环境", "系统"], groups
         assert all(d0 == 1 for d0, _, _ in rows), rows
-        assert pages[:3] == ["t2i", "edit", "inpaint"], pages
-        assert pages[3:] == ["gallery", "models", "logs", "settings"], pages
+        assert pages[:4] == ["t2i", "edit", "inpaint", "video"], pages
+        assert pages[4:8] == ["env_base", "env_qwen", "env_moss", "env_h3"], pages
+        assert pages[8:] == ["gallery", "cloud", "logs", "settings"], pages
         # 重排完立刻落盘：下次开机不该再走一遍换代
         on_disk = json.load(open(path, encoding="utf-8"))
         assert on_disk["nav_ver"] == webapp.NAV_VER, on_disk.get("nav_ver")
@@ -786,18 +796,18 @@ def test_nav_migration():
                      (row.get("children") or []) if n.get("type") == "tab"]
         c5 = launch(v4)
         rows5 = flat(c5)
-        assert [n.get("type") for n in c5["nav"]] == ["group", "group"], c5["nav"]
+        assert [n.get("type") for n in c5["nav"]] == ["group", "group", "group"], c5["nav"]
         assert c5["layout"] == "tree", c5["layout"]
         assert dict((p, n) for _, p, n in rows5)["t2i"] == "我的出图页", rows5
-        assert len(rows5) == 7, rows5
+        assert len(rows5) == 12, rows5
         # 用户手抖把退役页塞回来（或从旧机器拷了份配置）：入口留着只会点出空白页
         dirty = copy.deepcopy(on_disk)
         dirty["nav"].insert(0, {"id": "t_ov", "type": "tab", "name": "概览",
                                 "icon": "home", "page": "overview"})
         c3 = launch(dirty)
         assert "overview" not in [p for _, p, _ in flat(c3)], flat(c3)
-        assert len([p for _, p, _ in flat(c3)]) == 7, flat(c3)
-        print("  ✓ 导航换代：v2/v4 老配置都重排成两组 7 页、改过的名字留着、二次启动幂等、退役页不复活")
+        assert len([p for _, p, _ in flat(c3)]) == 12, flat(c3)
+        print("  ✓ 导航换代：v2/v4 老配置都重排成三组 12 页、改过的名字留着、二次启动幂等、退役页不复活")
     finally:
         webapp.CFG_PATH = old_path
         shutil.rmtree(d, ignore_errors=True)
@@ -827,6 +837,60 @@ def test_input_image_modes():
         shutil.rmtree(d, ignore_errors=True)
 
 
+def test_h3_size():
+    """视频页的清晰度×画幅：短边＝P 数（720P 横 1280×720、竖 720×1280），
+    768 原生钉成模板里的 1344×768；老配置的 size / cw×ch 不能被新档位悄悄改掉。"""
+    import app as webapp
+
+    class Probe:
+        H3_RATIOS = webapp.App.H3_RATIOS
+        H3_NATIVE = webapp.App.H3_NATIVE
+        H3_HI_LOCAL = webapp.App.H3_HI_LOCAL
+        H3_HI_CLOUD = webapp.App.H3_HI_CLOUD
+        H3_HI_MAX = webapp.App.H3_HI_MAX
+        # 尺寸换算只读这几个常量，不必把整个 App 拉起来（那要 GPU 环境）
+        _h3_native = webapp.App._h3_native
+        _h3_size_raw = webapp.App._h3_size_raw
+
+    p = Probe()
+    cases = [
+        ({"tier": 480, "ratio": "16:9"}, (848, 480)),
+        ({"tier": 480, "ratio": "9:16"}, (480, 848)),
+        ({"tier": 720, "ratio": "16:9"}, (1280, 720)),
+        ({"tier": 720, "ratio": "9:16"}, (720, 1280)),
+        ({"tier": 768, "ratio": "16:9"}, (1344, 768)),
+        ({"tier": 768, "ratio": "9:16"}, (768, 1344)),
+        ({"tier": 768, "ratio": "1:1"}, (768, 768)),
+        ({"tier": 768, "ratio": "4:3"}, (1024, 768)),
+        ({"size": "custom", "cw": 854, "ch": 480}, (848, 480)),
+        # 840 正好卡在「.5」上：Python 的 round 给 832，界面 C.a16 给 848
+        # ——两边必须同一个舍入，否则界面写的数和出片的数差一格
+        ({"size": "custom", "cw": 840, "ch": 480}, (848, 480)),
+        ({"size": "1344x768"}, (1344, 768)),
+        # 界面只落 size，tier 是上一次留下的：谁新听谁的，不能拿旧档位盖掉刚选的 720P
+        ({"tier": 768, "ratio": "16:9", "size": "1280x720"}, (1280, 720)),
+        ({}, (1344, 768)),
+    ]
+    for v, want in cases:
+        got = webapp.App._h3_size(p, v)
+        assert got == want, (v, got, want)
+    # 云端那一路的上限放到 2560（官方 2K＝短边 1440）；本地仍是 2048，
+    # 但超了要按比例缩，不能单钳长边把 16:9 钳成 2048×1440
+    loud = [
+        ({"tier": 1080, "ratio": "16:9"}, (1920, 1088)),
+        ({"tier": 1440, "ratio": "16:9"}, (2560, 1440)),
+        ({"tier": 1440, "ratio": "9:16"}, (1440, 2560)),
+        ({"tier": 1440, "ratio": "1:1"}, (1440, 1440)),
+    ]
+    for v, want in loud:
+        got = webapp.App._h3_size(p, v, p.H3_HI_CLOUD)
+        assert got == want, ("cloud", v, got, want)
+    got = webapp.App._h3_size(p, {"size": "2560x1440"})
+    assert got == (2048, 1152), ("local 上限按比例缩", got)
+    print("  ✓ 视频尺寸：清晰度×画幅按短边算、768 原生钉死、老配置与自定义不被改掉、"
+          "云端到 2K、本地超限按比例缩")
+
+
 if __name__ == "__main__":
     print("Moss 自测（无 GPU）：")
     test_templates()
@@ -846,4 +910,5 @@ if __name__ == "__main__":
     test_job_gc()
     test_nav_migration()
     test_input_image_modes()
+    test_h3_size()
     print("全部通过 ✅")

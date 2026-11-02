@@ -104,6 +104,10 @@ select.inp{appearance:none;cursor:pointer;padding-right:28px;
 textarea.inp{height:auto;min-height:92px;padding:9px 11px;line-height:1.7;resize:vertical;
   font-family:Consolas,"Courier New",monospace;font-size:12.5px}
 .inrow{display:flex;gap:8px;width:100%}
+/* P 档 + 朝向：两个下拉并排，左宽右窄；选项文字里已经带真实分辨率 */
+.ppick{display:flex;align-items:center;gap:6px;width:100%;min-width:0}
+.ppick>.inp{flex:1;min-width:0;font-size:12.5px}
+.ppick>.pangle{flex:0 0 68px;width:68px;padding-left:8px;padding-right:20px}
 /* 拖文件悬停在路径格上：整格描边，让人知道松手就填这里 */
 .dropz{border-radius:11px;outline:2px dashed transparent;outline-offset:3px;transition:outline-color .12s}
 .dropz.over{outline-color:var(--ac)}
@@ -216,6 +220,11 @@ td.st{font-weight:650}
   max-width:min(680px,86vw);padding:9px 16px;pointer-events:none;
   background:var(--panel-solid);border:1px solid var(--line2);border-radius:10px;
   box-shadow:var(--shadow);color:var(--fg);font-size:12.5px;line-height:1.6;text-align:center}
+/* 带动作的提示（删除撤销）：整条仍然不吃鼠标，只有按钮自己收 */
+.toast.act{display:flex;align-items:center;gap:10px;padding-right:8px;text-align:left}
+.toast .tact{pointer-events:auto;height:24px;padding:0 10px;border-radius:7px;flex:none;
+  background:var(--ac-soft);border:1px solid var(--ac-line);color:var(--ac);font-size:12.5px}
+.toast .tact:hover{background:var(--ac);color:#fff}
 #menu{min-width:206px;padding:6px}
 #menu .mh{padding:7px 11px 8px;font-size:12px;color:var(--fg3);border-bottom:1px solid var(--line);margin-bottom:5px}
 #menu button{display:flex;align-items:center;gap:10px;width:100%;padding:8px 11px;border-radius:8px;

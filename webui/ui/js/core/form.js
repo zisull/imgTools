@@ -45,8 +45,9 @@ function runstat(run,extra){
     strow('进度',`<div class="prog"><i data-role="prog"></i></div><span class="mut fine" data-role="pgtext"></span>`)+
     (extra||'')}</div>`;
 }
-function txt(k,ph,cls){
-  return `<input class="inp ${cls||''}" data-k="${k}" value="${esc(MIC.mget(MIC.s.cfg,k))}" placeholder="${esc(ph||'')}">`;
+function txt(k,ph,cls,rr){
+  /* rr：这一格改完整页重画（工作流那格填没填决定云端那条路通不通，提醒要跟着当场收走） */
+  return `<input class="inp ${cls||''}"${rr?' data-rr="1"':''} data-k="${k}" value="${esc(MIC.mget(MIC.s.cfg,k))}" placeholder="${esc(ph||'')}">`;
 }
 /* 多行输入（提示词这类）：data-k 绑定与 txt 同一套 */
 function ta(k,rows,ph){
@@ -92,6 +93,11 @@ function sel(k,list,ph){
     const name=o.name!=null?o.name:o, code=o.code!=null?o.code:o;
     h+=`<option value="${esc(code)}"${String(code)===String(v)?' selected':''}>${esc(name)}</option>`;
   });
+  /* 配置里这个值不在档位表里（老配置、别的机器带回来的、后端补的默认值）：
+     一条都不选中的话浏览器就默认亮第一项，下一次整屏 read() 把第一项写回配置——
+     用户的值被无声换掉了。补一项留在表里，和尺寸那条「历史自定义」同一套路。 */
+  if(v!==''&&v!=null&&!list.some(o=>String(o.code!=null?o.code:o)===String(v)))
+    h+=`<option value="${esc(v)}" selected>${esc(v)}（原值）</option>`;
   return h+'</select>';
 }
 function chk(k,label){
@@ -106,11 +112,11 @@ function seg(k,items,rr){
   return `<div class="seg"${rr?' data-rr="1"':''} data-k="${k}">${items.map(([val,label])=>
     `<button class="${val===v?'on':''}" data-v="${esc(val)}">${label}</button>`).join('')}</div>`;
 }
-function pathrow(k,ph,pickKind){
+function pathrow(k,ph,pickKind,rr){
   /* 类名别叫 path：nav.css 里的 .path 是给侧栏面包屑的（max-width:88px;flex:none），
      挂到输入框上会把目录路径压成「D:/AI/Qwe…」，也长不大 */
   return `<div class="inrow dropz" data-into="${k}" data-drop="${pickKind||'file'}"
-      title="可以直接把文件从资源管理器拖进来">${txt(k,ph,'fpath')}
+      title="可以直接把文件从资源管理器拖进来">${txt(k,ph,'fpath',rr)}
     <button class="btn" onclick="MIC.form.pickInto('${k}','${pickKind}')">浏览</button></div>`;
 }
 /* 尺寸/画幅下拉：三个出图页各有一份档位表，构件只有一个 sizeSel，
@@ -125,6 +131,91 @@ function sizeSel(k,list,dis,rr){
   return `<select class="inp" data-k="${k}"${rr?' data-rr="1"':''}>${list.map(o=>
       `<option value="${esc(o.code)}"${o.code===v?' selected':''}>${esc(o.name)}</option>`).join('')}${extra}${
       dis?`<option value="" disabled>${esc(dis)}</option>`:''}</select>`;
+}
+
+/* ---------- P 档分辨率 ----------
+   P 数只认短边：横版=16:9、方形=1:1、竖版=9:16，所以同一个 720P
+   在横版是 1280×720、竖版是 720×1280。宽高统一贴 16 的倍数，
+   与 Moss/ComfyUI 的 latent 网格一致；老配置的 WxH 原样保留成「历史尺寸」。 */
+const P_ASPECT={h:[16,9],s:[1,1],v:[9,16]};
+const P_ORIENT=[['h','横版'],['s','方形'],['v','竖版']];
+const P_IMG=[480,512,720,768,1024];
+const P_VIDEO=[480,640,720,768];
+/* 云端那一路的档位只受平台收不收限：最高 2K＝短边 1440（长边 2560）。
+   本地那条仍停在 768——权重是 768P 训的，再往上是拿算法放大，不值那几分钟。 */
+const P_VIDEO_CLOUD=[480,640,720,768,1024,1080,1440];
+function a16(x){return Math.max(16,Math.min(4096,Math.round(Number(x||0)/16)*16));}
+function pDims(p,o){
+  const a=P_ASPECT[o]||P_ASPECT.s;
+  const pn=Math.max(16,Math.round(Number(p)||1024));
+  const long=a16(pn*Math.max(a[0],a[1])/Math.min(a[0],a[1]));
+  /* 两边各自贴 16，和后端 _h3_size 同一套：1080 不是 16 的倍数 → 1088，
+     长边仍按 1920 贴（别拿贴过的 1088 再去推长边，会推出 1936 这种没人认的数） */
+  return a[0]>=a[1]?{w:long,h:a16(pn)}:{w:a16(pn),h:long};
+}
+function orientOf(w,h){
+  const r=Math.log((Number(w)||1)/(Number(h)||1));
+  let best='s',bd=1e9;
+  Object.keys(P_ASPECT).forEach(o=>{
+    const a=P_ASPECT[o],d=Math.abs(Math.log(a[0]/a[1])-r);
+    if(d<bd){bd=d;best=o;}
+  });
+  return best;
+}
+function pairOf(v,cw,ch){
+  const m=/^(\d+)x(\d+)$/i.exec(String(v||''));
+  if(m)return {w:+m[1],h:+m[2],custom:false};
+  return {w:Number(cw)||1024,h:Number(ch)||1024,custom:true};
+}
+function pOf(n,list){
+  let best=list[0],bd=1e9;
+  list.forEach(p=>{const d=Math.abs(p-Number(n||0));if(d<bd){bd=d;best=p;}});
+  return best;
+}
+function pLabel(p,w,h){return p+'P : '+w+' × '+h;}
+/* 两件套：左边选 P（选项里直接写当前朝向的真实分辨率），右边选横/方/竖。
+   朝向不单独存配置，由当前 WxH 反推；换朝向就把 size 改写成新的 WxH。
+   某一路模型有「原生画幅」（H3 的 768P 是 1344×768，不是按 16 取整的 1360）时，
+   由那一页登记一个 dimSnap：下拉里写的、换朝向写回的、后端算的都是同一套数。 */
+function pSizeSel(k,list,opts){
+  const o=opts||{},v=String(MIC.mget(MIC.s.cfg,k)||'');
+  const dimOf=MIC.form.dimSnap[k]||pDims;
+  const cwKey=o.cw||'',chKey=o.ch||'';
+  const cw=cwKey?Number(MIC.mget(MIC.s.cfg,cwKey))||1024:1024;
+  const ch=chKey?Number(MIC.mget(MIC.s.cfg,chKey))||1024:1024;
+  const cur=pairOf(v,cw,ch);
+  const orient=orientOf(cur.w,cur.h);
+  const rows=list.map(p=>{const d=dimOf(p,orient);return {code:d.w+'x'+d.h,label:pLabel(p,d.w,d.h)};});
+  let extra='';
+  if(v&&v!=='custom'&&!rows.some(x=>x.code===v)){
+    /* 画廊回填/老配置：P 数按短边显示，尺寸保持原样，不替用户改 */
+    extra=`<option value="${esc(v)}" selected>${esc(pLabel(Math.min(cur.w,cur.h),cur.w,cur.h))}</option>`;
+  }
+  const custom=o.custom===false?'':`<option value="custom"${v==='custom'?' selected':''}>自定义宽 × 高</option>`;
+  const ori=P_ORIENT.map(([code,label])=>
+    `<option value="${code}"${code===orient?' selected':''}>${label}</option>`).join('');
+  return `<div class="ppick">
+    <select class="inp" data-k="${esc(k)}" data-rr="1">${rows.map(x=>
+      `<option value="${esc(x.code)}"${x.code===v?' selected':''}>${esc(x.label)}</option>`).join('')}${extra}${custom}</select>
+    <select class="inp pangle" data-ori="${esc(k)}" data-cw="${esc(cwKey)}" data-ch="${esc(chKey)}"
+      data-plist="${list.join(',')}"${v==='custom'?' disabled':''}>${ori}</select>
+  </div>`;
+}
+function pickOrientation(el){
+  const k=el.dataset.ori;if(!k)return;
+  const raw=String(MIC.mget(MIC.s.cfg,k)||'');
+  const cw=el.dataset.cw?MIC.mget(MIC.s.cfg,el.dataset.cw):null;
+  const ch=el.dataset.ch?MIC.mget(MIC.s.cfg,el.dataset.ch):null;
+  const cur=pairOf(raw,cw,ch);
+  const list=String(el.dataset.plist||'').split(',').map(Number).filter(Boolean);
+  const p=pOf(Math.min(cur.w,cur.h),list.length?list:P_IMG);
+  const d=(MIC.form.dimSnap[k]||pDims)(p,el.value);
+  /* 一次读完整屏、只落一次盘：分两次保存的话，先发的旧尺寸回包可能把新值又盖回去 */
+  const patch=read();
+  MIC.mset(patch,k,d.w+'x'+d.h);
+  merge(patch);
+  saved(patch);
+  MIC.render();
 }
 /* 任务跑着的时候参数改不动（与桌面版禁用控件同义）：inert 挡键盘，dis 挡鼠标 */
 function lock(run,inner){
@@ -151,6 +242,16 @@ function syncFields(){
     }
     if(el===document.activeElement)return;
     const nv=v==null?'':String(v);
+    /* 判的是「这张表里有没有这一项」，不是「有没有取到值」：
+       写成 some(x=>x.value) 永远返回 true（选项值都是非空串），
+       于是每轮同步都给每个下拉补一条重复的「（原值）」——档位看着像被改过。 */
+    const has=!!nv&&[].some.call(el.options,x=>x.value===nv);
+    if(el.tagName==='SELECT'&&nv&&!has){
+      /* 回填或老配置给的是这张档位表里没有的值：补一项留在下拉里。
+         缩成空白的话，下一次整屏 read() 会把空串写回配置，用户的档位就被无声换掉了。 */
+      const op=document.createElement('option');
+      op.value=nv;op.textContent=nv+'（原值）';el.appendChild(op);
+    }
     if(el.value!==nv)el.value=nv;
   });
   /* 种子那一行是开关+输入框两件套：画廊回填/后端回包把值换成具体数字时，
@@ -159,6 +260,16 @@ function syncFields(){
     const v=parseInt(MIC.mget(MIC.s.cfg,box.dataset.sk),10);
     if(box.querySelector('input')===document.activeElement)return;
     seedMode(box,!(v>=0));
+  });
+  document.querySelectorAll('#view select[data-ori]').forEach(el=>{
+    const k=el.dataset.ori;
+    const raw=String(MIC.mget(MIC.s.cfg,k)||'');
+    const cw=el.dataset.cw?MIC.mget(MIC.s.cfg,el.dataset.cw):null;
+    const ch=el.dataset.ch?MIC.mget(MIC.s.cfg,el.dataset.ch):null;
+    const cur=pairOf(raw,cw,ch);
+    const o=orientOf(cur.w,cur.h);
+    if(el.value!==o)el.value=o;
+    el.disabled=raw==='custom';
   });
 }
 function saved(patch){
@@ -224,10 +335,15 @@ function pickInto(k,kind){
     MIC.mset(MIC.s.cfg,k,p);
     const el=document.querySelector(`#view [data-k="${k}"]`);if(el)el.value=p;
     commitPath(k,p);
+    rrRepaint(el);
   }).catch(()=>{});
 }
+/* data-rr 的格子改完要整页重画：工作流填成本地文件时，「宿主页」那格得当场长出来 */
+function rrRepaint(el){if(el&&el.dataset&&el.dataset.rr)MIC.render();}
 /* 事件委托：文本/下拉 change 即存；勾选/开关/分段 click 即存 */
 document.addEventListener('change',e=>{
+  const ori=e.target.closest?e.target.closest('#view select[data-ori]'):null;
+  if(ori){pickOrientation(ori);return;}
   const el=e.target.closest?e.target.closest('#view [data-k]'):null;
   if(!el||el.classList.contains('chk')||el.classList.contains('sw')||el.classList.contains('seg'))return;
   /* data-rr 的下拉（尺寸选「自定义」）改完整页重画：先 commit 收下这一屏的字 */
@@ -241,9 +357,14 @@ document.addEventListener('click',e=>{
     box.querySelectorAll('button').forEach(b=>b.classList.toggle('on',b===btn));
     /* 带 data-rr 的那档改完要整页重画：先 commit 把这一屏的输入全收下
        （只落一个 mode 键的话，重画会把没blur的提示词框画回上次的旧值）；
-       控制台模式这类还会动导航树，applyMode 先把可见页修好再重画主区 */
+       环境开关这类还会动导航树，applyMode 先把可见页修好再重画主区 */
     if(box.dataset.rr){
-      commit();
+      /* fit：这一页可以登记「切完顺手校正别的键」的规则（视频页换通道要把清晰度收进档位表），
+         校正落在同一个 patch 里只写一次盘——分两次存的话，先发的旧回包可能把新值盖回去 */
+      const patch=read();
+      const fit=MIC.form.segFit&&MIC.form.segFit[box.dataset.k];
+      if(fit)fit(btn.dataset.v,patch);
+      merge(patch);saved(patch);
       if(MIC.nav&&MIC.nav.applyMode)MIC.nav.applyMode();
       MIC.render();
     }else commitPath(box.dataset.k,btn.dataset.v);
@@ -314,12 +435,15 @@ document.addEventListener('drop',e=>{
     if(!r||!r.ok){MIC.toast((r&&r.msg)||'没能识别这个文件');return;}
     const el=document.querySelector(`#view [data-k="${k}"]`);if(el)el.value=r.path;
     commitPath(k,r.path);
+    rrRepaint(el);
     MIC.toast('已载入 '+r.path);
   }).catch(err=>MIC.toast('识别失败：'+(err&&err.message||err)));
 });
 
-MIC.form={field,card,fold,foldcard,runstat,strow,duo,txt,ta,num,seedRow,sel,chk,sw,seg,pathrow,sizeSel,lock,read,commit,commitPath,commitMany,pickInto,
-  applyCfg,dropCands,resolveDrop,
+MIC.form={field,card,fold,foldcard,runstat,strow,duo,txt,ta,num,seedRow,sel,chk,sw,seg,pathrow,sizeSel,pSizeSel,lock,read,commit,commitPath,commitMany,pickInto,
+  applyCfg,dropCands,resolveDrop,a16,pDims,orientOf,pairOf,pOf,P_IMG,P_VIDEO,P_VIDEO_CLOUD,P_ASPECT,P_ORIENT,
+  /* 每页可登记的「原生画幅」换算：键是 size 控件绑的配置路径；segFit 是「切完顺手校正」的规则 */
+  dimSnap:{},segFit:{},
   foldToggle(h){h.classList.toggle('closed');h.nextElementSibling.classList.toggle('hide');},
   /* 页面里非 data-k 的临时控件：取值不写配置 */
   raw(id){const el=MIC.$(id);return el?(el.value!=null?el.value.trim():el.textContent):'';},

@@ -1,29 +1,34 @@
 @echo off
-rem Launch Qwen-Image console (desktop shell).
-rem pythonw = GUI subsystem: no black console window behind the UI.
-rem stdout/stderr are teed into logs\run.log by webui\app.py; a startup
-rem failure (import error or crash inside main) pops a native message box.
-rem
-rem ÌúÂÉ£º½çÃæÏÈ³öÀ´¡£ÕâÀïÖ»±£Ö¤¡¸¿Ç¡¹ÄÜÅÜ£¨.venv + pywebview£¬¼¸Ãë£©£¬
-rem ÖØÒÀÀµ£¨torch/diffusers¡­£©ºÍ 30GB/15GB È¨ÖØÒ»ÂÉ²»ÔÚ¿ª»úÇ°ÍµÍµÏÂ¡ª¡ª
-rem ÄÇĞ©¶¼ÊÇ´ò¿ª¡¸»·¾³ÓëÄ£ĞÍ¡¹Ò³ºó£¬°´·ÖÇøµã¡¸Ò»¼ü²¹Æë¡¹µÄ»î£º¿´µÃ¼û½ø¶È¡¢¶ÏµãĞø´«¡£
-cd /d %~dp0
+chcp 65001 >nul 2>&1
+setlocal EnableExtensions
+cd /d "%~dp0"
+set PYTHONUTF8=1
+set PYTHONIOENCODING=utf-8
+title Moss ç”Ÿå›¾æ§åˆ¶å°
 
-rem 1) ¿ÇÒÑ¾ÍĞ÷£¨.venv ÀïÓĞ webview£©¡ú ½Å±¾ÃëÍË£¬Ö±½Ó¿ª½çÃæ
-py -3 scripts\bootstrap_shell.py 2>nul
-if errorlevel 1 python scripts\bootstrap_shell.py
-if errorlevel 1 (
-  echo [ERROR] ½çÃæ¿ÇÆğ²»À´£º×° Python 3.12 »ò¿ª´úÀíºóÖØÊÔ¡£
-  echo [ERROR] ÏëÊÖ¶¯À´£ºÏÈÅÜ python -m venv .venv ^&^& .venv\Scripts\python -m pip install pywebview
+if exist ".venv\Scripts\python.exe" goto run
+
+echo [å‡†å¤‡] ç¬¬ä¸€æ¬¡å¯åŠ¨ï¼Œæ­£åœ¨åˆ›å»º .venv ...
+py -3.12 -m venv .venv >nul 2>&1
+if errorlevel 1 py -3 -m venv .venv >nul 2>&1
+if errorlevel 1 python -m venv .venv
+
+if not exist ".venv\Scripts\python.exe" goto nopython
+
+:run
+".venv\Scripts\python.exe" scripts\setup_all.py %*
+set "RC=%errorlevel%"
+if not "%RC%"=="0" (
+  echo.
+  echo [æœªå®Œæˆ] çœ‹ä¸Šé¢çš„æç¤ºã€‚å·²ç»ä¸‹è½½çš„ä¼šç»­ä¼ ï¼Œä¿®å¥½åé‡è·‘æœ¬æ–‡ä»¶å³å¯ã€‚
   pause
-  exit /b 1
 )
+exit /b %RC%
 
-if not exist ".venv\Scripts\pythonw.exe" (
-  echo [ERROR] .venv Ã»½¨ºÃ£ºÖØÅÜÒ»´Î Æô¶¯.bat£¬»òÖ±½ÓË«»÷ setup.bat ¿´±¨Ê²Ã´¡£
-  pause
-  exit /b 1
-)
-
-start "" ".venv\Scripts\pythonw.exe" webui\app.py
-exit /b 0
+:nopython
+echo.
+echo [é”™è¯¯] æ²¡æ‰¾åˆ° Python 3.11-3.13ã€‚
+echo        å…ˆè£… Python 3.12ï¼Œå®‰è£…æ—¶å‹¾é€‰ "Add Python to PATH"ï¼š
+echo        https://www.python.org/downloads/
+pause
+exit /b 1

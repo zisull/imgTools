@@ -7,33 +7,42 @@
 - **双引擎、单激活**：千问与 Moss 任意时刻只常驻一个，切换时先卸载另一个，不抢显存
 - **Moss 三档**：极速 8 步（DMD LoRA）/ 均衡 25 步 / 精修 50 步，另有「让出显存」一键停掉子进程
 - **千问两档**：Turbo 8 步 / 精细 40 步，fp8 量化 + CPU offload，12 GB 级显存可跑
-- **出图四件事**：文生图、参考图编辑、涂抹重绘、透明底 PNG
+- **环境开关**：千问 / Moss / H3 各自一颗开关；关掉就不体检、不进待补、不提醒，功能页一并收起，显存也交还——只开一个就是只用一个。唯一的例外是**视频页**：它两条通道，本地那路归 H3 环境，云端那路只要一个登录号，所以关掉 H3 页面还在、只把本地那一档标成停用
+- **首启欢迎页**：第一次打开先问「这台机器管哪几路」，三张牌各写体量与待补数，点牌即开关
+- **出图四件事**：文生图、参考图编辑、涂抹重绘、透明底 PNG；另有一页 **H3 视频**（一句描述出带声音的片子），页顶一条分段控件选执行地——**本地**（内嵌 ComfyUI，要 41 GB 权重，清晰度到 768P 原生档）或 **云端**（RunningHub 出片，不占显存、按平台计费，要一个登录号 + 一份工作流——平台地址或本地导出的 `.json` 都行，后一种另要一个宿主页；清晰度到 2K）
 - **提示词词库**：人物 / 场景 / 风格 / 光影 / 构图 / 质感 / 反向 七类 56 条中文整句；「灵感」行按类翻卡，通用反向词默认带上且不覆盖手写内容
-- **画廊**：SQLite 历史与收藏，成图可一键回填参数继续改
-- **环境体检与一键补齐**：按引擎独立判定缺什么（包 / 权重 / 目录），逐条显示、断点续传，补一个引擎就能单独用
-- **首启欢迎页**：第一次打开先选「千问 / Moss / 两个都要」，界面按所选自动收放
+- **画廊**：SQLite 历史与收藏，成图可一键回填参数继续改；删除进回收站可撤销，图片可一键送去当视频首帧
+- **环境体检与一键补齐**：一个环境一个目录（`envs/qwen`、`envs/moss`、`envs/h3`），各自判定缺什么（包 / 权重 / 目录），逐条显示、断点续传，补一个引擎就能单独用
+- **下载器**：优先接管本机 Motrix（aria2），没开就走内置多镜像分段下载，都能断点续传
 - **OpenAI 风格 API**：生图、编辑、查任务、取图；支持同步 `b64_json` 直出，供其它本地程序调用
+- **无框窗口**：任意空白处或外圈边缘按住就能移窗，四角拉尺寸；最大化 / 还原 / 关闭全是自绘
 
 ## 界面
 
-导航两组七页：
+导航三组十一页：
 
 | 组 | 页面 | 作用 |
 |---|---|---|
 | 出图 | 生图 | 双引擎文生图 + 灵感/词库 |
 | | 编辑 | 参考图编辑（千问） |
 | | 重绘 | 涂抹局部重绘（千问） |
-| 系统 | 画廊 | 历史、收藏、参数回填 |
-| | 环境 | 两引擎体检与一键补齐 |
+| | 视频 | H3 出片（文生视频 / 给一张起始图）· 本地或云端两条通道在这一页切 |
+| 环境 | 基础 | 共用依赖、python、显卡与磁盘 |
+| | 千问 | 千问环境：明细、一键补齐、量化档 |
+| | Moss | Moss 环境与档位 |
+| | H3 | H3 环境：41 GB 权重与 ComfyUI 节点 |
+| 系统 | 画廊 | 历史、收藏、参数回填、删除撤销、送视频首帧 |
 | | 日志 | 运行日志 |
 | | 设置 | 引擎、界面、目录、API |
+
+环境关掉时属于它的功能页从侧栏消失（生图是千问与 Moss 共用，任一路开着就在）；环境那四页永远在——不然关了就没有开回来的门。
 
 ## 环境要求
 
 - Windows 10 / 11（依赖 WebView2 运行时，Win11 自带）
 - NVIDIA 显卡，**12 GB 显存级**起步
 - Python 3.11 – 3.13（推荐 3.12）
-- 磁盘：模型权重约 45 GB（千问 30.3 GB + Moss 13.0 GB + LoRA 1.1 GB），叠加依赖建议预留 80 GB
+- 磁盘：模型权重约 45 GB（千问 30.3 GB + Moss 13.0 GB + LoRA 1.1 GB），叠加依赖建议预留 80 GB；另加 H3 视频约 41 GB（可选，不装不影响生图）
 
 ## 快速开始
 
@@ -42,21 +51,28 @@ git clone https://github.com/zisull/imgTools.git
 cd imgTools
 ```
 
-双击 **`启动.bat`**：
+双击 **`启动.bat`**，只这一个入口。它只负责把软件装到能打开：
 
-1. 首次会自动建 `.venv` 并装好界面壳（只需几秒）
-2. 弹出欢迎页，选要走哪一路引擎
-3. 到「环境」页点「一键补齐」——下载与安装都在后台跑，界面不卡，进度可见
-4. 回到「生图」页，写提示词，Ctrl+Enter 出图
+1. 没有 `.venv` 就先建一个（几秒）
+2. 装界面壳（pywebview）并建好目录，然后直接拉起界面
+3. 界面起来后进「环境」页：缺什么、每一项是什么、多大，都在分区明细里；点分区的「一键补齐」，进度显示在页顶横幅上，断了重跑继续
+4. 大权重（千问 30.3 GB、Moss 14.1 GB、H3 41.4 GB）全部在软件里下，BAT 不碰
 
-需要命令行一把装齐（可选的旧路径）：
+想整包无人值守补齐（依赖 + ComfyUI + 权重）时再带 `--full`：
 
 ```bat
-setup.bat            :: 建 .venv 并按 env.json 装依赖
-setup.bat /auto      :: 不暂停，便于脚本调用
+启动.bat --full             :: 连依赖、ComfyUI 与权重一起补
+启动.bat --full --env qwen  :: 只补千问（--env moss / --env h3 同理）
+启动.bat --full --no-models :: 只补依赖，不下权重
+启动.bat --full --models-only :: 只下权重
+启动.bat --full --jobs 16   :: 网络好时加大下载并发
+启动.bat --dry-run          :: 只打印计划与磁盘估算，不动手
 ```
 
-权重不在 `setup.bat` 里下，统一由「环境」页的「一键补齐」处理（hf-mirror 断点续传）。
+权重下载器（`webui/envkit/download.py`）先探 hf-mirror，不通再退 huggingface.co；
+单文件按 64 MB 切段、8 条连接并行，`.mossdl` 记录每段进度，中断续传。
+本机开着 Motrix 时会先把任务交给它的 aria2（端口与密钥运行时从 Motrix 自己的设置里读），
+下不动再自动回落内置下载器。镜像与并发在 `envs/index.json` 的 `download` 段里改。
 
 ## 两个引擎
 
@@ -95,8 +111,13 @@ curl -H "Authorization: Bearer <token>" -H "Content-Type: application/json" \
 ## 目录结构
 
 ```
-├─ 启动.bat / setup.bat          启动壳 / 装依赖
-├─ env.json                      环境清单：依赖版本、权重仓库、目录约定
+├─ 启动.bat                      唯一入口：建 .venv → 备界面壳 → 开界面（权重在软件里下）
+├─ envs/                         环境目录（一个环境一套，下哪个用哪个）
+│  ├─ index.json                 公共部分：python、镜像、下载参数、运行时、环境注册表
+│  ├─ qwen/env.json              千问：pip 依赖 + models/ 里的 Turbo 权重
+│  ├─ moss/env.json              Moss：ComfyUI 运行时 + 自己的权重
+│  ├─ h3/env.json                H3 视频（可选，默认不下载）
+│  └─ <id>/models/               各环境权重落盘处（不进版本库）
 ├─ config.json                   运行配置（首次启动生成，不进版本库）
 ├─ engine/
 │  ├─ pipeline_mgr.py            千问 diffusers 引擎
@@ -104,7 +125,7 @@ curl -H "Authorization: Bearer <token>" -H "Content-Type: application/json" \
 ├─ webui/
 │  ├─ app.py                     pywebview 壳 + js_api
 │  ├─ api_server.py              REST API
-│  ├─ env_check.py               环境体检
+│  ├─ envkit/                    环境模块：清单解析 / 体检 / 安装 / 下载
 │  ├─ store.py                   SQLite 历史库
 │  ├─ ui/                        前端（assemble.py 构建期拼成单文件）
 │  └─ moss/                      ComfyUI workflow 模板
@@ -112,21 +133,33 @@ curl -H "Authorization: Bearer <token>" -H "Content-Type: application/json" \
 └─ outputs/ logs/ data/          成图、日志、历史库（均不进版本库）
 ```
 
+待定方案（只有设计，尚未实现）：
+
+- [剧本一键成片方案.md](剧本一键成片方案.md)：只给剧本就出成片——云端优先的出片通道、尾帧自动续接成长视频。
+- [H3yun合并方案.md](H3yun合并方案.md)：隔壁那份云端短剧软件（`D:\AI\H3yun`）的全量功能盘点与逐条判定。
+- [整体最优设计.md](整体最优设计.md)：当前形状的盘点、按性价比排的交互减法、三份设计文档的吸收清单。
+
+[H3视频方案设计.md](H3视频方案设计.md) 已落地成「视频」页：一条分段控件选执行地——本地（内嵌 ComfyUI，41.4 GB 权重，4070 12G 上 5 秒 1344×768 约 5 分钟）或云端（RunningHub，不占显存、按积分计费，要一个保存过的登录号与一份工作流地址）。云端执行器在 `webui/cloudkit/gen.py`，等片那段的耗时以「倍」计（实测同参数一段 353 秒出片、一段等满 30 分钟没动），所以状态行只报平台上真读得到的那一句（在跑 / 排队 N 个 / 已收下 / 判失败 / 查不到），读不到就只报等了多久。实测数字见 `Moss交付说明.md` §六。工作流那格既能填平台地址，也能填平台「导出工作流」存下来的 `.json`（本地导出的文件不带工作流编号，所以要另填一个宿主页借那台实例跑）；出片尺寸由软件写进 `width/height`，云端档位 480P→1440P（2K＝2560×1440），本地停在 768P 原生档。
+
 ## 配置
 
-- `config.json`：窗口、主题、控制台模式、当前引擎、各引擎参数、API 设置、导航布局。删掉会按默认值重建。
-- `env.json`：唯一的环境真源。加依赖、换模型版本只改这里，体检与一键补齐都按它执行。
+- `config.json`：窗口、主题、环境开关（`env_on`）、当前引擎、各引擎参数（含 `video`）、API 设置、导航布局。删掉会按默认值重建。
+- `envs/index.json`：公共环境真源（python、镜像、下载参数、运行时、环境注册表）。
+- `envs/<id>/env.json`：每个环境自己的真源（依赖与权重）。加环境就加一个目录、在注册表里挂一行，体检页会自动多一个分区。
 - 想直接看界面（不连引擎）：`MIC_DEV=1` 启动时额外注入 `dev/mock.js`，可用普通浏览器预览。
 
 ## 自测
 
 ```bash
 .venv\Scripts\python.exe scripts\moss_selftest.py   # Moss 接线静态自测（无需 GPU）
-.venv\Scripts\python.exe scripts\shoot.py           # 13 个无头 Edge 探针（UI 回归）
-.venv\Scripts\python.exe scripts\env_test.py        # 环境体检
+.venv\Scripts\python.exe scripts\shoot.py           # 16 个无头 Edge 探针（UI 回归）
+.venv\Scripts\python.exe scripts\env_test.py        # 环境体检与开关
+.venv\Scripts\python.exe scripts\setup_test.py      # 界面壳计划、下载器、Motrix 交接
 .venv\Scripts\python.exe scripts\task_test.py       # 千问任务与连续出图
 .venv\Scripts\python.exe scripts\api_task_test.py   # API 任务队列
+.venv\Scripts\python.exe scripts\gallery_test.py    # 画廊删除撤销（回收站/参数回填/越界拒绝）
 .venv\Scripts\python.exe scripts\moss_bench.py      # Moss 真机测速
+.venv\Scripts\python.exe scripts\h3_video_smoke.py  # H3 出片真机冒烟（显存/秒数/成片）
 ```
 
 测试脚本都会使用自己的临时配置，不会写 `config.json`。

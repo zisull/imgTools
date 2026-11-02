@@ -15,9 +15,10 @@ sys.path.insert(0, os.path.join(ROOT, "webui", "ui"))
 
 from assemble import assemble  # noqa: E402
 
-# v6：词库并进生图页（灵感行 + 全览折叠），导航七个标签两组
-TAB = {"t2i": "t_gen", "edit": "t_edit", "inpaint": "t_inp",
-       "gallery": "t_gal", "logs": "t_log", "models": "t_mod", "settings": "t_set"}
+# v7：环境按模型拆成四页（基础/千问/Moss/H3）、开关总入口是欢迎页、H3 多了「视频」页
+TAB = {"t2i": "t_gen", "edit": "t_edit", "inpaint": "t_inp", "video": "t_vid",
+       "gallery": "t_gal", "logs": "t_log", "settings": "t_set",
+       "env_base": "t_envb", "env_qwen": "t_envq", "env_moss": "t_envm", "env_h3": "t_envh"}
 EDGE = (r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
         r"C:\Program Files\Microsoft\Edge\Application\msedge.exe")
 
@@ -192,10 +193,11 @@ PROBE = {
     clearInterval(MIC.s.pollTimer);
     ok('灵感上面一行是分类（7 类）', catChips().length===7,
        catChips().map(c=>c.textContent.trim()).join('|'));
-    ok('分类只点亮当前那一类（人物）', catChips().filter(c=>c.classList.contains('on')).length===1
-        && /人物/.test((catChips().filter(c=>c.classList.contains('on'))[0]||{}).textContent),
+    ok('分类只点亮当前那一类（真人）', catChips().filter(c=>c.classList.contains('on')).length===1
+        && /真人/.test((catChips().filter(c=>c.classList.contains('on'))[0]||{}).textContent),
        catChips().filter(c=>c.classList.contains('on')).map(c=>c.textContent).join('|'));
-    ok('灵感行摊开这一类全部 8 条（不再翻页）', chips().length===8,
+    ok('灵感行摊开这一类全部词条（不再翻页）',
+       chips().length===MIC.lib.CATS[0].items.length,
        chips().length+' | '+chips().map(c=>c.textContent.trim()).join('|'));
     ok('每张卡悬停给出整句', chips().every(c=>(c.title||'').length>10),
        (chips()[0].title||'').slice(0,24));
@@ -240,20 +242,23 @@ PROBE = {
     const f=fold();
     ok('生图页里有一块折起来的词库全览', !!f&&f.classList.contains('closed'),
        f?(f.classList.contains('closed')?'折着':'已展开'):'没有这块');
-    ok('折着时 56 条在 DOM 里但不显示', rows()===56&&fhide(), rows()+'');
+    const total=MIC.lib.CATS.reduce((n,c)=>n+c.items.length,0);
+    ok('折着时全部词条在 DOM 里但不显示', rows()===total&&fhide(), rows()+'/'+total);
     f.click();
     await wait(200);
-    ok('点标题摊开整本', rows()===56&&!fhide(), fhide()?'还是折着':'已摊开 '+rows());
+    ok('点标题摊开整本', rows()===total&&!fhide(), fhide()?'还是折着':'已摊开 '+rows());
     ok('七类各有小标题、反向那类的按钮叫「填反向」',
        document.querySelectorAll('#view .fold-b .egroup').length===7
-       && by(/^填反向$/).length===8, by(/^填反向$/).length+'');
+       && by(/^填反向$/).length===MIC.lib.cat('negative').items.length,
+       by(/^填反向$/).length+'');
     set('gen.negative','');
     await wait(200);
     negBtns().forEach(b=>b.click());
     await wait(300);
-    ok('有通用反向的那几类各挂一条（4 类）',
-       negBtns().length===4 && cfg('gen.negative').length>5,
-       negBtns().length+' | '+cfg('gen.negative').slice(0,24));
+    const negCats=MIC.lib.CATS.filter(c=>c.id!=='negative'&&c.neg).length;
+    ok('有通用反向的那几类各挂一条',
+       negBtns().length===negCats && cfg('gen.negative').length>5,
+       negBtns().length+'/'+negCats+' | '+cfg('gen.negative').slice(0,24));
     by(/^填入$/)[0].click();
     await wait(300);
     ok('全览「填入」写进当前引擎的提示词', cfg('gen.prompt')===MIC.lib.CATS[0].items[0].pos,
@@ -305,91 +310,128 @@ PROBE = {
 })();
 </script>
 """,
-    # 环境体检卡：两个引擎分区各自「一键补齐」，补完自动重新体检（都跑在 mock 的假补全上）
+    # 环境页：一个模型一页，页头那颗开关就是这一路的总闸（v7）。
+    # 探针跑在 env_qwen 上，跨页切一遍，最后真按一次开关看它收不收得干净。
     "env": """
 <script>
 (async function(){
   const R=[],ok=(n,c,x)=>R.push((c?'PASS ':'FAIL ')+n+(x!=null?' '+x:''));
   const wait=ms=>new Promise(r=>setTimeout(r,ms));
   const btns=()=>[].slice.call(document.querySelectorAll('#view button')).map(b=>b.textContent.trim());
-  const cards=()=>[].slice.call(document.querySelectorAll('#view .card'));
-  const head=c=>{const h=c&&c.querySelector('.card-h');return h?h.textContent:'';};
-  const pills=()=>[].slice.call(document.querySelectorAll('#view .mrow .pill'))
-      .map(p=>p.textContent.trim()).filter(t=>/^(就绪|没装|待补|提醒)$/.test(t));
+  const view=()=>document.getElementById('view').textContent;
+  const bar=()=>document.querySelector('#envslot .envbar');
+  /* 页头那一行 = 开关 + 环境名 + 一句话状态，整个页面只有它说「还差几项」 */
+  const sw=()=>document.querySelector('#view .bar .sw');
+  const note=()=>{const b=document.querySelector('#view .bar');if(!b)return '';
+    return ((b.querySelector('.fine')||{}).textContent||'').trim();};
+  const rows=()=>[].slice.call(document.querySelectorAll('#view .card'))
+      .filter(c=>{const h=c.querySelector('.card-h h2');return h&&h.textContent.trim()==='明细';})
+      .reduce((a,c)=>a.concat([].slice.call(c.querySelectorAll('.mrow .minfo b')).map(x=>x.textContent.trim())),[]);
+  const heads=()=>[].slice.call(document.querySelectorAll('#view .card-h h2')).map(h=>h.textContent.trim());
+  const pills=()=>[].slice.call(document.querySelectorAll('#view .card'))
+      .filter(c=>{const h=c.querySelector('.card-h h2');return h&&h.textContent.trim()==='明细';})
+      .reduce((a,c)=>a.concat([].slice.call(c.querySelectorAll('.mrow .pill')).map(p=>p.textContent.trim())),[]);
   try{
     await wait(1800);
-    const v=document.getElementById('view').textContent;
-    ok('两个分区标题都在', v.indexOf('千问环境')>=0 && v.indexOf('Moss 环境')>=0);
-    ok('每个分区有一句作用说明（挂在标题上悬浮看，不占明面）',
-       cards().filter(c=>/diffusers 直跑/.test(c.querySelector('.card-h').getAttribute('title')||'')).length===1
-       && cards().filter(c=>/内嵌 ComfyUI/.test(c.querySelector('.card-h').getAttribute('title')||'')).length===1
-       && !document.querySelector('#view .card-b .sub'),
-       cards().map(c=>(c.querySelector('.card-h').getAttribute('title')||'').slice(0,10)).join('|'));
-    // mock：千问 3 项待补（torchao/diffusers/Turbo 权重），Moss 4 项（comfy 与 moss 前缀）
-    ok('千问分区给出「一键补齐 3 项」', btns().some(t=>/一键补齐 3 项/.test(t)), btns().join('|'));
-    ok('Moss 分区给出「一键补齐 4 项」', btns().some(t=>/一键补齐 4 项/.test(t)), btns().join('|'));
-    ok('逐条「补这项」共 7 个（3+4）', btns().filter(t=>t==='补这项').length===7,
-       btns().filter(t=>t==='补这项').length);
-    ok('千问分区点名权重量级', /30 GB/.test(v));
-    ok('补齐只留横幅与分区卡两处、顶栏不再重复一颗',
-       /一键补齐/.test((document.getElementById('envslot')||{}).textContent||'')
-       && !btns().some(t=>/两边都补/.test(t)), btns().slice(0,6).join('|'));
-    /* 只补千问这一块：Moss 那四项必须原样待补，不能被一锅端 */
+    ok('千问页页头报这一路的欠账（含体量）',
+       /还差 3 项/.test(note())&&/30\\.3 GB/.test(note()), note());
+    ok('千问页给「一键补齐 3 项」', btns().some(t=>/一键补齐 3 项/.test(t)), btns().slice(0,4).join('|'));
+    ok('明细只列千问自己那四行',
+       rows().join('|').indexOf('MOSS-Image')<0 && rows().length===4, rows().join('|'));
+    ok('权重目录与下载器留在千问页（基础页不掺模型）',
+       heads().join('|').indexOf('本机模型')>=0 && heads().join('|').indexOf('下载权重')>=0,
+       heads().join('|'));
+    ok('横幅也只说这一路（不是全局合计 8 项）',
+       !!bar()&&/这一路还差 3 项/.test(bar().textContent), bar()&&bar().textContent.trim().slice(0,14));
+    /* 换页＝换一个环境：横幅、明细、按钮都得跟着换 */
+    MIC.nav.goto('env_moss');
+    await wait(700);
+    ok('Moss 页换成自己那一差 4 项', /还差 4 项/.test(note())&&/一键补齐 4 项/.test(btns().join('|')), note());
+    ok('Moss 明细里是运行时那几行', rows().join('|').indexOf('内嵌 ComfyUI')>=0, rows().join('|'));
+    MIC.nav.goto('env_h3');
+    await wait(700);
+    ok('H3 页把下载单独点名', /下载 1 项/.test(btns().join('|'))&&/41/.test(view()), btns().slice(0,4).join('|'));
+    MIC.nav.goto('env_base');
+    await wait(700);
+    ok('基础页没有开关（壳自己不给关）', !sw()&&/Python|磁盘/.test(rows().join('|')), rows().join('|'));
+    ok('基础页齐了就不挂横幅', !bar(), note());
+    /* ---- 开关：关掉这一路 = 后端根本不检，页面只剩一句说明 ---- */
+    MIC.nav.goto('env_qwen');
+    await wait(700);
+    sw().click();                                  // MIC.env.set('qwen',0)
+    await wait(900);
+    ok('关掉后页里只剩一句「这一路关着」',
+       /这一路关着/.test(view())&&!/明细/.test(heads().join('|')), heads().join('|'));
+    ok('关掉后不再有补齐按钮', !/一键补齐/.test(btns().join('|')), btns().slice(0,4).join('|'));
+    ok('关掉后横幅整条消失（不是换个说法继续提醒）', !bar(), bar()&&bar().textContent.trim().slice(0,16));
+    ok('关掉后千问专属的功能页收走',
+       !document.querySelector('#tree .node[data-id="t_edit"]')
+       && !document.querySelector('#tree .node[data-id="t_inp"]'),'');
+    ok('关掉后还留着一个开回来的门', btns().some(t=>/开启这一路/.test(t)), btns().slice(0,3).join('|'));
+    sw().click();                                  // 开回来
+    await wait(900);
+    ok('重新开启后欠账照旧报出来', /还差 3 项/.test(note())&&!!bar(), note());
+    ok('开回来功能页也回来了', !!document.querySelector('#tree .node[data-id="t_edit"]'),'');
+    /* ---- 只补这一页：别的页不许被一锅端 ---- */
     MIC.env.fixZone('qwen');
-    await wait(400);
-    ok('点补齐后按钮进「补全中」', btns().some(t=>/补全中/.test(t)), btns().slice(0,6).join('|'));
+    await wait(500);
+    ok('点补齐后横幅换成补全中', !!bar()&&/补全中|步骤/.test(bar().textContent),
+       bar()&&bar().textContent.trim().slice(0,14));
     await wait(9000);
-    const q=cards().filter(c=>/千问环境/.test(head(c)))[0];
-    const m=cards().filter(c=>/Moss 环境/.test(head(c)))[0];
-    const qBad=q?[].slice.call(q.querySelectorAll('.mrow .pill')).filter(p=>!/就绪/.test(p.textContent)).length:-1;
-    const mBad=m?[].slice.call(m.querySelectorAll('.mrow .pill')).filter(p=>!/就绪/.test(p.textContent)).length:-1;
-    ok('千问分区补完全绿', qBad===0, '待补='+qBad);
-    ok('没打扰 Moss 分区（仍 4 项待补）', mBad===4, '待补='+mBad);
-    ok('千问按钮变「已就绪」', q?/已就绪/.test(head(q)):false, q?head(q).slice(-24):'no card');
-    /* 再补 Moss 这一块 */
-    MIC.env.fixZone('moss');
-    await wait(9000);
-    /* render() 换掉了整棵 DOM：旧的 m 节点已经脱离文档，必须重新取卡才看得到新状态 */
-    const m2=cards().filter(c=>/Moss 环境/.test(head(c)))[0];
-    const mPills=m2?[].slice.call(m2.querySelectorAll('.mrow .pill')).map(p=>p.textContent.trim()):null;
-    ok('Moss 分区补完全绿', !!m2&&mPills.length>0&&mPills.every(t=>/就绪/.test(t)),
-       mPills?mPills.join('|'):'no card');
-    ok('Moss 按钮变「已就绪」', m2?/已就绪/.test(head(m2)):false, m2?head(m2).slice(-24):'');
-    ok('状态药丸总数不少（分区拆分没漏项）', pills().length>=12, 'rows='+pills().length);
+    MIC.nav.goto('env_moss');
+    await wait(900);
+    ok('补千问没惊动 Moss 那一路（仍差 4 项）', /还差 4 项/.test(note()), note());
+    MIC.nav.goto('env_qwen');
+    await wait(900);
+    ok('千问页补完全绿', pills().length===4&&pills().every(t=>/就绪/.test(t)), pills().join('|'));
+    ok('补完页头改口「已就绪」且横幅消失', /已就绪/.test(note())&&!bar(), note());
   }catch(e){ok('探针跑完',false,String(e));}
   document.body.insertAdjacentHTML('beforeend','<pre id="probe">'+R.join('\\n')+'</pre>');
 })();
 </script>
 """,
-    # 懒人路径：缺环境提示只在「环境」页（别的页不被横幅挡）；Ctrl+Enter 直接开始
+    # 懒人路径：缺环境的提醒只挂在会说这句话的那一页（全局横幅在 env_* 页，
+    # 功能页各自给一条 notebar）；Ctrl+Enter 直接开始
     "lazy": """
 <script>
 (async function(){
   const R=[],ok=(n,c,x)=>R.push((c?'PASS ':'FAIL ')+n+(x!=null?' '+x:''));
   const wait=ms=>new Promise(r=>setTimeout(r,ms));
-  /* 横幅挂在 topbar 下面的全局插槽：环境页才出内容，其他页永远空着 */
+  /* 横幅挂在 topbar 下面的全局插槽：只有环境子页出内容，别的页永远空着 */
   const bar=()=>document.querySelector('#envslot .envbar');
+  const note=()=>document.querySelector('#view .notebar');
   const barBtns=()=>{const b=bar();return b?[].slice.call(b.querySelectorAll('button')).map(x=>x.textContent.trim()):[]};
   try{
     await wait(1800);
     /* 体检回来前（env_todo 还是 null）不该有任何横幅 */
     ok('没数据时横幅不占位', !bar() && MIC.s.st.env_todo===null, String(MIC.s.st.env_todo));
     ok('起始页就是生图页（没有概览页）', MIC.nav.pageOf()==='t2i', MIC.nav.pageOf());
-    MIC.env.check();                 // mock 里千问 3 + Moss 4 共 7 项待补
+    MIC.env.check();                 // mock：千问 3 + Moss 4 + H3 1 共 8 项待补
     await wait(1200);
-    const n=(MIC.s.st.env_todo||0);
-    ok('生图页不挂缺环境横幅', !bar() && n>3, 'env_todo='+n);
-    MIC.nav.goto('models');
-    await wait(600);
-    ok('环境页横幅出现（计数=两个分区的待补总和）',
-       !!bar() && new RegExp('还差 '+n+' 项').test(bar().textContent),
-       (bar()?bar().textContent.trim().slice(0,16):'')+' · env_todo='+n);
+    const by=(MIC.s.st.env_todo_by||{});
+    ok('待补数按环境拆好（每页只报自己那一格）',
+       by.qwen===3&&by.moss===4&&by.h3===1&&MIC.s.st.env_todo===8, JSON.stringify(by));
+    ok('生图页不挂全局横幅（千问引擎也不提 Moss 的欠账）',
+       !bar() && !note(), 'env_todo='+MIC.s.st.env_todo);
+    /* 视频页要 H3 那一路：欠账只在这页提一句，并给一条去明细页的路 */
+    MIC.nav.goto('video');
+    await wait(700);
+    ok('视频页给自己那一行提醒（H3 差 1 项）',
+       !!note()&&/H3 环境还差 1 项/.test(note().textContent)&&!bar(),
+       note()&&note().textContent.trim().slice(0,20));
+    [].slice.call(note().querySelectorAll('button'))[0].click();
+    await wait(700);
+    ok('那条提醒上的「去补齐」把人送到 H3 页', MIC.nav.pageOf()==='env_h3', MIC.nav.pageOf());
+    MIC.nav.goto('env_qwen');
+    await wait(700);
+    ok('环境页横幅出现（只数这一路的 3 项）',
+       !!bar()&&/这一路还差 3 项/.test(bar().textContent), bar()&&bar().textContent.trim().slice(0,16));
     ok('横幅上只有一个补齐按钮（人已经在明细页）',
        barBtns().filter(t=>/一键补齐/.test(t)).length===1 && barBtns().indexOf('看明细')<0,
        barBtns().join('|'));
     MIC.env.fixAll();
     await wait(1200);
-    ok('一键补齐把横幅换成补全中', !!bar() && /补全中/.test(bar().textContent),
+    ok('一键补齐把横幅换成补全中', !!bar() && /补全中|步骤/.test(bar().textContent),
        bar()&&bar().textContent.trim().slice(0,16));
     ok('补全中不重复给按钮', barBtns().filter(t=>/一键补齐/.test(t)).length===0, barBtns().join('|'));
     ok('补全中给一条「看日志」的路', barBtns().filter(t=>/看日志/.test(t)).length===1, barBtns().join('|'));
@@ -400,10 +442,13 @@ PROBE = {
     MIC.nav.goto('t2i');
     await wait(600);
     await wait(9000);
-    MIC.nav.goto('models');
-    await wait(600);
-    ok('补完横幅整条消失（齐了不占地方）', !bar(),
+    MIC.nav.goto('env_moss');
+    await wait(900);
+    ok('补完全局横幅整条消失（齐了不占地方）', !bar(),
        bar()?bar().textContent.trim().slice(0,20):'空');
+    MIC.nav.goto('video');
+    await wait(700);
+    ok('视频页那条提醒也一并收走', !note(), note()&&note().textContent.trim().slice(0,16));
     /* Ctrl+Enter：写完提示词手不离开键盘 */
     MIC.nav.goto('t2i');
     await wait(400);
@@ -425,8 +470,8 @@ PROBE = {
 })();
 </script>
 """,
-    # v6 导航：默认分组树（出图 / 系统）+ 标签名统一两字；平铺形态把分组名当副标题挂着，
-    # 分组树形态那一格给的是引擎归属（编辑/重绘只有千问走得通）
+    # v9 导航：三组（出图 / 环境 / 系统）12 页；标签名统一两字，专有名词除外（Moss / H3云端），
+    # 分组树那一格给引擎归属，平铺那一格给分组路径
     "nav": """
 <script>
 (async function(){
@@ -437,42 +482,48 @@ PROBE = {
   const shown=pid=>!!document.querySelector('#tree .node[data-id="'+pid+'"]');
   try{
     await wait(1500);
-    ok('默认分组树、正好两个分组', MIC.nav.state.layout==='tree'
-        && document.querySelectorAll('#tree .node.grp').length===2);
+    ok('默认分组树、正好三个分组', MIC.nav.state.layout==='tree'
+        && document.querySelectorAll('#tree .node.grp').length===3);
     const names=tabs().map(n=>n.querySelector('.nm').textContent.trim());
-    ok('七个标签：生图/编辑/重绘/画廊/环境/日志/设置',
-       names.join('|')==='生图|编辑|重绘|画廊|环境|日志|设置', names.join('|'));
-    ok('名称全是两字（竖排才对齐得整齐）', names.every(t=>t.length===2), names.join('|'));
-    ok('组名也是两字：出图|系统',
-       MIC.nav.allGroups().map(g=>g.name).join('|')==='出图|系统',
+    ok('十二个标签：出图四个 + 环境四个 + 系统四个',
+       names.join('|')==='生图|编辑|重绘|视频|基础|千问|Moss|H3|画廊|H3云端|日志|设置', names.join('|'));
+    ok('名称全是两字（Moss / H3云端 按专有名词留着）',
+       names.filter(t=>t!=='Moss'&&t!=='H3云端').every(t=>t.length===2), names.join('|'));
+    ok('组名也是两字：出图|环境|系统',
+       MIC.nav.allGroups().map(g=>g.name).join('|')==='出图|环境|系统',
        MIC.nav.allGroups().map(g=>g.name).join('|'));
-    ok('七页都在分组里、顶层不留散页', MIC.nav.allTabs().every(n=>!!MIC.nav.find(n.id).parent));
+    ok('十二页都在分组里、顶层不留散页', MIC.nav.allTabs().every(n=>!!MIC.nav.find(n.id).parent));
     /* 每页都渲染得出来：侧栏点一遍，看有没有哪页留白或抛异常 */
-    const gone=[],pages=['t2i','edit','inpaint','gallery','logs','models','settings'];
+    const gone=[],pages=['t2i','edit','inpaint','video','env_base','env_qwen','env_moss',
+                         'env_h3','gallery','cloud','logs','settings'];
     for(const p of pages){
       MIC.nav.goto(p);
       await wait(420);
       const v=document.getElementById('view');
       if(MIC.nav.pageOf()!==p||!v||v.querySelectorAll('.card').length===0)gone.push(p);
     }
-    ok('7 个功能页都能切出来且不空白', gone.length===0, gone.join('|'));
-    /* 引擎归属标在行尾：切到「仅 Moss」会凭空少两页，先说在哪一页上 */
-    ok('分组树里千问专属那两页标了归属', path('t_edit')==='千问'&&path('t_inp')==='千问'
-        && path('t_gen')===''&&path('t_gal')==='',
-       ['t_gen','t_edit','t_inp','t_gal'].map(path).join('|'));
+    ok('12 个功能页都能切出来且不空白', gone.length===0, gone.join('|'));
+    /* 引擎归属标在行尾：关掉环境会凭空少页，先说清每一页归谁 */
+    ok('分组树里模型专属那几页标了归属',
+       path('t_edit')==='千问'&&path('t_inp')==='千问'&&path('t_vid')==='H3'
+       && path('t_gen')==='千问/Moss'&&path('t_gal')==='',
+       ['t_gen','t_edit','t_inp','t_vid','t_gal'].map(path).join('|'));
+    ok('环境四页不挂归属（页名就是环境名，再标一遍是废话）',
+       ['t_envb','t_envq','t_envm','t_envh'].every(p=>path(p)===''),
+       ['t_envb','t_envq','t_envm','t_envh'].map(path).join('|'));
     /* 平铺（临时解散分组）：那一格给分组路径，比归属更要紧 */
     MIC.nav.setLayout('flat');
     await wait(150);
-    ok('平铺 7 个标签且带分组副标题', tabs().length===7&&path('t_inp')==='出图', path('t_inp'));
+    ok('平铺 12 个标签且带分组副标题', tabs().length===12&&path('t_inp')==='出图', path('t_inp'));
     MIC.nav.setLayout('tree');
     await wait(150);
-    ok('切回分组树', document.querySelectorAll('#tree .node.grp').length===2
+    ok('切回分组树', document.querySelectorAll('#tree .node.grp').length===3
         && path('t_set')==='');
     /* 想自己归拢还是能建分组：新建→移入→移出→解散（空分组解散不弹确认） */
     MIC.nav.newGroup();
     await wait(250);
     const g=MIC.nav.allGroups().slice(-1)[0];
-    ok('新建分组后树里三个分组', !!g&&document.querySelectorAll('#tree .node.grp').length===3);
+    ok('新建分组后树里四个分组', !!g&&document.querySelectorAll('#tree .node.grp').length===4);
     MIC.nav.moveTo('t_inp',g.id);
     await wait(150);
     ok('标签页能移进新分组', (g.children||[]).map(x=>x.page).join('|')==='inpaint',
@@ -481,8 +532,8 @@ PROBE = {
     await wait(150);
     MIC.nav.dissolve(g.id);
     await wait(150);
-    ok('分组用完即散、标签页一个不少', MIC.nav.allGroups().length===2
-        && MIC.nav.allTabs().length===7 && shown('t_inp'));
+    ok('分组用完即散、标签页一个不少', MIC.nav.allGroups().length===3
+        && MIC.nav.allTabs().length===12 && shown('t_inp'));
     MIC.nav.goto('t2i');
     await wait(400);
   }catch(e){ok('探针跑完',false,String(e));}
@@ -500,12 +551,15 @@ PROBE = {
     await wait(1500);
     const r=await MIC.api.galleryList();
     const it=(r&&r.items)||[];
-    ok('清单里有图', it.length>0, it.length+' 张');
+    ok('清单里有图', it.length>0, it.length+' 项');
     ok('清单不再内联缩略图（每条都不带 url）', it.every(x=>x.url===undefined));
+    const nVid=it.filter(x=>x.video||/\\.(mp4|webm|mov|mkv)$/i.test(String(x.file||''))).length;
     MIC.nav.goto('gallery');
     await wait(1500);
     const imgs=[].slice.call(document.querySelectorAll('#view img[data-g]'));
-    ok('网格里每张图都挂了按需取的钩子', imgs.length===it.length, imgs.length+'/'+it.length);
+    /* 成片那块砖不给它要缩略：一段 mp4 解首帧得引视频解码依赖，不值得 */
+    ok('网格里每张图都挂了按需取的钩子（成片砖除外）',
+       imgs.length===it.length-nVid&&nVid>0, imgs.length+'+'+nVid+'='+it.length);
     await wait(2500);
     const got=imgs.filter(el=>/^data:image/.test(el.getAttribute('src')||'')).length;
     ok('首屏看得见的缩略图当场取到（不等观察器）', got===imgs.length,
@@ -658,7 +712,8 @@ PROBE = {
 })();
 </script>
 """,
-    # 十九轮：首启欢迎页（选完引擎界面自动配好）+ 顶栏按千问/Moss/系统分类 + 活的副标题
+    # 欢迎页＝三路环境的开关总入口（点牌＝开/关那一路），进控制台时把引擎对齐到开着的那一路；
+    # 顶栏那几盏灯与左上角一行也跟着开关走
     "greet": """
 <script>
 (async function(){
@@ -670,139 +725,363 @@ PROBE = {
   const tabs=()=>[].slice.call(document.querySelectorAll('#tree .node.tab .nm')).map(n=>n.textContent.trim());
   const pills=()=>[].slice.call(document.querySelectorAll('#pills .pill b')).map(n=>n.textContent.trim());
   const wcards=()=>[].slice.call(document.querySelectorAll('#view .wcard b')).map(n=>n.textContent.trim());
+  const wr=()=>[].slice.call(document.querySelectorAll('#view .wr')).map(n=>n.textContent.trim());
+  const brand=()=>((document.querySelector('#brand .bsub')||{}).textContent||'').trim();
   try{
     await wait(1500);
     clearInterval(MIC.s.pollTimer);
-    /* 引擎切换在 mock 里会真起任务（参数卡一锁后面什么都点不动），
-       这段要验的是「选完有没有去对齐引擎」，所以把桥换成一支笔记下调用 */
+    /* 引擎切换与开关都走真接口，但这里只验「界面有没有跟着对齐」，把桥换成一支笔记下调用 */
     const calls=[],orig=MIC.api.setEngine;
     MIC.api.setEngine=n=>{calls.push(n);return Promise.resolve({ok:true,engine:n,msg:'切好了'});};
-    /* ---- 1) 没选过：主区先给欢迎页 ---- */
+    const envCalls=[],origSet=MIC.api.envSet;
+    MIC.api.envSet=(i,w)=>{envCalls.push(i+':'+(w?1:0));
+      MIC.s.cfg.env_on[i]=!!w;MIC.s.st.env_on=Object.assign({},MIC.s.cfg.env_on);
+      MIC.nav.applyMode();MIC.render();return Promise.resolve({ok:true,env_on:MIC.s.cfg.env_on,cfg:MIC.s.cfg});};
+    /* ---- 1) 没选过：主区先给欢迎页，牌上带开关 ---- */
     MIC.s.cfg.welcomed=false;MIC.render();
     await wait(300);
-    ok('没选过引擎：主区换成欢迎页', /先选一路模型/.test(view())
-        && document.querySelectorAll('#view .wcard').length===3, wcards().join('|'));
+    ok('没选过：主区换成欢迎页（问的是这台机器管哪几路）',
+       /这台机器管哪几路/.test(view())&&document.querySelectorAll('#view .wcard').length===3,
+       wcards().join('|'));
     ok('面包屑跟着说「欢迎」', crumb()==='欢迎', crumb());
     ok('欢迎页不重复挂一行小页头（自己带大标题）', !document.querySelector('#view .phead'),'');
-    ok('三张牌：千问 / Moss / 两个都有', wcards().join('|')==='千问|Moss|两个都有', wcards().join('|'));
-    ok('每张牌写了代价（体量与耗时）', /30 GB/.test(view())&&/3\\.3 秒/.test(view()),'');
-    /* 体检数按引擎拆开后，选之前就该看出「这一路在这台机器上还差几项」 */
-    MIC.s.st.env_todo=6;MIC.s.st.env_todo_qwen=2;MIC.s.st.env_todo_moss=4;MIC.render();
+    ok('三张牌：千问 / Moss / H3 视频', wcards().join('|')==='千问|Moss|H3 视频', wcards().join('|'));
+    ok('每张牌写了代价（体量与耗时）', /30 GB/.test(view())&&/41 GB/.test(view()),'');
+    ok('牌上有开关，且开关自己不吃点击（整张牌才是开关）',
+       document.querySelectorAll('#view .wcard .sw').length===3
+       && document.querySelectorAll('#view .wcard button').length===0,'');
+    /* 待补数按环境拆开后，点之前就该看出「这一路在这台机器上还差几项」 */
+    MIC.s.st.env_todo=8;MIC.s.st.env_todo_by={base:0,qwen:3,moss:4,h3:1};MIC.render();
     await wait(200);
-    const wr=()=>[].slice.call(document.querySelectorAll('#view .wr')).map(n=>n.textContent.trim());
-    ok('三张牌各报自己那一路的待补数（合计=两路相加）',
-       wr().join('|')==='这台机器还差 2 项|这台机器还差 4 项|这台机器还差 6 项', wr().join('|'));
-    MIC.s.st.env_todo=0;MIC.s.st.env_todo_qwen=0;MIC.s.st.env_todo_moss=0;MIC.render();
+    ok('三张牌各报自己那一路的待补数',
+       wr().join('|')==='这台机器还差 3 项|这台机器还差 4 项|这台机器还差 1 项', wr().join('|'));
+    /* 回到「各报自己那一路」的状态，再拿千问这张牌试开关 */
+    MIC.s.st.env_todo=0;MIC.s.st.env_todo_by={base:0,qwen:0,moss:0,h3:0};MIC.render();
     await wait(200);
-    ok('两路都齐了改口「已就绪」，也不再挂环境横幅',
-       wr().length===3&&wr().every(t=>/已就绪/.test(t))&&!/还差 \\d+ 项环境/.test(view()), wr().join('|'));
-    MIC.s.st.env_todo=6;MIC.s.st.env_todo_qwen=2;MIC.s.st.env_todo_moss=4;MIC.render();
+    ok('都齐了改口「已就绪」，也不再挂任何提醒',
+       wr().length===3&&wr().every(t=>/已就绪/.test(t)), wr().join('|'));
+    MIC.s.st.env_todo=8;MIC.s.st.env_todo_by={base:0,qwen:3,moss:4,h3:1};MIC.render();
     await wait(200);
-    /* ---- 2) 点「仅 Moss」：模式、导航、起始页、引擎一起对上 ---- */
-    document.querySelectorAll('#view .wcard')[1].click();
+    /* ---- 2) 点一张牌＝关掉那一路（不体检、不提醒、功能页收起） ---- */
+    document.querySelectorAll('#view .wcard')[0].click();     // 千问
     await wait(500);
-    ok('选完落盘：console_mode=moss 且 welcomed=true',
-       String(MIC.s.cfg.console_mode)==='moss'&&MIC.s.cfg.welcomed===true,
-       String(MIC.s.cfg.console_mode)+'|'+String(MIC.s.cfg.welcomed));
-    ok('导航自动收成 Moss 那一套（5 页，编辑/重绘没了）',
-       tabs().length===5&&tabs().join('|').indexOf('编辑')<0, tabs().join('|'));
-    ok('落在两引擎共用的生图页', MIC.nav.pageOf()==='t2i', MIC.nav.pageOf());
-    ok('顺手把激活引擎对齐到 Moss', calls.join('|')==='moss', calls.join('|'));
-    ok('欢迎页不再挡路', !/先选一路模型/.test(view()),'');
-    /* ---- 3) 设置页那颗「重看」把这一屏叫回来 ---- */
+    ok('点牌走的是环境开关（qwen:0）', envCalls.join('|')==='qwen:0', envCalls.join('|'));
+    ok('关掉的牌改口「已关闭 · 不体检、不提醒」',
+       wr()[0]==='已关闭 · 不体检、不提醒', wr().join('|'));
+    ok('关掉千问：生图页还在（Moss 也开着）、编辑/重绘收走',
+       !!document.querySelector('#tree .node[data-id="t_gen"]')
+       && !document.querySelector('#tree .node[data-id="t_edit"]'),'');
+    ok('关掉一路不碰另一路：Moss 与 H3 的牌照旧报自己的数',
+       wr().join('|')==='已关闭 · 不体检、不提醒|这台机器还差 4 项|这台机器还差 1 项', wr().join('|'));
+    document.querySelectorAll('#view .wcard')[0].click();     // 开回来
+    await wait(500);
+    ok('再点一次开回来', envCalls.join('|')==='qwen:0|qwen:1'
+       &&!!document.querySelector('#tree .node[data-id="t_edit"]'), envCalls.join('|'));
+    /* ---- 3) 进控制台：welcomed 落盘、引擎对齐到还开着的那一路 ---- */
+    /* 引擎已经是千问时不该多切一次（set_engine 是后台活，切一次就是一次显存搬运） */
+    document.querySelector('#view .wfoot .btn').click();
+    await wait(600);
+    ok('进控制台落 welcomed=true', MIC.s.cfg.welcomed===true, String(MIC.s.cfg.welcomed));
+    ok('当前引擎本来就开着：不重复切引擎', calls.length===0, calls.join('|'));
+    ok('欢迎页不再挡路，落在生图页',
+       !/这台机器管哪几路/.test(view())&&MIC.nav.pageOf()==='t2i', MIC.nav.pageOf());
+    /* 关掉千问再进一次：这一回得把引擎交给还开着的 Moss，而不是停在没开的那一路 */
+    MIC.env.set('qwen',0);
+    await wait(500);
+    MIC.s.cfg.welcomed=false;MIC.render();
+    await wait(200);
+    document.querySelector('#view .wfoot .btn').click();
+    await wait(600);
+    ok('千问关着进控制台：引擎对齐到开着的那一路（Moss）',
+       calls.join('|')==='moss'&&MIC.s.cfg.welcomed===true, calls.join('|'));
+    MIC.env.set('qwen',1);
+    await wait(500);
+    /* ---- 4) 设置页那颗「重看」与那行开关 ---- */
     MIC.nav.goto('settings');
     await wait(500);
-    ok('设置页有「重看欢迎页」', !![].slice.call(document.querySelectorAll('#view button'))
-       .filter(b=>/重看选引擎那一屏/.test(b.textContent))[0],'');
-    [].slice.call(document.querySelectorAll('#view button'))
-      .filter(b=>/重看选引擎那一屏/.test(b.textContent))[0].click();
+    ok('设置页有「重看选环境那一屏」', !![].slice.call(document.querySelectorAll('#view button'))
+       .filter(b=>/重看选环境那一屏/.test(b.textContent))[0],'');
+    ok('设置页那行开关与欢迎页同源（三颗：千问/Moss/H3）',
+       document.querySelectorAll('#view .envsw .sw').length===3,
+       [].slice.call(document.querySelectorAll('#view .envsw')).map(x=>x.textContent.trim()).join('|'));
+    /* ---- 5) 顶栏灯、左上角一行与侧栏按开关收放 ---- */
+    MIC.s.st.engine='qwen';MIC.nav.goto('t2i');MIC.render();
     await wait(400);
-    ok('重看：欢迎页又回到主区', /先选一路模型/.test(view())
-        && MIC.s.cfg.welcomed===false, String(MIC.s.cfg.welcomed));
-    /* ---- 4) 顶栏三盏灯按 千问 / Moss / 系统 分着摆 ---- */
-    MIC.s.cfg.welcomed=true;MIC.s.cfg.console_mode='both';
-    MIC.form.commitPath('console_mode','both');MIC.nav.applyMode();MIC.render();
-    await wait(400);
-    ok('两者兼有：灯是 千问|Moss|系统 三颗', pills().join('|')==='千问|Moss|系统', pills().join('|'));
-    MIC.s.cfg.console_mode='moss';MIC.view.tick();
-    ok('仅 Moss：千问那盏不出现', pills().join('|')==='Moss|系统', pills().join('|'));
-    MIC.s.cfg.console_mode='qwen';MIC.view.tick();
-    ok('仅千问：Moss 那盏不出现', pills().join('|')==='千问|系统', pills().join('|'));
-    /* ---- 5) 副标题是活的：跟着当前引擎与档位改口 ---- */
-    MIC.s.cfg.console_mode='both';MIC.s.st.engine='qwen';
-    MIC.nav.goto('t2i');MIC.render();
+    ok('三路都开：灯是 千问|Moss|系统 三颗', pills().join('|')==='千问|Moss|系统', pills().join('|'));
+    /* 收放走用户点的那条路（环境开关），不直改 st.env_on：
+       状态里那份只是后端配置刷出来的镜像——轮询、环境页挂载时的体检都拿配置盖它，
+       前端直改下一拍就复原。探针验的是「关掉就收走」，那就得连配置一起关。 */
+    const swall=async o=>{
+      for(const k of ['qwen','moss','h3'])MIC.env.set(k,o[k]?1:0);
+      await wait(1100);
+    };
+    await swall({qwen:0,moss:1,h3:1});
+    ok('关掉千问：那一盏不出现、左上角不再写千问',
+       pills().join('|')==='Moss|系统'&&/Moss/.test(brand())&&!/千问/.test(brand()),
+       pills().join('|')+' | '+brand());
+    await swall({qwen:0,moss:0,h3:0});
+    ok('一路都不开：明说「所有模型环境都关着」，出图组整组收走',
+       /都关着/.test(brand())&&!document.querySelector('#tree .node[data-id="t_gen"]')
+       && !!document.querySelector('#tree .node[data-id="t_envq"]'), brand());
+    await swall({qwen:1,moss:1,h3:1});
+    ok('重新开一路：灯与页一起回来', pills().join('|')==='千问|Moss|系统'
+        && !!document.querySelector('#tree .node[data-id="t_gen"]'), pills().join('|'));
+    /* ---- 6) 副标题是活的：跟着当前引擎与档位改口 ---- */
+    MIC.s.st.engine='qwen';MIC.nav.goto('t2i');MIC.render();
     await wait(300);
     ok('生图页副标题报当前引擎与档位', /千问 · .*步 · \\d+×\\d+/.test(sub()), sub());
     MIC.s.st.engine='moss';MIC.render();
     await wait(200);
     ok('切 Moss 后同一行改成 Moss', /^Moss · /.test(sub()), sub());
     MIC.s.st.engine='qwen';MIC.render();
-    await wait(200);
-    ok('词库那页没了：导航里不再有「词库」', tabs().join('|').indexOf('词库')<0, tabs().join('|'));
     MIC.api.setEngine=orig;
   }catch(e){ok('探针跑完',false,String(e));}
   document.body.insertAdjacentHTML('beforeend','<pre id="probe">'+R.join('\\n')+'</pre>');
 })();
 </script>
 """,
-    # 控制台模式：仅 Moss / 仅千问时侧栏只留那个引擎用得上的页，环境页分区与设置项同步收放
-    "mode": """
+    # 环境开关收放的是整条路：侧栏页、设置项、跨页动作一起收，重新开启原样回来
+    "sw": """
 <script>
 (async function(){
   const R=[],ok=(n,c,x)=>R.push((c?'PASS ':'FAIL ')+n+(x!=null?' '+x:''));
   const wait=ms=>new Promise(r=>setTimeout(r,ms));
   const tabs=()=>[].slice.call(document.querySelectorAll('#tree .node.tab .nm')).map(n=>n.textContent.trim());
+  const tips=()=>[].slice.call(document.querySelectorAll('#view label.tip'))
+      .map(l=>l.getAttribute('title')||'').join('|');
   try{
     await wait(1500);
-    ok('默认两者兼有：7 个标签', String(MIC.s.cfg.console_mode||'both')==='both'
-        && tabs().length===7, tabs().join('|'));
-    /* 切到仅 Moss：千问专属的两页从侧栏收走，共用的生图页留着 */
-    MIC.form.commitPath('console_mode','moss');
-    MIC.nav.applyMode();MIC.render();
-    await wait(400);
+    ok('默认三路全开：12 个标签', MIC.nav.envOn().qwen!==false&&tabs().length===12, tabs().join('|'));
+    /* 关千问：千问专属的两页从侧栏收走，两路共用的生图页留着。
+       等满一轮轮询（800ms）再断言：开关表得是后端刷进状态的那一份，不是界面本地改的。 */
+    MIC.env.set('qwen',0);
+    await wait(1100);
     const t1=tabs().join('|');
-    ok('仅 Moss：编辑/重绘收走、其余 5 页都在',
-       t1.indexOf('编辑')<0 && t1.indexOf('重绘')<0 && tabs().length===5, t1);
-    ok('仅 Moss：停在两引擎共用的生图页', MIC.nav.pageOf()==='t2i', MIC.nav.pageOf());
+    ok('关千问：编辑/重绘收走、其余 10 页都在',
+       t1.indexOf('编辑')<0 && t1.indexOf('重绘')<0 && tabs().length===10, t1);
+    ok('关千问：停在两路共用的生图页', MIC.nav.pageOf()==='t2i', MIC.nav.pageOf());
     MIC.nav.goto('edit');
     await wait(300);
-    ok('仅 Moss：跳千问专属页被拦下', MIC.nav.pageOf()==='t2i', MIC.nav.pageOf());
-    MIC.nav.goto('models');
-    await wait(500);
-    const v=MIC.$('view').textContent;
-    ok('仅 Moss：环境页只剩 Moss 分区（千问的下载器也收走）',
-       /Moss 环境/.test(v)&&!/千问环境/.test(v)&&!/下载权重/.test(v),'');
-    /* 收起的页不只是点不到：跨页动作（成图接力/参数回填）也得给个说法，不能静默没反应 */
+    ok('关千问：跳千问专属页被拦下', MIC.nav.pageOf()==='t2i', MIC.nav.pageOf());
+    /* 收起的页不只是点不到：跨页动作（成图接力）也得给个说法，不能静默没反应 */
     MIC.s.st.last_image='D:/x/demo.png';
     MIC.runner.again('inpaint');
     await wait(200);
-    ok('仅 Moss：成图接力被拦下并说明原因', /收起/.test(MIC.$('toast').textContent),
+    ok('关千问：成图接力被拦下并说清去哪儿开',
+       /环境关着/.test(MIC.$('toast').textContent)&&/环境/.test(MIC.$('toast').textContent),
        MIC.$('toast').textContent);
     MIC.nav.goto('settings');
     await wait(400);
-    const tips=()=>[].slice.call(document.querySelectorAll('#view label.tip'))
-        .map(l=>l.getAttribute('title')||'').join('|');
-    ok('仅 Moss：设置页收走千问的量化/offload 档，指引改挂在悬浮提示上',
+    ok('关千问：设置页收走千问的量化档，指引改挂在悬浮提示上',
        !document.querySelector('#view [data-k="console.quant"]')
        && /Moss 的档位/.test(tips()),'');
-    /* 切到仅千问：Moss 只剩引擎那一档，页面本来就没有独立的 Moss 页 */
-    MIC.form.commitPath('console_mode','qwen');
-    MIC.nav.applyMode();MIC.render();
-    await wait(400);
-    ok('仅千问：7 个标签一个不少', tabs().length===7, tabs().join('|'));
-    MIC.nav.goto('models');
-    await wait(500);
-    const v2=MIC.$('view').textContent;
-    ok('仅千问：环境页千问分区和下载器都在，Moss 分区没了',
-       /千问环境/.test(v2)&&/下载权重/.test(v2)&&!/Moss 环境/.test(v2),'');
-    /* 切回两者兼有：被收走的设置项跟着回来 */
-    MIC.form.commitPath('console_mode','both');
-    MIC.nav.applyMode();
+    ok('关千问：设置页那颗开关自己是灭的（还能一键开回来）',
+       [].slice.call(document.querySelectorAll('#view .envsw'))
+         .filter(x=>/千问/.test(x.textContent))[0].querySelector('.sw').className.indexOf('on')<0,'');
+    /* 再关 H3（千问仍关着）：只剩 Moss 那一路。
+       视频页不收走——它两条通道，本地归 h3、云端只要一个登录号；
+       收走就等于把「这台机器只想用云端出片」那条路连门一起堵了（详见 vid 探针）。 */
+    MIC.env.set('h3',0);
+    await wait(1100);
+    ok('关 H3：视频页留着（云端那条路不碰本机权重），收走的是它本地那一档',
+       tabs().indexOf('视频')>=0 && tabs().indexOf('生图')>=0, tabs().join('|'));
+    ok('只剩 Moss 一路：出图组两张（生图|视频），环境与系统页一页不少（10 页）',
+       tabs().join('|')==='生图|视频|基础|千问|Moss|H3|画廊|H3云端|日志|设置', tabs().join('|'));
+    /* 全部开回来：被收走的页与设置项原样回来（TREE 没动，只在显示层过滤） */
+    MIC.env.set('qwen',1);MIC.env.set('h3',1);
+    await wait(1200);
+    ok('开回来：12 个标签一个不少', tabs().length===12, tabs().join('|'));
     MIC.nav.goto('settings');
-    await wait(500);
-    ok('切回兼有：设置页千问量化档回来',
+    await wait(400);
+    ok('开回来：设置页千问量化档跟着回来',
        !!document.querySelector('#view [data-k="console.quant"]'),'');
-    ok('切回兼有：7 个标签都回来', tabs().length===7, tabs().join('|'));
+    MIC.nav.goto('t2i');
+    await wait(400);
+  }catch(e){ok('探针跑完',false,String(e));}
+  document.body.insertAdjacentHTML('beforeend','<pre id="probe">'+R.join('\\n')+'</pre>');
+})();
+</script>
+""",
+    # 本地 H3 视频页（v7 新增）：只填「说什么 · 多长 · 多大」，首帧可选；
+    # 出片落在画廊是同一种砖，但不取缩略（不为一段 mp4 引视频解码依赖）
+    "vid": """
+<script>
+(async function(){
+  const R=[],ok=(n,c,x)=>R.push((c?'PASS ':'FAIL ')+n+(x!=null?' · '+x:''));
+  const wait=ms=>new Promise(r=>setTimeout(r,ms));
+  const sub=()=>((document.querySelector('#view .psub')||{}).textContent||'').trim();
+  const k=q=>document.querySelector('#view [data-k="'+q+'"]');
+  const vtx=()=>((document.querySelector('#view')||{}).textContent||'');
+  const btns=()=>[].slice.call(document.querySelectorAll('#view button')).map(b=>b.textContent.trim());
+  const ta=()=>k('video.prompt');
+  const ori=()=>document.querySelector('#view [data-ori="video.size"]');
+  const segBtn=v=>document.querySelector('#view .seg[data-k="video.exec"] button[data-v="'+v+'"]');
+  const flip=async(el,v)=>{el.value=v;el.dispatchEvent(new Event('change',{bubbles:true}));await wait(400);};
+  const click=async(el)=>{el.click();await wait(500);};
+  try{
+    await wait(1800);
+    ok('视频页活副标题报时长/尺寸/步数/引擎状态', /^\\d+ 秒 · \\d+×\\d+ · 4 步 · /.test(sub()), sub());
+    ok('通道那一格在最上面：本地/云端两档，默认本地',
+       !!segBtn('local')&&!!segBtn('cloud')&&segBtn('local').classList.contains('on'),
+       btns().slice(0,4).join('|'));
+    ok('只三样要填：描述、时长、清晰度×画幅（步数只读不放开）',
+       !!ta()&&k('video.seconds')&&k('video.size')&&ori()
+       && !document.querySelector('#view [data-k="video.steps"]'),'');
+    ok('时长三档、清晰度四档 P + 自定义、朝向三档',
+       k('video.seconds').options.length===3&&k('video.size').options.length===5
+       && ori()&&ori().options.length===3,
+       k('video.seconds').options.length+'/'+k('video.size').options.length+'/'+ori().options.length);
+    const plabels=()=>[].slice.call(k('video.size').options).map(o=>o.textContent.trim());
+    ok('P 档后面直接写真实分辨率：768P 横版＝原生 1344×768（不是 16 取整的 1360）',
+       plabels().some(x=>/^768P : 1344 × 768$/.test(x)), plabels().join('|'));
+    await flip(ori(),'v');
+    ok('切竖版当场倒过来，仍按登记过的原生画幅 768×1344',
+       plabels().some(x=>/^768P : 768 × 1344$/.test(x)), plabels().join('|'));
+    await flip(ori(),'h');
+    ok('首帧那一栏写清留空是文生视频',
+       /留空=文生视频/.test((k('video.first')||{}).placeholder||''), (k('video.first')||{}).placeholder);
+    /* 选自定义才出宽高两格；取整交给后端（16 的倍数），界面只负责原样送过去 */
+    const cap={};const orig=MIC.api.videoGen;
+    MIC.api.videoGen=p=>{cap.got=p;return Promise.resolve({ok:false,msg:'探针拦下，不真跑'});};
+    await flip(k('video.size'),'custom');
+    ok('切自定义：宽/高两格当场出现，朝向那格灰着留在那里（画幅由宽高自己决定，没什么可选）',
+       !!k('video.cw')&&!!k('video.ch')&&ori()&&ori().disabled,'');
+    k('video.cw').value='1350';k('video.cw').dispatchEvent(new Event('change',{bubbles:true}));
+    k('video.ch').value='749';k('video.ch').dispatchEvent(new Event('change',{bubbles:true}));
+    ta().value='一只猫推开木门，镜头缓慢推进';
+    ta().dispatchEvent(new Event('input',{bubbles:true}));
+    await wait(300);
+    document.querySelector('#view [data-start]').click();
+    await wait(400);
+    ok('自定义宽高原样交给后端（取整在后端做）',
+       !!cap.got&&String(cap.got.size)==='custom'
+       && Number(cap.got.cw)===1350&&Number(cap.got.ch)===749,
+       cap.got&&(cap.got.size+' '+cap.got.cw+'×'+cap.got.ch));
+    /* 空描述不许起任务 */
+    ta().value='';ta().dispatchEvent(new Event('input',{bubbles:true}));
+    await wait(300);
+    document.querySelector('#view [data-start]').click();
+    await wait(300);
+    ok('没写描述不开拍', !MIC.s.st.running&&/先写一句/.test(MIC.$('toast').textContent),
+       MIC.$('toast').textContent);
+    ok('拦下这一段没污染配置（清晰度仍按选的走）', String(MIC.s.cfg.video.size)==='custom',
+       String(MIC.s.cfg.video.size));
+    /* ---- 切到云端：同一页换执行地，账号/工作流跟着出来，步数与种子收走 ---- */
+    await click(segBtn('cloud'));
+    ok('云端那一档：账号与工作流两格出现，步数与种子不再摆着',
+       !!k('video.cloud_acct')&&!!k('cloud.workflow')
+       && !document.querySelector('#view [data-sk="video.seed"]')&&/Turbo 固定/.test(vtx())===false,
+       !!k('video.cloud_acct')+'/'+!!k('cloud.workflow'));
+    ok('云端副标题报「云端 · 号名」，不再报引擎',
+       /云端/.test(sub())&&/4 步/.test(sub())===false, sub());
+    ok('云端把参考图那格改了名（首帧只是本地那条路的说法）',
+       /参考图/.test(vtx()), '');
+    ok('工作流还没填：这一页直接说差什么，给一条去云端页的路',
+       /还差一份工作流/.test(vtx())&&btns().some(x=>/去处理/.test(x)),
+       (document.querySelector('#view .notebar')||{}).textContent);
+    k('cloud.workflow').value='https://www.runninghub.cn/workflow/2103759530927673346';
+    k('cloud.workflow').dispatchEvent(new Event('change',{bubbles:true}));
+    await wait(500);
+    ok('粘好工作流：提醒收走，副标题改成「随时能跑」',
+       !document.querySelector('#view .notebar')&&/随时能跑/.test(sub()), sub());
+    cap.got=null;
+    ta().value='一只猫推开木门，镜头缓慢推进';
+    ta().dispatchEvent(new Event('input',{bubbles:true}));
+    await wait(300);
+    document.querySelector('#view [data-start]').click();
+    await wait(400);
+    ok('云端开拍：交的是同一片参数（exec=cloud，尺寸仍是界面那串）',
+       !!cap.got&&String(cap.got.exec)==='cloud'&&String(cap.got.size)==='custom'
+       && Number(cap.got.cw)===1350, cap.got&&(cap.got.exec+' '+cap.got.size));
+    /* 清晰度：云端能到 2K（短边 1440），本地停在 768——那是权重的原生档 */
+    const sizes=()=>[].slice.call(k('video.size').options).map(o=>o.value);
+    ok('云端清晰度到 2K：480P→1440P 七档 + 自定义',
+       sizes().indexOf('2560x1440')>=0&&sizes().length===8, sizes().join('|'));
+    await flip(k('video.size'),'2560x1440');
+    await wait(400);
+    ok('云端选 1440P 记成 2560×1440', String(MIC.s.cfg.video.size)==='2560x1440',
+       String(MIC.s.cfg.video.size));
+    await click(segBtn('local'));
+    await wait(400);
+    ok('切回本地：1440P 自动收进本地档位表（1344×768），不拿本地跑不动的数出去',
+       String(MIC.s.cfg.video.size)==='1344x768'&&sizes().length===5,
+       String(MIC.s.cfg.video.size)+'/'+sizes().join(','));
+    await click(segBtn('cloud'));
+    await wait(400);
+    ok('再切回云端：这个数本来就在云端档位表里，原样留着',
+       String(MIC.s.cfg.video.size)==='1344x768', String(MIC.s.cfg.video.size));
+    /* 本地工作流文件：填 .json 当场多出「宿主页」那一格 */
+    k('cloud.workflow').value='C:/x/h3.json';
+    k('cloud.workflow').dispatchEvent(new Event('change',{bubbles:true}));
+    await wait(500);
+    ok('填本地 .json：当场多出「宿主页」那格，并说清为什么要它',
+       !!k('cloud.wf_host')&&/宿主页/.test(vtx())&&!!document.querySelector('#view .notebar'), '');
+    k('cloud.wf_host').value='https://www.runninghub.cn/workflow/2103759530927673346';
+    k('cloud.wf_host').dispatchEvent(new Event('change',{bubbles:true}));
+    await wait(500);
+    ok('补上宿主页：提醒收走，云端这条路算通',
+       !document.querySelector('#view .notebar')&&/随时能跑/.test(sub()), sub());
+    await click(segBtn('local'));
+    ok('切回本地：步数那格（Turbo 4 步）与种子都回来，工作流格子收走',
+       /Turbo 固定/.test(vtx())&&!!document.querySelector('#view .seedw')&&!k('cloud.workflow'),'');
+    MIC.api.videoGen=orig;
+    /* 真跑一轮：没拉起 ComfyUI 时先载入、随后自动接上出片（与后端那条路同构） */
+    /* 换档会把整页重画一遍（自定义那两格要收走），所以先等这一拍落地再填描述——
+       先填后画等于往已经被替换掉的 textarea 里写字，start() 读到的还是空的。 */
+    await flip(k('video.size'),'1344x768');
+    ta().value='一只猫推开木门，阳光落在地板上，镜头缓慢推进';
+    ta().dispatchEvent(new Event('input',{bubbles:true}));
+    await wait(300);
+    document.querySelector('#view [data-start]').click();
+    /* 起不起得来在 start() 的回调里就写进状态了，不等轮询；
+       这里给一点余量只是为了别抢在回调之前读。 */
+    await wait(600);
+    ok('开拍：running 落 video/load（进度条走的是出片步数）',
+       String(MIC.s.st.running)==='video'||String(MIC.s.st.running)==='load', MIC.s.st.running);
+    for(let i=0;i<90&&MIC.s.st.running;i++)await wait(300);
+    ok('出片跑完回到空闲', !MIC.s.st.running, String(MIC.s.st.running));
+    MIC.nav.goto('gallery');
+    await wait(1200);
+    ok('成片进历史清单（带 video 标记）',
+       (MIC.s.gal||[]).some(x=>/\\.mp4$/.test(String(x.file||''))), (MIC.s.gal||[]).length+' 项');
+    const vids=document.querySelectorAll('#view .gcell .gvid').length;
+    ok('画廊里成片是一块能点开播放的砖，不给它要缩略图',
+       vids>0&&[].slice.call(document.querySelectorAll('#view .gcell .gvid'))
+         .every(x=>!x.querySelector('img')), vids+' 块成片砖');
+    /* 环境那一侧：本地那一路归 h3 环境，云端那一路只要一个登录号。
+       所以关掉 h3 不收整页，只把「这一路停了」写在页里——
+       关掉的页根本不体检（todo=0），光看 todo 会以为一切正常，点开始才报错。 */
+    MIC.nav.goto('video');
+    await wait(700);
+    MIC.env.set('h3',0);
+    await wait(700);
+    ok('关 H3：视频页还在侧栏（只剩云端那条路的人也得进得来）',
+       !!document.querySelector('#tree .node[data-id="t_vid"]'),'');
+    ok('关 H3＋本地档：这一页直说「已关闭」，给一条开回来的路',
+       /已关闭/.test((document.querySelector('#view .notebar')||{}).textContent||'')
+       && btns().some(x=>/开启/.test(x)),
+       (document.querySelector('#view .notebar')||{}).textContent);
+    ok('副标题不再骗人：写「H3 已关闭」而不是「点开始自动拉起」',
+       /H3 已关闭/.test(sub())&&/自动拉起/.test(sub())===false, sub());
+    await click(segBtn('cloud'));
+    ok('关着 H3 照切云端：账号/工作流照出，提醒换成云端那一条',
+       !!k('video.cloud_acct')&&!/H3 环境已关闭/.test(vtx()),
+       (document.querySelector('#view .notebar')||{}).textContent);
+    await click(segBtn('local'));
+    ok('切回本地：关闭的提醒又回来（提醒跟着这一档走，不挂全局横幅）',
+       /已关闭/.test((document.querySelector('#view .notebar')||{}).textContent||''),'');
+    MIC.env.set('h3',1);
+    await wait(700);
+    MIC.nav.goto('video');
+    await wait(700);
+    ok('开回来：缺项提醒跟着这一档回来，并给一条去 H3 页的路',
+       !!document.querySelector('#view .notebar')
+       && /H3 环境还差/.test(document.querySelector('#view .notebar').textContent),
+       btns().slice(0,3).join('|'));
+    /* 「齐了就不啰嗦」本地这一档在假后端里凑不出来（关着才归零、开着必差那 41G），
+       同一句话由云端那条覆盖：粘好工作流后提醒当场收走。 */
+    MIC.nav.goto('t2i');
+    await wait(400);
   }catch(e){ok('探针跑完',false,String(e));}
   document.body.insertAdjacentHTML('beforeend','<pre id="probe">'+R.join('\\n')+'</pre>');
 })();
@@ -829,11 +1108,45 @@ PROBE = {
        ['尺寸','步数','种子','张数'].every(l=>tips.some(x=>x.textContent.trim()===l
          && (x.getAttribute('title')||'').length>6)),
        tips.map(x=>x.textContent.trim()).join('|'));
+    /* 生图尺寸：左边 P、右边横/方/竖，P 选项直接写真实分辨率 */
+    const gs=()=>document.querySelector('#view [data-k="gen.size"]');
+    const go=()=>document.querySelector('#view select[data-ori="gen.size"]');
+    const labels=()=>gs()?[].slice.call(gs().options).map(o=>o.textContent.trim()):[];
+    ok('生图尺寸是 P 档 + 朝向两件套',
+       !!gs()&&!!go()&&labels().some(x=>/^1024P : 1024 × 1024$/.test(x)), labels().join('|'));
+    go().value='h';go().dispatchEvent(new Event('change',{bubbles:true}));
+    await wait(400);
+    ok('切横版：标签与配置一起变成 1824×1024',
+       labels().some(x=>/^1024P : 1824 × 1024$/.test(x))
+       && MIC.mget(MIC.s.cfg,'gen.size')==='1824x1024',
+       labels().join('|')+' · '+MIC.mget(MIC.s.cfg,'gen.size'));
+    go().value='s';go().dispatchEvent(new Event('change',{bubbles:true}));
+    await wait(400);
+    ok('切回方形：恢复 1024×1024', MIC.mget(MIC.s.cfg,'gen.size')==='1024x1024',
+       MIC.mget(MIC.s.cfg,'gen.size'));
     /* ---- 2) 千问：步数也是下拉，两档 ---- */
-    const qw=sel&&0;
     ok('千问的步数收成下拉（极速/精细）',
        [].slice.call(document.querySelectorAll('#view select'))
-         .some(s=>s.options.length===2&&/精细/.test(s.options[1].textContent))&&!sel());
+         .some(s=>s.options.length===2&&/精细/.test(s.options[1].textContent))&&!sel(),
+       '引擎='+MIC.s.st.engine+' 下拉='+[].slice.call(document.querySelectorAll('#view select'))
+         .map(s=>(s.getAttribute('data-k')||s.getAttribute('onchange')||'?')+'=['
+           +[].slice.call(s.options).map(o=>o.textContent).join('/')+']').join(' '));
+    /* ---- 2b) 档位表里没有的值（老配置/画廊回填/后端默认）：留成「（原值）」，别被第一项顶掉 ---- */
+    const stepSel=()=>[].slice.call(document.querySelectorAll('#view select'))
+                        .find(s=>s.dataset.k==='gen.steps');
+    MIC.mset(MIC.s.cfg,'gen.steps','13');MIC.render();await wait(400);
+    const s2=stepSel();
+    ok('表外的值补一项「13（原值）」并选中',
+       s2&&s2.value==='13'&&[].some.call(s2.options,o=>/（原值）/.test(o.textContent)),
+       s2?[].slice.call(s2.options).map(o=>o.textContent).join('/'):'没找到步数下拉');
+    const rd=MIC.form.read()||{};
+    ok('整屏 read() 带走的是 13，不是第一项「极速 · 8 步」',
+       String((rd.gen||{}).steps)==='13',JSON.stringify(rd.gen||{}));
+    await wait(1200);   // 轮询再跑几轮：老 bug 是每轮都补一条重复的「（原值）」
+    const s3=stepSel();
+    ok('轮询几轮后不重复补项', s3&&[].filter.call(s3.options,o=>/（原值）/.test(o.textContent)).length===1,
+       s3?s3.options.length+' 项':'没找到');
+    MIC.mset(MIC.s.cfg,'gen.steps','8');MIC.render();await wait(300);
     /* ---- 3) Moss：一个下拉管两条轴 ---- */
     /* 引擎走真接口切：只改界面层的 s.engine，下一次轮询就把 mock 那一份 qwen 并回来 */
     await MIC.api.setEngine('moss');
@@ -918,18 +1231,171 @@ PROBE = {
 """,
 }
 
+PROBE["dlbar"] = """
+<script>
+(async function(){
+  const R=[],ok=(n,c,x)=>R.push((c?'PASS ':'FAIL ')+n+(x!=null?' '+x:''));
+  const wait=ms=>new Promise(r=>setTimeout(r,ms));
+  try{
+    await wait(1800);
+    /* 手动下载与一键补全共用顶部横幅：这里塞一份真形状的进度，看它画不画得对 */
+    const DL={busy:true,phase:'download',repo:'Qwen/Qwen-Image-2.1-Turbo',
+      done:12.7*1024*1024*1024,total:30.3*1024*1024*1024,
+      speed:8.4*1024*1024,eta:1440,files_done:2,files_total:5,
+      endpoint:'https://hf-mirror.com',file:'transformer/00002.safetensors'};
+    Object.assign(MIC.s.st,{env_busy:false,env_step:0,env_steps:0,
+      env_label:'',dl:DL});
+    MIC.render();
+    await wait(300);
+    let slot=document.getElementById('envslot'), t=slot.textContent;
+    ok('手动下载报仓库名', /下载 Qwen\\/Qwen-Image-2\\.1-Turbo/.test(t), t.slice(0,60));
+    /* 一键补全时换成「第几步 / 当前项」，同一根进度条 */
+    Object.assign(MIC.s.st,{env_step:1,env_steps:2,env_label:'千问 Turbo 权重'});
+    MIC.render();
+    await wait(300);
+    slot=document.getElementById('envslot'); t=slot.textContent;
+    ok('补全时报步骤与当前项', /步骤 1\\/2/.test(t)&&/千问 Turbo 权重/.test(t), t.slice(0,60));
+    ok('报已下/总量与速度', /12\\.7 GB \\/ 30\\.3 GB/.test(t)&&/8\\.4 MB\\/s/.test(t), t.slice(0,90));
+    ok('报剩余、文件数与镜像', /剩 24 分/.test(t)&&/2\\/5 文件/.test(t)&&/hf-mirror\\.com/.test(t),
+       t.slice(60,160));
+    const bar=slot.querySelector('.prog > i');
+    ok('百分比条真画出来', !!bar&&parseInt(bar.style.width,10)===42, bar&&bar.style.width);
+    ok('分区按钮改口「下载中…」并禁用',
+       [].some.call(document.querySelectorAll('#view button'),
+                    b=>/下载中/.test(b.textContent)&&b.disabled),
+       [].slice.call(document.querySelectorAll('#view button'))
+         .filter(b=>/中…/.test(b.textContent)).map(b=>b.textContent).join('|'));
+    /* busy 一落，横幅要退回「还差 N 项」，不能残留一条永远转圈的下载 */
+    MIC.s.st.dl={};
+    MIC.render();
+    await wait(300);
+    const t2=document.getElementById('envslot').textContent;
+    ok('下载结束横幅不残留', !/下载 Qwen|MB\\/s/.test(t2), t2.slice(0,50));
+  }catch(e){ok('探针跑完',false,String(e));}
+  document.body.insertAdjacentHTML('beforeend','<pre id="probe">'+R.join('\\n')+'</pre>');
+})();
+</script>
+"""
+
+PROBE["gal"] = """
+<script>
+(async function(){
+  const R=[],ok=(n,c,x)=>R.push((c?'PASS ':'FAIL ')+n+(x!=null?' '+x:''));
+  const wait=ms=>new Promise(r=>setTimeout(r,ms));
+  const cells=()=>document.querySelectorAll('#view .gcell');
+  const toast=()=>document.getElementById('toast');
+  try{
+    await wait(1600);
+    const n0=cells().length;
+    ok('画廊列出成图与成片', n0>=3 && document.querySelectorAll('#view .gcell .gvid').length>=1, n0);
+    const im=document.querySelector('#view img[data-g]');
+    ok('首屏缩略图按需取到了', !!im && /^data:image/.test(im.getAttribute('src')||''),
+       im&&(im.getAttribute('src')||'').slice(0,22));
+    const gone=cells()[0].querySelector('.gdel');
+    gone.click();
+    await wait(500);
+    ok('删除后提示带「撤销」', !!toast().querySelector('.tact') && /已删除/.test(toast().textContent),
+       toast().textContent);
+    ok('这一格真的从网格里没了', cells().length===n0-1, cells().length);
+    toast().querySelector('.tact').click();
+    await wait(900);
+    ok('撤销后这张回到网格', cells().length===n0, cells().length);
+    ok('撤销有回执', /已恢复/.test(toast().textContent), toast().textContent);
+    /* 图片砖才有「当首帧」，成片砖没有 */
+    const vc=[].slice.call(cells()).find(c=>c.querySelector('.gvid'));
+    const icell=[].slice.call(cells()).find(c=>!c.querySelector('.gvid'));
+    ok('成片砖不提供首帧按钮', !!vc && !vc.querySelector('.gsend'));
+    ok('图片砖提供首帧按钮', !!icell && !!icell.querySelector('.gsend'));
+    icell.querySelector('.gsend').click();
+    await wait(1000);
+    const first=String(MIC.s.cfg.video.first||'');
+    ok('首帧写进了配置', /\\.(png|jpg|jpeg|webp)$/i.test(first), first);
+    const inp=document.querySelector('#view [data-k="video.first"]');
+    ok('已经跳到视频页', !!inp, (document.getElementById('crumb')||{}).textContent);
+    ok('首帧框显示这张', !!inp && inp.value===first, inp&&inp.value);
+  }catch(e){ok('探针跑完',false,String(e));}
+  document.body.insertAdjacentHTML('beforeend','<pre id="probe">'+R.join('\\n')+'</pre>');
+})();
+</script>
+"""
+
+PROBE["win"] = """
+<script>
+(async function(){
+  const R=[],ok=(n,c,x)=>R.push((c?'PASS ':'FAIL ')+n+(x!=null?' '+x:''));
+  const wait=ms=>new Promise(r=>setTimeout(r,ms));
+  const calls=[];
+  try{
+    await wait(1500);
+    /* mock 里没有窗口桥，win.init 本来会自己跳过：换一套假几何，把两条起手路径都跑一遍 */
+    MIC.api.booted=()=>true;
+    MIC.api.winGeo=()=>Promise.resolve({x:100,y:100,w:1200,h:800,min_w:900,min_h:560,maxed:false});
+    MIC.api.winMove=(x,y)=>{calls.push(['move',x,y]);return Promise.resolve({ok:true});};
+    MIC.api.winSet=(x,y,w,h)=>{calls.push(['set',x,y,w,h]);return Promise.resolve({ok:true});};
+    MIC.win.init();
+    const md=(el,t,x,y)=>el.dispatchEvent(new MouseEvent(t,{bubbles:true,
+      clientX:x,clientY:y,screenX:x+300,screenY:y+50,button:0}));
+    const rim=document.querySelector('#rzg .rz[data-move="1"]');
+    ok('外圈直边标成拖动位', !!rim);
+    md(rim,'mousedown',200,2);
+    await wait(40);
+    ok('按下边缘进入拖动态', document.body.classList.contains('win-drag'));
+    md(document,'mousemove',240,12);
+    await wait(40);
+    ok('边缘拖动只移窗不缩放',
+       calls.some(c=>c[0]==='move')&&!calls.some(c=>c[0]==='set'), JSON.stringify(calls));
+    md(document,'mouseup',240,12);
+    ok('松手退出拖动态', !document.body.classList.contains('win-drag'));
+    /* 角上仍是缩放；顺带验证 document 那一路没有把 mode 抢成拖窗 */
+    calls.length=0;
+    const corner=document.querySelector('#rzg .rz[data-edge="ne"]');
+    md(corner,'mousedown',1400,2);
+    await wait(40);
+    md(document,'mousemove',1440,40);
+    await wait(40);
+    ok('四角按下还是缩放',
+       calls.some(c=>c[0]==='set')&&!calls.some(c=>c[0]==='move'), JSON.stringify(calls));
+    md(document,'mouseup',1440,40);
+    /* 正文空白处照旧任意位置拖 */
+    calls.length=0;
+    const blank=document.querySelector('.topbar .grow');
+    md(blank,'mousedown',700,20);
+    await wait(40);
+    md(document,'mousemove',730,30);
+    await wait(40);
+    ok('空白处仍能拖窗', calls.some(c=>c[0]==='move'), JSON.stringify(calls));
+    md(document,'mouseup',730,30);
+    /* 控件上按下不许拖 */
+    calls.length=0;
+    const inp=document.querySelector('#view .inp');
+    md(inp,'mousedown',600,300);
+    await wait(40);
+    md(document,'mousemove',640,330);
+    await wait(40);
+    ok('输入框上按下不拖窗', calls.length===0, JSON.stringify(calls));
+    md(document,'mouseup',640,330);
+  }catch(e){ok('探针跑完',false,String(e));}
+  document.body.insertAdjacentHTML('beforeend','<pre id="probe">'+R.join('\\n')+'</pre>');
+})();
+</script>
+"""
+
 # 探针跑在哪一页上（键是探针名，值是 shoot 的页名）
 PROBE_PAGE = {"inpaint": "inpaint", "again": "t2i", "repeat": "t2i", "kits": "t2i",
-              "loadbar": "t2i", "env": "models", "lazy": "t2i", "nav": "t2i",
-              "gal": "gallery", "merge": "t2i", "mode": "t2i", "tier": "t2i",
-              "greet": "t2i"}
+              "loadbar": "t2i", "env": "env_qwen", "lazy": "t2i", "nav": "t2i",
+              "gal": "gallery", "merge": "t2i", "sw": "t2i", "tier": "t2i",
+              "greet": "t2i", "vid": "video", "dlbar": "env_qwen", "win": "t2i"}
 
 # 有的探针要等两轮「一键补齐」跑完（mock 里补全按秒级推进），默认 9 秒预算根本活不到收尾。
 # 没列在这里的探针用默认值。
-PROBE_BUDGET = {"env": 45000, "lazy": 30000, "tier": 25000}
+PROBE_BUDGET = {"env": 60000, "lazy": 40000, "tier": 25000, "vid": 45000, "sw": 20000,
+                "greet": 30000, "dlbar": 30000, "gal": 30000, "win": 20000}
 
 
 def main():
+    # 探针输出里带 emoji（❌/✅），GBK 控制台默认会直接抛 UnicodeEncodeError
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(errors="replace")
     ap = argparse.ArgumentParser()
     ap.add_argument("pages", nargs="*", default=["settings"])
     ap.add_argument("--full", action="store_true", help="截完整页高，不只视口")

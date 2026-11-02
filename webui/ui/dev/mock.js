@@ -3,8 +3,10 @@
 (function(){
 const cfg={
   app_title:'Qwen 生图控制台',theme:'tide',mode:'dark',layout:'tree',sidebar_min:false,
-  notify:true,last_tab:'t_gen',nav_ver:6,open:{},console_mode:'both',welcomed:true,
-  console:{model_dir:'D:/AI/Qwen-Image-2.1/models/Qwen-Image-2.1-Turbo',
+  notify:true,last_tab:'t_gen',nav_ver:8,open:{},welcomed:true,
+  /* 环境开关：关掉的那路后端不体检、界面不显示（env_check 先按这份过滤） */
+  env_on:{base:true,qwen:true,moss:true,h3:true},
+  console:{model_dir:'D:/AI/Qwen-Image-2.1/envs/qwen/models/Qwen-Image-2.1-Turbo',
            output_dir:'D:/AI/Qwen-Image-2.1/outputs',quant:'fp8',offload:true},
   gen:{mode:'gen',prompt:'雨夜的霓虹小巷，湿路面拖出长反光，电影感光线',
       negative:'低画质，模糊，噪点，压缩失真，水印，签名，文字，多余手指，肢体畸形，面部扭曲，比例失衡，过曝，死黑，裁切',size:'1024x1024',cw:1024,ch:1024,steps:'8',seed:-1,count:1,kv_cache:true},
@@ -19,16 +21,28 @@ const cfg={
         prompt:'银发少女，柔和棚拍光，眼睛细节清晰',
         negative:'低画质，模糊，噪点，压缩失真，水印，签名，文字，多余手指，肢体畸形，面部扭曲，比例失衡，过曝，死黑，裁切',size:'1024x1024',cw:1024,ch:1024,
         seed:-1,count:1,quality:'fast'},
+  video:{prompt:'一只猫推开木门，阳光落在地板上，镜头缓慢推进',
+        seconds:5,size:'1344x768',cw:1344,ch:768,first:'',seed:-1,
+        exec:'local',cloud_acct:''},
   api:{enabled:false,lan:false,host:'127.0.0.1',port:8765,token:'',no_token:false,
        def_engine:'follow',def_size:'1024x1024'},
+  cloud:{port:9333,base:'https://www.runninghub.cn',login_url:'',browser:'',
+         domains:['runninghub.cn'],keep:true,keep_min:30,concurrency:1,
+         workflow:'',exec_tag:'Plus',poll_sec:5,gen_timeout:1800},
   nav:[
     {id:'g_out',type:'group',name:'出图',icon:'flower',children:[
       {id:'t_gen',type:'tab',name:'生图',icon:'flower',page:'t2i'},
       {id:'t_edit',type:'tab',name:'编辑',icon:'wand',page:'edit'},
-      {id:'t_inp',type:'tab',name:'重绘',icon:'brush',page:'inpaint'}]},
+      {id:'t_inp',type:'tab',name:'重绘',icon:'brush',page:'inpaint'},
+      {id:'t_vid',type:'tab',name:'视频',icon:'film',page:'video'}]},
+    {id:'g_env',type:'group',name:'环境',icon:'db',children:[
+      {id:'t_envb',type:'tab',name:'基础',icon:'db',page:'env_base'},
+      {id:'t_envq',type:'tab',name:'千问',icon:'flower',page:'env_qwen'},
+      {id:'t_envm',type:'tab',name:'Moss',icon:'wave',page:'env_moss'},
+      {id:'t_envh',type:'tab',name:'H3',icon:'film',page:'env_h3'}]},
     {id:'g_sys',type:'group',name:'系统',icon:'cog',children:[
       {id:'t_gal',type:'tab',name:'画廊',icon:'image',page:'gallery'},
-      {id:'t_mod',type:'tab',name:'环境',icon:'db',page:'models'},
+      {id:'t_cloud',type:'tab',name:'H3云端',icon:'globe',page:'cloud'},
       {id:'t_log',type:'tab',name:'日志',icon:'hist',page:'logs'},
       {id:'t_set',type:'tab',name:'设置',icon:'cog',page:'settings'}]},
   ],
@@ -40,8 +54,9 @@ const st={running:null,status:'就绪',done:0,total:0,
   vram_used:0.6,vram_total:12,img_count:6,last_sec:28.4,
   last_image:'D:/AI/Qwen-Image-2.1/outputs/gen_20261013_094107.png',
   api_on:false,api_url:'',load_pct:0,load_stage:'',env_busy:false,env_todo:null,
-  env_todo_qwen:null,env_todo_moss:null,
-  engine:'qwen',moss_tier:'daily',moss_installed:false,comfyui_on:false,comfyui_loaded:false,comfyui_url:''};
+  env_on:{base:true,qwen:true,moss:true,h3:true},env_todo_by:{},
+  engine:'qwen',moss_tier:'daily',moss_installed:false,comfyui_on:false,comfyui_loaded:false,comfyui_url:'',
+  cloud_busy:'',cloud_msg:''};
 
 let seq=0;
 const logs=[];
@@ -82,8 +97,14 @@ const GAL=[
    mode:'gen',negative:'',steps:40,sec:96.3,fav:0},
   {file:'D:/AI/Qwen-Image-2.1/outputs/gen_20261011_180209.png',name:'gen_20261011_180209.png',
    t:'2026-10-11 18:02',size:'1024×1024',seed:9,prompt:'Steampunk owl clockwork, macro detail'},
+  /* 成片：后端给 video:true，画廊不取缩略，整块砖是放片按钮 */
+  {file:'D:/AI/Qwen-Image-2.1/outputs/h3_20261013_115230.mp4',name:'h3_20261013_115230.mp4',
+   t:'2026-10-13 11:52',size:'1344×768',seed:88,prompt:'一只猫推开木门，阳光落在地板上，镜头缓慢推进',
+   mode:'h3',negative:'',steps:4,sec:96.5,fav:0,video:true},
 ];
 GAL.forEach(g=>g.url=thumbFor(g.file));
+/* 删除撤销的假回收站：只留最近删的那张，跟真后端的「栈顶可撤销」同义 */
+const GAL_TRASH=[];
 
 /* 模型清单种子：形状与 App.models_list 一致 */
 const MDL=[
@@ -94,36 +115,58 @@ const MDL=[
 /* 体检种子：形状与 webui/env_check.check() 一致。
    故意留三项「没装/待补」，方便在浏览器里核对补全那条 UI 路径长什么样。 */
 const ENV=[
-  {key:'python',group:'运行环境',label:'Python 解释器',state:'ok',detail:'当前 3.12.10（要求 3.11~3.13）',fix:{kind:'none'}},
-  {key:'venv',group:'运行环境',label:'虚拟环境',state:'ok',detail:'用的就是本目录 .venv',fix:{kind:'none'}},
-  {key:'disk',group:'运行环境',label:'磁盘空间',state:'ok',detail:'本盘剩余 273.5 GB（权重共约 30.3 GB）',fix:{kind:'none'}},
-  {key:'pkg:torch',group:'依赖包',label:'torch 2.11.0',state:'ok',detail:'已装 2.11.0+cu128',fix:{kind:'pip'}},
-  {key:'pkg:torchao',group:'依赖包',label:'torchao 0.18.0',state:'miss',detail:'没装',fix:{kind:'pip'}},
-  {key:'pkg:diffusers',group:'依赖包',label:'diffusers 916a5791',state:'part',
+  {key:'python',group:'运行环境',env:'base',label:'Python 解释器',state:'ok',detail:'当前 3.12.10（要求 3.11~3.13）',fix:{kind:'none'}},
+  {key:'venv',group:'运行环境',env:'base',label:'虚拟环境',state:'ok',detail:'用的就是本目录 .venv',fix:{kind:'none'}},
+  {key:'disk',group:'运行环境',env:'base',label:'磁盘空间',state:'ok',detail:'本盘剩余 273.5 GB（待补权重约 30.3 GB）',fix:{kind:'none'}},
+  {key:'pkg:torch',group:'依赖包',env:'qwen',label:'torch 2.11.0',state:'ok',detail:'已装 2.11.0+cu128',fix:{kind:'pip'}},
+  {key:'pkg:torchao',group:'依赖包',env:'qwen',label:'torchao 0.18.0',state:'miss',detail:'没装',fix:{kind:'pip'}},
+  {key:'pkg:diffusers',group:'依赖包',env:'qwen',label:'diffusers 916a5791',state:'part',
    detail:'已装 0.41.0.dev0，但 commit 是 b1a2c3d4，清单钉的是 916a5791',fix:{kind:'pip'}},
-  {key:'pkg:pywebview',group:'依赖包',label:'pywebview 6.2.1',state:'ok',detail:'已装 6.2.1',fix:{kind:'pip'}},
-  {key:'pkg:websocket-client',group:'Moss 环境',label:'websocket-client 1.8.0',state:'ok',
+  {key:'pkg:pywebview',group:'依赖包',env:'base',label:'pywebview 6.2.1',state:'ok',detail:'已装 6.2.1',fix:{kind:'pip'}},
+  {key:'pkg:websocket-client',group:'依赖包',env:'moss',label:'websocket-client 1.8.0',state:'ok',
    detail:'已装 1.8.0（Moss 的 /ws 步数进度靠它）',fix:{kind:'pip'}},
-  {key:'model:turbo',group:'模型权重',label:'主力模型 Turbo（Qwen/Qwen-Image-2.1-Turbo）',state:'part',
+  {key:'model:turbo',group:'模型权重',env:'qwen',label:'主力模型 Turbo（Qwen/Qwen-Image-2.1-Turbo）',state:'part',
    detail:'权重不完整：1 个文件字节数不对（transformer/diffusion_pytorch_model-00002-of-00002.safetensors） · 续传补齐即可',
    gb:30.3,fix:{kind:'model'}},
-  {key:'comfy:app',group:'Moss 环境',label:'内嵌 ComfyUI（comfyui）',state:'miss',
+  {key:'comfy:app',group:'ComfyUI 运行时',env:'moss',label:'内嵌 ComfyUI（comfyui）',state:'miss',
    detail:'还没 clone（约 100MB · Comfy-Org/ComfyUI v0.42.1）',gb:0.1,fix:{kind:'comfyui'}},
-  {key:'comfy:venv',group:'Moss 环境',label:'ComfyUI 独立环境',state:'miss',
+  {key:'comfy:venv',group:'ComfyUI 运行时',env:'moss',label:'ComfyUI 独立环境',state:'miss',
    detail:'要先有 ComfyUI 本体才能建它的环境',gb:0,fix:{kind:'comfyvenv'}},
-  {key:'moss:moss-comfy',group:'Moss 环境',label:'MOSS-Image 权重（Comfy-Org）',state:'miss',
-   detail:'目录不存在：comfyui/models · 约 13 GB',gb:13.01,fix:{kind:'mossmodel'}},
-  {key:'moss:moss-lora',group:'Moss 环境',label:'8 步 DMD LoRA（Kromoss）',state:'miss',
-   detail:'目录不存在：comfyui/models/loras · 约 2.2 GB',gb:2.21,fix:{kind:'mossmodel'}},
-  {key:'dir:outputs',group:'目录',label:'outputs/',state:'ok',detail:'可写',fix:{kind:'dir'}},
+  {key:'model:moss-comfy',group:'模型权重',env:'moss',label:'MOSS-Image 权重（Comfy-Org）',state:'miss',
+   detail:'目录不存在：envs/moss/models · 约 13 GB',gb:13.01,fix:{kind:'model'}},
+  {key:'model:moss-lora',group:'模型权重',env:'moss',label:'8 步 DMD LoRA（Kromoss）',state:'miss',
+   detail:'目录不存在：envs/moss/models/loras · 约 1.1 GB',gb:1.1,fix:{kind:'model'}},
+  {key:'model:h3-fl2va',group:'模型权重',env:'h3',optional:true,label:'H3 图生视频权重（41.4 GB）',
+   state:'miss',detail:'目录不存在：envs/h3/models · 约 41.37 GB',gb:41.37,fix:{kind:'model'}},
+  {key:'dir:outputs',group:'目录',env:'base',label:'outputs/',state:'ok',detail:'可写',fix:{kind:'dir'}},
 ];
-function envTodo(){return ENV.filter(x=>x.state==='miss'||x.state==='part').map(x=>x.key);}
-/* 待补数按引擎拆一份（与 app.env_check 里那条判法一致）：欢迎页要说得出「这一路还差几项」 */
+const ENVS=[
+  {id:'base',label:'基础',icon:'db',engine:'',title:'基础（两路共用）',optional:false,
+   desc:'主 .venv、界面壳与输出目录；两个引擎都靠它。'},
+  {id:'qwen',label:'千问',icon:'flower',engine:'qwen',title:'千问环境',optional:false,
+   desc:'diffusers 进程内直跑。主 .venv + envs/qwen/models。'},
+  {id:'moss',label:'Moss',icon:'wave',engine:'moss',title:'Moss 环境',optional:false,
+   desc:'内嵌 ComfyUI 子进程（共用 comfyui/ 与它的 .venv）。权重在 envs/moss/models。'},
+  {id:'h3',label:'H3 视频',icon:'film',engine:'moss',title:'H3 视频（可选）',optional:true,
+   desc:'MiniMax H3 图生视频，共用 Moss 的 ComfyUI 运行时；默认不下载。'},
+];
+/* 关掉的环境当它不存在：与 app.env_check 同一条规矩（先过滤，再算待补） */
+function envLive(){
+  const o=cfg.env_on||{};
+  return ENV.filter(x=>o[String(x.env||'base')]!==false)
+            .map(x=>Object.assign({},x,{optional:false}));   // 开着就不算「可选」
+}
+function envTodo(){
+  return envLive().filter(x=>x.state==='miss'||x.state==='part').map(x=>x.key);
+}
+/* 待补数按环境拆一份：基础项只归基础页，不重复算进每个引擎（与后端一致） */
 function envTodoBy(){
-  const grp=k=>((ENV.find(x=>x.key===k)||{}).group)==='Moss 环境';
-  const moss=envTodo().filter(k=>/^(comfy:|moss:)/.test(k)||grp(k)).length;
-  const all=envTodo().length;
-  return {qwen:all-moss,moss:moss};
+  const n={base:0,qwen:0,moss:0,h3:0};
+  envLive().forEach(function(x){
+    if(x.state!=='miss'&&x.state!=='part')return;
+    const e=String(x.env||'base');n[e]=(n[e]||0)+1;
+  });
+  return n;
 }
 
 /* 假任务推进：载入 3 轮 → 生成按步走 → 收尾出图 */
@@ -186,6 +229,15 @@ function advance(){
     st.status=`去噪 ${st.done}/${st.total}`;
     st.vram_used=(String(cfg.gen.size).indexOf('1536')>=0?11.3:10.2)+Math.random()*0.4;
     if(st.done>=st.total)finishGen();
+    return;
+  }
+  /* 出片只有 4 步（Turbo LoRA 烘死的），mock 照同样节奏走 */
+  if(st.running==='video'){
+    st.done++;
+    L(`第 ${st.done} / ${st.total} 步 采样`);
+    st.status=`出片 ${st.done}/${st.total}`;
+    st.vram_used=11.0+Math.random()*0.4;
+    if(st.done>=st.total)finishVideo();
   }
 }
 function beginGen(){
@@ -193,17 +245,36 @@ function beginGen(){
   st.running='gen';st.done=0;st.total=steps;st.status='去噪 0/'+steps;
   L('🚀 开始'+(cfg.gen.mode==='rgba'?'透明素材':'生成')+'：'+cfg.gen.size+' · '+steps+' 步 · 种子 '+cfg.gen.seed);
 }
+/* 成片：mock 也落一条带 video 标记的画廊项，界面那块的砖才知道自己是影片 */
+function finishVideo(){
+  const name='h3_'+stamp().replace(/[-: ]/g,'').slice(0,14)+'.mp4';
+  const file=(cfg.console.output_dir+'/'+name).replace(/\\/g,'/');
+  GAL.unshift({file:file,name:name,t:stamp(),size:cfg.video.size,seed:cfg.video.seed,
+               prompt:cfg.video.prompt,mode:'h3',negative:'',steps:4,
+               sec:+(70+Math.random()*40).toFixed(1),fav:0,video:true});
+  if(GAL.length>60)GAL.length=60;
+  st.img_count=GAL.length;st.last_image=file;st.last_sec=96.5;
+  st.running=null;st.status='✅ 完成 · '+name;
+  L('✅ 已保存：'+file+' · 96.5 秒');
+  L('── 结束 ──');
+}
 
 /* ---------- Moss（内嵌 ComfyUI）假状态 ---------- */
 const MOSS={installed:false,running:false,url:'',port:8876,pid:0,tier:'daily',loaded:false};
 /* 档位步数与 App.MOSS_TIERS 对齐（mock 只管把界面演像，真档位定义在后端那张表里） */
 const MOSS_STEPS={fast:8,mid:25,full:50};
-let mossLoadTick=0, wantMossGen=false, mossQ=null;
+let mossLoadTick=0, wantMossGen=false, mossQ=null, wantVideo=false;
 function mossStep(){
   MOSS.loaded=true;st.model_loaded=true;st.comfyui_on=true;st.comfyui_loaded=true;st.moss_installed=true;
   st.load_pct=100;st.load_stage='已就绪';st.status='Moss 就绪';
   L('✅ ComfyUI 已就绪：'+MOSS.url+'（首次灌权重较慢）');
   MOSS.running=true;st.running=null;
+  if(wantVideo){
+    /* 载入接出片：和真后端那条 chain_fn 同构 */
+    wantVideo=false;st.running='video';st.done=0;st.total=4;st.status='出片 0/4';
+    L('🎬 开始出片：'+(cfg.video.seconds||5)+' 秒 · '+cfg.video.size+' · 4 步');
+    return;
+  }
   if(wantMossGen){wantMossGen=false;beginMossGen();}
 }
 function beginMossGen(){
@@ -241,6 +312,18 @@ function finishMoss(){
 L('就绪 · Qwen 生图控制台');
 L('显存基线：桌面占用 0.6 / 12 GB');
 
+/* 云端账号假数据：只用于浏览器里看页面，真实快照在 data/cloud/（脚本不内联） */
+const CLOUD={
+  br:{on:true,port:9333,base:'https://www.runninghub.cn',account:'acc_demo1'},
+  keep:{on:true,min:30,last:Date.now()/1000-600,msg:'保活完成：2 个账号',purpose:''},
+  accts:[
+    {id:'acc_demo1',name:'主号',created:Date.now()/1000-86400*3,last_saved:Date.now()/1000-3600,
+     last_check:Date.now()/1000-600,state:'ok',detail:'页面有登录后的入口',backups:4,has_key:true},
+    {id:'acc_demo2',name:'小号',created:Date.now()/1000-86400,last_saved:Date.now()/1000-86400,
+     last_check:Date.now()/1000-7200,state:'expired',detail:'页面只有登录入口',backups:2,has_key:false},
+  ],
+};
+
 window.MIC_MOCK={
   boot(){return {cfg:cfg,state:st,version:'0.2.0-m2',default_nav:cfg.default_nav};},
   poll(c){advance();
@@ -256,7 +339,7 @@ window.MIC_MOCK={
   pick(kind){return kind==='dir'?'D:/AI/Qwen-Image-2.1/outputs':'D:/AI/Qwen-Image-2.1/outputs/sample.png';},
   drop_path(items,kind){
     const n=String((items&&items[0])||'').split(/[\\/]/).pop()||'model';
-    return Promise.resolve({ok:true,path:kind==='dir'?('D:/AI/Qwen-Image-2.1/models/'+n):('D:/AI/Qwen-Image-2.1/outputs/'+n)});
+    return Promise.resolve({ok:true,path:kind==='dir'?('D:/AI/Qwen-Image-2.1/envs/qwen/models/'+n):('D:/AI/Qwen-Image-2.1/outputs/'+n)});
   },
   save_drop(n){
     const p='D:/AI/Qwen-Image-2.1/outputs/drop_refs/'+(String(n||'drop.png').split(/[\\/]/).pop());
@@ -356,9 +439,15 @@ window.MIC_MOCK={
   gallery_delete(f){
     const i=GAL.map(x=>x.file).indexOf(f);
     if(i<0)return {ok:false,msg:'这张已经不在了'};
-    L('已删除：'+GAL[i].name);GAL.splice(i,1);
-    return {ok:true};},
-  gallery_clear(){GAL.length=0;st.img_count=0;L('已清空输出目录（mock）');return {ok:true};},
+    L('已删除：'+GAL[i].name+'（可撤销）');
+    GAL_TRASH.push(GAL[i]);GAL.splice(i,1);
+    return {ok:true,undo:true};},
+  gallery_undo(){
+    const it=GAL_TRASH.pop();
+    if(!it)return {ok:false,msg:'没有可撤销的删除'};
+    GAL.push(it);L('已撤销删除：'+it.name);
+    return {ok:true,file:it.file,name:it.name};},
+  gallery_clear(){GAL.length=0;GAL_TRASH.length=0;st.img_count=0;L('已清空输出目录（mock）');return {ok:true};},
   open_path(p){L('已打开：'+p);return {ok:true};},
   open_url(u){L('已在浏览器打开：'+u);return {ok:true};},
   api_state(){return {ok:true,cfg:cfg.api,on:st.api_on,url:st.api_url};},
@@ -384,19 +473,19 @@ window.MIC_MOCK={
     L('🔑 API 令牌已重新生成');
     return {ok:true,state:{cfg:cfg.api,on:st.api_on,url:st.api_url}};},
   models_list(){
-    return Promise.resolve({ok:true,dir:'D:/AI/Qwen-Image-2.1/models',
+    return Promise.resolve({ok:true,dir:'D:/AI/Qwen-Image-2.1/envs/qwen/models',
       items:MDL.map(m=>Object.assign({},m))});},
   models_set_active(n){
     if(!MDL.some(m=>m.name===n))return {ok:false,msg:'目录不存在：'+n};
     MDL.forEach(m=>m.active=(m.name===n));
-    cfg.console.model_dir='D:/AI/Qwen-Image-2.1/models/'+n;
+    cfg.console.model_dir='D:/AI/Qwen-Image-2.1/envs/qwen/models/'+n;
     L('已设为激活：'+n+(st.model_loaded?'（显存里还是旧模型，卸载重载入才生效）':''));
     return {ok:true,cfg:cfg};},
   models_download(repo,name){
     if(!/^[\w.-]+\/[\w.-]+$/.test(String(repo||'')))return {ok:false,msg:'仓库 ID 形状不对：应为 org/name'};
     const nm=String(name||'').trim()||String(repo).split('/').pop();
     if(!MDL.some(m=>m.name===nm))MDL.push({name:nm,gb:0,shards:0,index:false,active:false});
-    L('⬇ 开始下载 '+repo+' → models/'+nm+'（hf-mirror 断点续传 · mock）');
+    L('⬇ 开始下载 '+repo+' → envs/qwen/models/'+nm+'（hf-mirror 断点续传 · mock）');
     setTimeout(function(){
       const m=MDL.find(x=>x.name===nm);
       if(m){m.gb=31.2;m.shards=32;m.index=true;}
@@ -404,11 +493,62 @@ window.MIC_MOCK={
     },4000);
     return {ok:true};},
   env_check(){
-    /* 后端 env_check 顺手把待补数写进状态：环境与模型页的横幅靠它 */
+    /* 后端 env_check 顺手把待补数按环境写进状态：环境页的横幅与开关那行字靠它 */
+    st.env_on=Object.assign({},cfg.env_on);
+    st.env_todo_by=envTodoBy();
     st.env_todo=envTodo().length;
-    Object.assign(st,{env_todo_qwen:envTodoBy().qwen,env_todo_moss:envTodoBy().moss});
-    return Promise.resolve({ok:true,spec:'env.json',gb:30.3,
-      items:ENV.map(x=>Object.assign({},x,{fix:Object.assign({},x.fix)})),todo:envTodo()});},
+    const items=envLive();
+    return Promise.resolve({ok:true,spec:'envs/index.json',gb:30.3,envs:ENVS,
+      items:items,todo:items.filter(x=>x.state==='miss'||x.state==='part').map(x=>x.key),
+      env_on:st.env_on});},
+  /* 环境开关：关掉就顺手把显存里那一路交还（与 app.env_set 同构） */
+  env_set(id,want){
+    if(id==='base'||!ENVS.some(e=>e.id===id))return {ok:false,msg:'没有这个环境：'+id};
+    cfg.env_on[id]=!!want;
+    /* 后端 env_set 顺手把开关表刷进状态（_sync_env_on），轮询带出去的就是那一份：
+       假后端也必须同步，否则界面本地改的 st.env_on 会被下一轮轮询用旧值盖回去，
+       关掉的环境八百毫秒后又「活了」——探针抓到过这个。 */
+    st.env_on=Object.assign({},cfg.env_on);
+    st.env_todo_by=envTodoBy();
+    st.env_todo=envTodo().length;
+    const lb=(ENVS.filter(e=>e.id===id)[0]||{}).label||id;
+    L('🎚️ 环境'+(want?'开启':'关闭')+'：'+lb);
+    if(!want){
+      const o=cfg.env_on;
+      const still=st.engine==='qwen'?o.qwen:(o.moss||o.h3);
+      if(!still){
+        if(st.engine==='moss'){MOSS.running=false;MOSS.loaded=false;
+          st.comfyui_on=false;st.comfyui_loaded=false;st.comfyui_url='';}
+        st.model_loaded=false;st.vram_used=0.6;
+        L('🪫 环境已关闭：显存交还系统');
+      }
+    }
+    return {ok:true,env_on:Object.assign({},cfg.env_on),cfg:cfg};},
+  /* H3 出片：本地那条没拉起 ComfyUI 时先走载入再自动接上；云端只等、不出步数 */
+  video_gen(p){
+    const body=Object.assign({},cfg.video,p||{});
+    Object.keys(p||{}).forEach(k=>{cfg.video[k]=p[k];});
+    const n=parseInt(body.seconds,10)||5;
+    if(String(body.exec)==='cloud'){
+      if(!cfg.cloud.workflow)return {ok:false,msg:'没给工作流：在视频页填一个已跑通过的 H3 工作流地址'};
+      st.running='video';st.total=1;st.done=0;st.video_exec='cloud';st.status='云端准备中…';
+      L('☁️ 云端出片：'+n+' 秒 · '+String(body.size).replace('x','×')+' · 号「主号」· 平台计费');
+      return {ok:true,total:1,exec:'cloud',acct:'主号'};
+    }
+    if(cfg.env_on&&cfg.env_on.h3===false)return {ok:false,msg:'H3 环境已关闭 · 到「环境 → H3」那页开启'};
+    if(!String(body.prompt||'').trim())return {ok:false,msg:'先写一句想要什么画面'};
+    st.total=4;st.done=0;st.engine='moss';st.video_exec='local';
+    const started=MOSS.running||st.comfyui_on;
+    if(!started){
+      st.running='load';st.load_pct=0;st.load_stage='拉起 ComfyUI 子进程';wantVideo=true;
+      L('H3 引擎未运行：先拉起 ComfyUI，随后自动开始出片');
+      return {ok:true,total:4,frames:n*24};
+    }
+    st.running='video';st.status='出片 0/4';
+    L('🎬 开始出片：'+n+' 秒 · '+String(body.size).replace('x','×')+' · 4 步 · '+
+      (body.seed<0?'随机种子':'种子 '+body.seed)+
+      (body.first?' · 参考图 '+String(body.first).split(/[\\/]/).pop():''));
+    return {ok:true,total:4,frames:n*24};},
   env_fix(keys){
     const want=Array.isArray(keys)?keys:envTodo();
     const hit=ENV.filter(x=>want.indexOf(x.key)>=0&&(x.state==='miss'||x.state==='part'));
@@ -419,25 +559,66 @@ window.MIC_MOCK={
       hit.forEach(function(x){
         const k=x.fix.kind;
         if(k==='pip')L('Successfully installed '+x.label);
-        else if(k==='model')L('…下载中：models/ 当前 30.3 GB');
+        else if(k==='model')L('…下载中：'+x.detail.split('：')[1].split(' · ')[0]);
         else if(k==='comfyui')L('Cloning into comfyui/ … Receiving objects: 100%（v0.42.1）');
         else if(k==='comfyvenv')L('Successfully installed comfyui deps（独立 .venv）');
-        else if(k==='mossmodel')L('✅ 权重就位：'+x.label);
         else L('✅ 建好目录 '+x.label);
         x.state='ok';
         x.detail=k==='pip'?'已装（刚补）'
-          :(k==='model'||k==='mossmodel')?'文件齐全（校验过）'
+          :k==='model'?'文件齐全（校验过）'
           :k==='comfyui'?'main.py 就位'
           :k==='comfyvenv'?'.venv 已建'
           :'可写';
+        if(x.env==='moss'&&(k==='model'||k==='comfyui'||k==='comfyvenv')){
+          MOSS.installed=true;st.moss_installed=true;
+        }
       });
-      if(hit.some(x=>x.fix.kind==='mossmodel'||x.fix.kind==='comfyui'||x.fix.kind==='comfyvenv')){
-        MOSS.installed=true;st.moss_installed=true;
-      }
-      L('✅ 补全结束：成功 '+hit.length+' · 失败 0 · 还差 0 项');
+      L('✅ 补全结束：成功 '+hit.length+' · 失败 0 · 还差 '+envTodo().length+' 项');
       st.env_busy=false;st.env_todo=envTodo().length;
-      Object.assign(st,{env_todo_qwen:envTodoBy().qwen,env_todo_moss:envTodoBy().moss});
+      st.env_todo_by=envTodoBy();
     },5000);
     return {ok:true,count:hit.length,labels:hit.map(x=>x.label)};},
+  cloud_state(){return {ok:true,dp:true,accounts:CLOUD.accts.map(a=>Object.assign({},a)),
+    browser:Object.assign({},CLOUD.br),keep:Object.assign({},CLOUD.keep),
+    busy:st.cloud_busy,msg:st.cloud_msg,concurrency:1,page:CLOUD.br.base};},
+  /* 视频页云端那一格：只读档案，不起浏览器 */
+  cloud_brief(){
+    const accts=CLOUD.accts.filter(a=>a.state==='ok').map(a=>({id:a.id,name:a.name}));
+    return {dp:true,accts:accts,wf:String(cfg.cloud.workflow||''),
+      ready:accts.length>0,busy:!!st.cloud_busy};},
+  cloud_new(name){
+    const id='acc_'+Math.random().toString(36).slice(2,8);
+    CLOUD.accts.push({id:id,name:String(name||'').trim()||('账号 '+(CLOUD.accts.length+1)),
+      created:Date.now()/1000,last_saved:0,last_check:0,state:'pending',detail:'等待登录',backups:0,has_key:false});
+    CLOUD.br.on=true;L('☁️ 新建登录：'+name+'（在浏览器里登录后点「保存」）');
+    return {ok:true,account:{id:id},state:this.cloud_state()};},
+  cloud_login(id){const a=CLOUD.accts.find(x=>x.id===id);if(a)a.state='pending';
+    L('☁️ 打开登录页：'+(a?a.name:id));return {ok:true};},
+  cloud_save(id){const a=CLOUD.accts.find(x=>x.id===id);if(!a)return {ok:false,msg:'账号不存在'};
+    a.state='ok';a.detail='页面有登录后的入口';a.last_saved=Date.now()/1000;a.backups++;
+    L('☁️ 登录态已保存：'+a.name+'（'+a.backups+' 份）');return {ok:true};},
+  cloud_apply(id){const a=CLOUD.accts.find(x=>x.id===id);CLOUD.br.account=id;
+    L('☁️ 切换到账号：'+(a?a.name:id));return {ok:true};},
+  cloud_check(id){const a=CLOUD.accts.find(x=>x.id===id);if(!a)return {ok:false,msg:'账号不存在'};
+    a.state='ok';a.detail='页面有登录后的入口';a.last_check=Date.now()/1000;
+    st.cloud_msg=a.name+'：页面有登录后的入口';return {ok:true};},
+  cloud_delete(id){const i=CLOUD.accts.findIndex(x=>x.id===id);if(i>=0)CLOUD.accts.splice(i,1);
+    return {ok:true,state:this.cloud_state()};},
+  cloud_rename(id,name){const a=CLOUD.accts.find(x=>x.id===id);if(a)a.name=name;
+    return {ok:true,state:this.cloud_state()};},
+  cloud_backups(id){const a=CLOUD.accts.find(x=>x.id===id);const n=a?a.backups:0;const out=[];
+    for(let i=0;i<n;i++){const d=new Date(Date.now()-i*3600e3);const p=x=>String(x).padStart(2,'0');
+      out.push({ts:'20261102-'+p(d.getHours())+p(d.getMinutes())+'00-000',
+        label:p(d.getMonth()+1)+'-'+p(d.getDate())+' '+p(d.getHours())+':'+p(d.getMinutes())});}
+    return {ok:true,spots:out,name:a?a.name:''};},
+  cloud_restore(id,ts){L('☁️ 已恢复备份：'+ts);return {ok:true};},
+  cloud_key_set(id,key){const a=CLOUD.accts.find(x=>x.id===id);if(a)a.has_key=true;
+    L('☁️ 已保存 API Key：'+(a?a.name:id));return {ok:true,state:this.cloud_state()};},
+  cloud_key_clear(id){const a=CLOUD.accts.find(x=>x.id===id);if(a)a.has_key=false;return {ok:true};},
+  cloud_keep_now(){CLOUD.keep.last=Date.now()/1000;CLOUD.keep.msg='保活完成：'+CLOUD.accts.length+' 个账号';
+    L('☁️ 浏览器保活：'+CLOUD.accts.length+' 个账号');return {ok:true};},
+  cloud_browser_start(){CLOUD.br.on=true;L('☁️ 浏览器已启动（共用调试端口 9333）');return {ok:true};},
+  cloud_browser_stop(){CLOUD.br.on=false;L('☁️ 浏览器已关闭');return {ok:true};},
+  cloud_auth_names(id){return {ok:true,names:['Rh-Comfy-Auth','Rh-Identify']};},
 };
 })();

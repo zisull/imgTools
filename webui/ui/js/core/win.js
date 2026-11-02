@@ -1,8 +1,9 @@
-/* core/win.js —— 无框窗口：任意位置拖动 + 自绘窗口控制 + 八向缩放
+/* core/win.js —— 无框窗口：任意位置拖动 + 自绘窗口控制 + 四角缩放
    后端是 create_window(frameless=True, easy_drag=False)：
    · easy_drag 给整个窗口绑 mousedown，选文字/点输入框都会把窗口拖着跑，而且只认
      一条 drag-region，达不到「任意位置拖动」，所以关掉自己实现（见 NO/hasText 的放行规则）；
-   · frameless 后系统可拖边框没了（shadow 只剩 1px），缩放靠 shell.html 里那圈 .rz。
+   · frameless 后系统可拖边框没了（shadow 只剩 1px）：外圈四条直边（shell.html 的 .rz[data-move]）
+     按下即拖窗——抓边移窗是桌面软件的肌肉记忆；四角才拉尺寸。
    量纲：几何全用逻辑像素。move/resize 的入参是逻辑像素（pywebview 内部再乘 DPI 缩放），
    前端把 CSS 位移按 innerWidth/窗口宽 校正一次，DPI 不 100% 也不会拖偏。*/
 (function(){
@@ -42,6 +43,8 @@ function calib(g){
 
 function down(e){
   if(e.button!==0||mode)return;
+  /* 边界那一圈归 rzDown 管：两边都起手会抢 mode（谁后回来谁生效），拖一下尺寸就变成移窗 */
+  if(e.target.closest&&e.target.closest('#rzg'))return;
   if(blocked(e.target))return;
   MIC.api.winGeo().then(g=>{
     if(!g||g.maxed)return;      // 最大化时不拖：先点还原再拖，免得误触一还原
@@ -75,9 +78,12 @@ function up(){
 function rzDown(e){
   const el=e.target.closest?e.target.closest('.rz'):null;
   if(!el||e.button!==0||mode)return;
+  const drag=!!el.dataset.move;
   MIC.api.winGeo().then(g=>{
     if(!g||g.maxed)return;
-    geo=g;calib(g);sx=e.screenX;sy=e.screenY;mode=el.dataset.edge;
+    geo=g;calib(g);sx=e.screenX;sy=e.screenY;
+    mode=drag?'drag':el.dataset.edge;
+    if(drag)document.body.classList.add('win-drag');
   }).catch(()=>{});
 }
 

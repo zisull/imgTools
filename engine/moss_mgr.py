@@ -33,6 +33,9 @@ from typing import Callable, Optional
 LogFn = Callable[[str], None]
 ProgressFn = Callable[[int, int], None]  # (已完成, 总数)
 
+# 工作流里的「这路没给输入」记号，见 build_graph
+OMIT = "__omit__"
+
 
 class ComfyError(RuntimeError):
     """ComfyUI 侧可预期的错误（没起来 / 拒了工作流 / 缺节点），给上层一句人话。"""
@@ -508,9 +511,17 @@ class MossManager:
                     shift: float = 5.0, slg_skip_layer: int = 22,
                     slg_start: float = 0.0, slg_end: float = 0.5,
                     lora_strength: float = 1.0, batch: int = 1,
+                    length: int = 0, fps: float = 24.0,
+                    first_image: str = "",
                     prefix: str = "moss") -> dict:
         """按 UI 参数填模板占位符。shift/SLG 等固定采样参数一般已烘进模板，
-        这里保留同名占位符是为了极少数需要按档位覆盖的情况。"""
+        这里保留同名占位符是为了极少数需要按档位覆盖的情况。
+
+        OMIT（"__omit__"）是「这一路没给输入」的记号：填到某个输入上就把那个输入摘掉
+        （视频页不给首帧时 MiniMaxH3ImageToVideo 就没有 first_frame 这条边），
+        带 `_optional` 的节点只要有任一是 OMIT 就整节摘掉（没人连它的 LoadImage 留着
+        会让 ComfyUI 校验报错，因为默认图名在这台机器的输入目录里根本不存在）。
+        """
         tpl = self.load_template(template)
         tokens = {
             "{{prompt}}": prompt,
@@ -526,10 +537,25 @@ class MossManager:
             "{{slg_start}}": float(slg_start),
             "{{slg_end}}": float(slg_end),
             "{{lora_strength}}": float(lora_strength),
+            "{{length}}": int(length),
+            "{{fps}}": float(fps),
+            "{{first_image}}": first_image or OMIT,
+            "{{first_frame}}": ["16", 0] if first_image else OMIT,
             "{{prefix}}": str(prefix),
         }
-        return {nid: self._substitute(node, tokens)
-                for nid, node in tpl.items() if not str(nid).startswith("_")}
+        graph = {}
+        for nid, node in tpl.items():
+            if str(nid).startswith("_"):
+                continue
+            sub = self._substitute(node, tokens)
+            ins = sub.get("inputs") or {}
+            gone = any(v == OMIT for v in ins.values())
+            if gone and sub.pop("_optional", None):
+                continue
+            sub["inputs"] = {k: v for k, v in ins.items() if v != OMIT}
+            sub.pop("_optional", None)
+            graph[nid] = sub
+        return graph
 
     # ---------------------------------------------------------------- 出图
     def generate(self, params: dict, *, on_progress: Optional[ProgressFn] = None,
@@ -557,6 +583,33 @@ class MossManager:
             return self._collect(prompt_id, out_dir, out_prefix)
         finally:
             self._close_ws(ws)
+
+    def upload_image(self, path: str) -> str:
+        """把本地图片交给 ComfyUI 的输入目录，返回它在 LoadImage 下拉里的名字。
+
+        首帧是盘上的文件而工作流只认名字：不传这一步，视频页的「拿这张图当第一帧」
+        就只能指望用户自己把图拷进 comfyui/input ——那是把人往坑里带。
+        """
+        if not os.path.isfile(path):
+            raise ComfyError("首帧图不存在：%s" % path)
+        name = os.path.basename(path)
+        boundary = "----imgtools%d" % id(name)
+        with open(path, "rb") as f:
+            blob = f.read()
+        head = ("--%s\r\nContent-Disposition: form-data; name=\"image\"; "
+                "filename=\"%s\"\r\nContent-Type: application/octet-stream\r\n\r\n"
+                % (boundary, name)).encode("utf-8")
+        tail = ("\r\n--%s--\r\n" % boundary).encode("utf-8")
+        req = urllib.request.Request(
+            "http://127.0.0.1:%d/upload/image" % self.port,
+            data=head + blob + tail, method="POST",
+            headers={"Content-Type": 'multipart/form-data; boundary="%s"' % boundary})
+        try:
+            with urllib.request.urlopen(req, timeout=60.0) as r:
+                got = json.loads(r.read().decode("utf-8", "replace") or "{}")
+        except Exception as e:
+            raise ComfyError("首帧图传不进 ComfyUI：%s" % e)
+        return str(got.get("name") or name)
 
     def warm(self, size: int = 256, steps: int = 1, timeout: float = 600.0) -> bool:
         """把权重真正搬上显存：ComfyUI 是懒加载，「/system_stats 应答了」不等于「模型上卡了」。
@@ -659,7 +712,7 @@ class MossManager:
         """
         try:
             h = json.loads(self._get("/history/" + prompt_id, 8.0))
-            imgs = self._images_of((h.get(prompt_id) or {}).get("outputs") or {})
+            imgs = self._media_of((h.get(prompt_id) or {}).get("outputs") or {})
         except Exception:
             return
         for item in imgs:
@@ -682,7 +735,7 @@ class MossManager:
         所以只会表现为「进度条空、等到天荒地老」，一点报错都没有）。
         """
         try:
-            import websocket  # websocket-client（env.json 已列）
+            import websocket  # websocket-client（envs 清单已列）
             return websocket.create_connection(
                 "ws://127.0.0.1:%d/ws?clientId=%s" % (self.port, self._client_id),
                 timeout=8.0)
@@ -721,7 +774,7 @@ class MossManager:
             return False
 
     def _track_ws(self, prompt_id: str, on_progress, should_stop, ws) -> None:
-        import websocket  # websocket-client（env.json 已列）
+        import websocket  # websocket-client（envs 清单已列）
         t0 = time.time()
         next_check = t0 + 2.0
         try:
@@ -804,28 +857,32 @@ class MossManager:
             pass
 
     @staticmethod
-    def _images_of(outputs: dict) -> list:
-        """ComfyUI history 的 outputs 多半按节点 id 分（SaveImage 节点下挂 images），
-        个别版本/封装会直接放顶层。两种都收，别因为结构差异漏图。"""
-        imgs = []
-        if isinstance(outputs.get("images"), list):
-            imgs += outputs["images"]
-        for v in outputs.values():
-            if isinstance(v, dict) and isinstance(v.get("images"), list):
-                imgs += v["images"]
-        seen, out = set(), []
-        for it in imgs:
+    def _media_of(outputs: dict) -> list:
+        """成图与成片的取回入口是两套键：SaveImage 写 images，SaveVideo 写 videos。
+
+        视频页就靠这一条走到同一个 _collect 里来，不然跑完 41 GB 权重出的片
+        只躺在 ComfyUI 的 output 目录里，界面报「工作流跑完但没取回图片」。
+        """
+        out = []
+        for key in ("images", "videos", "audio"):
+            if isinstance(outputs.get(key), list):
+                out += outputs[key]
+            for v in outputs.values():
+                if isinstance(v, dict) and isinstance(v.get(key), list):
+                    out += v[key]
+        seen, uniq = set(), []
+        for it in out:
             k = (it.get("filename"), it.get("subfolder"), it.get("type"))
             if k in seen:
                 continue
             seen.add(k)
-            out.append(it)
-        return out
+            uniq.append(it)
+        return uniq
 
     def _collect(self, prompt_id: str, out_dir: str, prefix: str) -> list:
         h = json.loads(self._get("/history/" + prompt_id, 8.0))
         entry = h.get(prompt_id) or {}
-        imgs = self._images_of(entry.get("outputs") or {})
+        imgs = self._media_of(entry.get("outputs") or {})
         if not imgs:
             # 节点报错时 history 里也有这条记录，只是没有出图结果：别报成「模板缺 SaveImage」
             st = entry.get("status") or {}
@@ -834,7 +891,7 @@ class MossManager:
                         if isinstance(m, list) and len(m) > 1 and isinstance(m[1], dict)]
                 raise ComfyError("ComfyUI 报错了：%s"
                                  % (_trim(" / ".join(msgs)) if msgs else "见 logs/comfyui.log"))
-            raise ComfyError("工作流跑完但没有出图节点结果（检查模板里的 SaveImage）")
+            raise ComfyError("工作流跑完但没有出图/出片节点结果（检查模板里的 SaveImage/SaveVideo）")
         os.makedirs(out_dir, exist_ok=True)
         saved = []
         for item in imgs:

@@ -7,8 +7,8 @@ MIC.pages={};
 MIC.registerPage=function(key,def){MIC.pages[key]=def;};
 
 MIC.render=function(){
-  /* 没选过引擎（cfg.welcomed 还是 false）→ 主区先给欢迎页：
-     门一开就问「你要哪一路」，答完界面自己变成那一套，别让人先去设置页找开关。 */
+  /* 还没决定开哪几路（cfg.welcomed 还是 false）→ 主区先给欢迎页：
+     门一开就问「这台机器管哪几路」，答完再进去，别让人先去设置页找开关。 */
   const greet=!MIC.s.cfg.welcomed&&MIC.pages.welcome;
   const sel=MIC.nav.state.sel;
   const key=greet?'welcome':MIC.nav.pageOf();

@@ -55,6 +55,24 @@ class Store:
                 "SELECT * FROM images WHERE file IN (%s)" % q, files).fetchall()
         return {r["file"]: dict(r) for r in rows}
 
+    def get(self, file):
+        """单行原样取回：撤销删除要连 ts/fav 一起放回去，不能当成新记录重写。"""
+        with self._lock:
+            row = self._db.execute(
+                "SELECT * FROM images WHERE file=?", (file,)).fetchone()
+        return dict(row) if row else None
+
+    def restore(self, row):
+        """把 get() 取回的那一行原样插回去（删除撤销专用）。"""
+        cols = ("file", "name", "mode", "prompt", "negative", "size",
+                "steps", "seed", "sec", "ts", "fav")
+        with self._lock:
+            self._db.execute(
+                "INSERT OR REPLACE INTO images(%s) VALUES(%s)"
+                % (",".join(cols), ",".join("?" * len(cols))),
+                tuple(row.get(c) for c in cols))
+            self._db.commit()
+
     def set_fav(self, file, fav):
         with self._lock:
             self._db.execute("UPDATE images SET fav=? WHERE file=?",

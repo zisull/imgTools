@@ -111,8 +111,8 @@ MIC.registerPage('settings',{
         ic('copy','s')+'复制全部示例</button></div>'+
       '<div class="codebox">'+esc(curlText())+'</div>';
     /* 双栏：左=目录、界面、关于，右=对外 API（吸顶） */
-    /* 仅 Moss 模式下千问的量化/offload/载入状态跟当前引擎无关，收走别占地方 */
-    const qwenOn=String(MIC.s.cfg.console_mode||'both')!=='moss';
+    /* 千问环境关着时量化/offload/载入状态跟这台机器无关，收走别占地方 */
+    const qwenOn=MIC.nav.envOn().qwen!==false;
     const quantRow=qwenOn?`<div class="grid3">
           ${C.field('量化方式',C.seg('console.quant',[['fp8','fp8（12G 必选）'],['none','不量化（会爆显存）']]),
             'fp8+offload 是 12G 卡上唯一达标的组合；bf16/bnb8 溢出到共享内存，慢 6 倍以上')}
@@ -123,17 +123,20 @@ MIC.registerPage('settings',{
       :C.field('载入状态','<span class="pill '+(s.model_loaded?'on':'')+'"><span class="dot '+
             (s.model_loaded?'ok':'')+'"></span>'+(s.model_loaded?'已在显存':'未载入')+'</span>',
         '量化与 offload 是千问的参数；Moss 的档位在「生图」页切引擎后出现');
+    /* 开关走后端 env_set（它要顺手放显存、重跑体检），不能当普通表单字段存 */
+    const sw=(id,label)=>{const on=MIC.nav.envOn()[id]!==false;
+      return `<span class="envsw"><span class="sw ${on?'on':''}" title="关掉：不体检、不提醒、功能页收起"
+          onclick="MIC.env.set('${id}',${on?0:1})"></span>${label}</span>`;};
     return C.duo(
       C.card('引擎与目录','power',
-        C.field('模型目录',C.pathrow('console.model_dir','models/Qwen-Image-2.1-Turbo','dir'),'下载好的权重文件夹')+
-        C.field('输出目录',C.pathrow('console.output_dir','outputs','dir'),'成图落盘位置')+
+        C.field('模型目录',C.pathrow('console.model_dir','envs/qwen/models/Qwen-Image-2.1-Turbo','dir'),'下载好的权重文件夹')+
+        C.field('输出目录',C.pathrow('console.output_dir','outputs','dir'),'成图与成片落盘位置')+
         quantRow)
       +C.card('界面','palette',
-        C.field('控制台模式',
-          C.seg('console_mode',[['both','两者兼有'],['qwen','仅千问'],['moss','仅 Moss']],true),
-          '整个界面只留所选引擎的页：常用 Moss 就选「仅 Moss」')+
+        C.field('模型环境',sw('qwen','千问')+sw('moss','Moss')+sw('h3','H3'),
+          '关掉的那一路不体检、不提醒，功能页也收起；明细与一键补齐在「环境」那几页')+
         C.field('欢迎页','<button class="btn sm" onclick="MIC.welcome.review()">'+
-          ic('refresh','s')+'重看选引擎那一屏','只有一开始那次会拦住你选路；这里点了才再看得到'),
+          ic('refresh','s')+'重看选环境那一屏','只有一开始那次会拦住你选路；这里点了才再看得到'),
         C.field('软件名',
           `<div class="inrow"><input class="inp" id="appName" value="${esc(MIC.s.cfg.app_title)}">`+
           `<button class="btn" onclick="MIC.app.rename()">应用</button></div>`,
@@ -141,7 +144,7 @@ MIC.registerPage('settings',{
         C.field('通知',C.chk('notify','任务结束时弹轻提示')))
       +C.card('关于','book',
         `<div class="kv"><span>版本</span><b>v${esc(MIC.s.version||'-')}</b></div>
-         <div class="kv"><span>模型</span><b>Qwen-Image-2.1-Turbo（Qwen Research License，非商用）· MOSS-Image（内嵌 ComfyUI）</b></div>
+         <div class="kv"><span>模型</span><b>Qwen-Image-2.1-Turbo（Qwen Research License，非商用）· MOSS-Image · MiniMax H3（后两个走内嵌 ComfyUI）</b></div>
          <div class="kv"><span>建议配置</span><b>NVIDIA 12G 显存级 · 32G 以上内存 · 1024 档：千问约半分钟，Moss 约 3 秒</b></div>`),
       C.card('API 服务','globe',svc,{note:s.api_on?'运行中':'未启动'})
       +C.foldcard('端点与 curl 示例','globe',demo,'要接外部程序再展开'));
