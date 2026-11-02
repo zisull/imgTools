@@ -718,9 +718,9 @@ def test_job_gc():
 
 def test_nav_migration():
     """导航换代：v2 那份带分组、还单列着概览/透明/工坊/API 的老配置，
-    要自动重排成 v8 的 12 页三组（出图 / 环境 / 系统）——Moss 与词库都并进了生图页、
-    环境按模型拆成四页、本地 H3 有「视频」页、系统组里多了「云端」（多账号登录态与保活），
-    标签名统一两字，且第二次启动不许再动它。
+    要自动重排成当前版本的三组 13 页（出图 / 环境 / 系统）——Moss 与词库都并进了生图页、
+    环境按模型拆成四页、视频与成片各一页、系统组里多了「H3 云端」（多账号登录态与保活），
+    标签名统一 3~5 字，且第二次启动不许再动它。
 
     换机/升级后用户只点一次「启动」，界面结构就得跟代码走；他改过的标签名是唯一
     该留下的东西——所以这一段既验重排，也验「幂等」和「退役页不复活」。
@@ -767,12 +767,12 @@ def test_nav_migration():
         pages = [p for _, p, _ in rows]
         names = dict((p, n) for _, p, n in rows)
         assert c1["nav_ver"] == webapp.NAV_VER, c1["nav_ver"]
-        assert sorted(pages) == sorted(["t2i", "edit", "inpaint", "video",
+        assert sorted(pages) == sorted(["t2i", "edit", "inpaint", "video", "film",
                                         "env_base", "env_qwen", "env_moss", "env_h3",
                                         "gallery", "cloud", "logs", "settings"]), pages
         assert names["t2i"] == "我的出图页", rows
-        # 「图像编辑」是历代默认名之一＝用户没改过，换成新版的统一两字名
-        assert names["edit"] == "编辑", rows
+        # 「图像编辑」是历代默认名之一＝用户没改过，换成新版的统一名
+        assert names["edit"] == "图像编辑", rows
         assert c1["last_tab"] == webapp.DEFAULT_CFG["last_tab"], c1["last_tab"]  # t_ov 没了要回落
         assert c1["layout"] == "tree", c1["layout"]
         assert "rgba" not in c1, "老的 rgba 配置块该清掉"
@@ -780,9 +780,9 @@ def test_nav_migration():
         groups = [n["name"] for n in c1["nav"] if n.get("type") == "group"]
         assert groups == ["出图", "环境", "系统"], groups
         assert all(d0 == 1 for d0, _, _ in rows), rows
-        assert pages[:4] == ["t2i", "edit", "inpaint", "video"], pages
-        assert pages[4:8] == ["env_base", "env_qwen", "env_moss", "env_h3"], pages
-        assert pages[8:] == ["gallery", "cloud", "logs", "settings"], pages
+        assert pages[:5] == ["t2i", "edit", "inpaint", "video", "film"], pages
+        assert pages[5:9] == ["env_base", "env_qwen", "env_moss", "env_h3"], pages
+        assert pages[9:] == ["gallery", "cloud", "logs", "settings"], pages
         # 重排完立刻落盘：下次开机不该再走一遍换代
         on_disk = json.load(open(path, encoding="utf-8"))
         assert on_disk["nav_ver"] == webapp.NAV_VER, on_disk.get("nav_ver")
@@ -799,15 +799,15 @@ def test_nav_migration():
         assert [n.get("type") for n in c5["nav"]] == ["group", "group", "group"], c5["nav"]
         assert c5["layout"] == "tree", c5["layout"]
         assert dict((p, n) for _, p, n in rows5)["t2i"] == "我的出图页", rows5
-        assert len(rows5) == 12, rows5
+        assert len(rows5) == 13, rows5
         # 用户手抖把退役页塞回来（或从旧机器拷了份配置）：入口留着只会点出空白页
         dirty = copy.deepcopy(on_disk)
         dirty["nav"].insert(0, {"id": "t_ov", "type": "tab", "name": "概览",
                                 "icon": "home", "page": "overview"})
         c3 = launch(dirty)
         assert "overview" not in [p for _, p, _ in flat(c3)], flat(c3)
-        assert len([p for _, p, _ in flat(c3)]) == 12, flat(c3)
-        print("  ✓ 导航换代：v2/v4 老配置都重排成三组 12 页、改过的名字留着、二次启动幂等、退役页不复活")
+        assert len([p for _, p, _ in flat(c3)]) == 13, flat(c3)
+        print("  ✓ 导航换代：v2/v4 老配置都重排成三组 13 页、改过的名字留着、二次启动幂等、退役页不复活")
     finally:
         webapp.CFG_PATH = old_path
         shutil.rmtree(d, ignore_errors=True)

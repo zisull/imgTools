@@ -607,6 +607,147 @@ def test_platform_state():
     print("  ✓ 云端超时收尾：把看见的原因带进错误里，不是一句「等超时」")
 
 
+def test_browser_selfheal():
+    """调试窗口被叉掉后要能自己重开，而不是拿死连接一路撞「与页面的连接已断开」。
+
+    真机那次的形状：用户关掉 Chrome → BrowserHost._b 还是旧连接 → 之后每次云端出片
+    都在 tab.get / run_js 上抛 PageDisconnectedError，只能重启软件。这里用假连接钉住。
+    """
+    from cloudkit import gen as cg
+
+    class Dead:
+        @property
+        def tabs_count(self):
+            raise RuntimeError("与页面的连接已断开。")
+
+    class Live:
+        tabs_count = 1
+
+        def __init__(self, tabs=None):
+            self._tabs = [object()] if tabs is None else tabs
+            self.new = 0
+
+        @property
+        def latest_tab(self):
+            if not self._tabs:
+                raise IndexError("no tabs")
+            return self._tabs[-1]
+
+        def new_tab(self):
+            self.new += 1
+            t = object()
+            self._tabs.append(t)
+            return t
+
+    # 断连判定：DrissionPage 的类名与它原生文案两边都认，普通业务错不许误吞
+    class PageDisconnectedError(Exception):
+        pass
+    assert cg.browser_gone(PageDisconnectedError("x"))
+    assert cg.browser_gone(RuntimeError("与页面的连接已断开。 版本: 4.1.1.4"))
+    assert cg.browser_gone(RuntimeError("浏览器已关闭或链接已断开"))
+    assert not cg.browser_gone(cg.CloudError("没给工作流"))
+    assert not cg.browser_gone(RuntimeError("参考图找不到：a.png"))
+
+    host = cb.BrowserHost(ROOT, {"base": "https://example.test"})
+    host._b = Dead()
+    assert host.alive() is False and host._b is None      # 探活顺手丢掉死连接
+    host._b = Live()
+    assert host.alive() is True and host._b is not None
+
+    # browser()：死连接不许原样返回，要重建一只（这里用假 DrissionPage 拦住真启动）
+    made = []
+
+    class FakeChromium:
+        def __init__(self, opts):
+            made.append(opts)
+            self.tabs_count = 1
+
+    class FakeOpts:
+        def __init__(self, **kw):
+            pass
+
+        def __getattr__(self, name):
+            return lambda *a, **k: None
+
+    fake = type(sys)("DrissionPage")
+    fake.Chromium, fake.ChromiumOptions = FakeChromium, FakeOpts
+    old = sys.modules.get("DrissionPage")
+    sys.modules["DrissionPage"] = fake
+    try:
+        host._b = Dead()
+        b = host.browser()
+        assert isinstance(b, FakeChromium) and len(made) == 1
+        assert host.browser() is b and len(made) == 1     # 活着就复用，不反复起
+    finally:
+        if old is None:
+            sys.modules.pop("DrissionPage", None)
+        else:
+            sys.modules["DrissionPage"] = old
+
+    # tab()：正常拿最后一页；最后一页被关掉就补一页；两次都拿不到才报错
+    host2 = cb.BrowserHost(ROOT, {"base": "https://example.test"})
+    live = Live()
+    host2._b = live
+    assert host2.tab() is live._tabs[-1]
+    empty = Live(tabs=[])
+    host2._b = empty
+    assert host2.tab() is empty._tabs[-1] and empty.new == 1
+
+    class BadTabBrowser(Live):
+        @property
+        def latest_tab(self):
+            raise RuntimeError("与页面的连接已断开")
+
+    host2._b = BadTabBrowser()
+    host2.browser = lambda: host2._b       # 拦住真实重建，只验 tab() 的两次尝试
+    try:
+        host2.tab()
+        raise AssertionError("两次都拿不到页却没有报错")
+    except RuntimeError as e:
+        assert "没连上" in str(e), e
+
+    # _enter()：进页时撞上断连 → reset 一次、重开一次；普通错原样抛
+    class FakeTab:
+        def __init__(self, name, fail=None):
+            self.name, self.fail = name, fail
+
+        def get(self, url):
+            if self.fail:
+                raise self.fail
+            return "ok"
+
+    class FakeHost:
+        def __init__(self, tabs):
+            self.lock = threading.RLock()
+            self.purpose, self.current = "", ""
+            self.tabs, self.resets, self.applies, self.i = tabs, 0, [], 0
+
+        def apply(self, state, aid="", reload=True):
+            self.applies.append(aid)
+            self.current = aid
+
+        def tab(self):
+            t = self.tabs[min(self.i, len(self.tabs) - 1)]
+            self.i += 1
+            return t
+
+        def reset(self):
+            self.resets += 1
+            self.current = ""
+
+    h = FakeHost([FakeTab("t1", PageDisconnectedError("与页面的连接已断开")), FakeTab("t2")])
+    h.purpose = "gen"
+    c = cg.CloudH3(ROOT, {}, object(), h)
+    assert c._enter({}, "A", "https://x", None, None).name == "t2" and h.resets == 1
+    h2 = FakeHost([FakeTab("t1", ValueError("bad"))])
+    try:
+        cg.CloudH3(ROOT, {}, object(), h2)._enter({}, "A", "https://x", None, None)
+        raise AssertionError("普通错不该被当成断连重试")
+    except ValueError as e:
+        assert str(e) == "bad" and h2.resets == 0
+    print("  ✓ 浏览器自愈：窗口关掉后探活丢死连接、重开一次；进页撞断连也只重试一次")
+
+
 def test_bridge_without_dp():
     import app as webapp
     old = webapp.App._dp_ready
@@ -645,6 +786,7 @@ def main():
         test_write_selfcheck,
         test_media_item,
         test_platform_state,
+        test_browser_selfheal,
         test_bridge_without_dp,
     ]
     print("云端账号库自测（无浏览器 / 无 GPU）")

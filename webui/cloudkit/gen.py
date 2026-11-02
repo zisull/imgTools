@@ -304,6 +304,14 @@ return JSON.stringify({
 """
 
 
+def browser_gone(e):
+    """这只调试浏览器被关了、或页面连接断了：属于重开一次就能自愈的那类错。"""
+    if type(e).__name__ in ("PageDisconnectedError", "BrowserConnectError", "ContextLostError"):
+        return True
+    s = str(e)
+    return any(k in s for k in ("连接已断开", "已关闭", "连接失败", "页面被关闭", "没连上"))
+
+
 def pick_size(w, h):
     """把界面的 WxH 翻成云端那四件套：档位标签 + 画幅 + 宽 + 高。
 
@@ -497,6 +505,27 @@ class CloudH3:
         raise CloudError("参考图上传失败：%s" % last)
 
     # ---------- 主流程 ----------
+    def _enter(self, state, aid, url, cb, stop):
+        """进工作流页。浏览器窗口被关掉/页面断开时清死连接、重开一次再进。
+
+        用户关掉调试 Chrome 是常事；旧写法拿着那份死连接一路撞「与页面的连接已断开」，
+        重开一次就能好，不值得让人重启软件。
+        """
+        for attempt in (0, 1):
+            try:
+                if getattr(self.host, "current", aid) != aid:
+                    self.host.apply(state, aid=aid)
+                tab = self.host.tab()
+                tab.get(url)
+                return tab
+            except Exception as e:
+                if attempt or not browser_gone(e):
+                    raise
+                self._p(cb, stop, "云端：浏览器窗口被关掉了，重开一次…")
+                self.host.reset()
+                time.sleep(1.5)
+        raise CloudError("浏览器窗口被关掉了：重开也没连上，再点一次开始")
+
     def run(self, p, on_progress=None, should_stop=None):
         """p：{prompt, seconds, width, height, first, wf, acct}；回本地 mp4 路径。
 
@@ -510,20 +539,16 @@ class CloudH3:
         secs = max(5, min(15, int(p.get("seconds") or 5)))
         size = pick_size(int(p.get("width") or 768), int(p.get("height") or 768))
         first = self._ref(str(p.get("first") or ""))
+        if kind == "file":
+            url = self.host_url()
+            if not url:
+                raise CloudError("本地工作流缺一个平台入口页：填一份网页工作流地址当兜底")
+        else:
+            url = self.wf_url(src)
         with self.host.lock:
             self.host.purpose = "gen"            # 这段期间保活别换号，否则中途掉登录
             try:
-                if getattr(self.host, "current", aid) != aid:
-                    # 选了号就得真换过去：这只浏览器是共用的，不能拿上一个号的登录态跑
-                    self.host.apply(state, aid=aid)
-                tab = self.host.tab()
-                if kind == "file":
-                    url = self.host_url()
-                    if not url:
-                        raise CloudError("本地工作流缺一个平台入口页：填一份网页工作流地址当兜底")
-                else:
-                    url = self.wf_url(src)
-                tab.get(url)
+                tab = self._enter(state, aid, url, on_progress, should_stop)
                 fid = self._wait_frame(tab, should_stop)
                 if kind == "file":
                     # 平台上那张图只是张跳板：进去之后立刻换成用户本地这一份
@@ -581,6 +606,15 @@ class CloudH3:
                 self._p(on_progress, should_stop, "云端：已提交（%s）" % hit.replace("clicked ", "").strip())
                 cos, fname = self._wait_result(tab, fid, ids["out"], base_name,
                                                on_progress, should_stop, hist0, known)
+            except CloudError:
+                raise
+            except Exception as e:
+                # 生成中途窗口被关掉：平台上可能还在跑，别把原生异常甩给界面
+                if browser_gone(e):
+                    raise CloudError("浏览器窗口被关掉了：这一段没跑完。"
+                                     "平台上可能还在跑，去「H3云端」看一眼；"
+                                     "重开自动处理，再点开始即可")
+                raise
             finally:
                 self.host.purpose = ""
         self._p(on_progress, should_stop, "云端：下载成片…")

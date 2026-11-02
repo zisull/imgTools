@@ -146,8 +146,22 @@ class BrowserHost:
         co.set_pref("profile.password_manager_enabled", False)
         return co
 
+    @staticmethod
+    def _conn_ok(b):
+        try:
+            return int(b.tabs_count) >= 0
+        except Exception:
+            return False
+
     def browser(self):
+        """拿浏览器连接；窗口被人关掉时丢掉死连接再重开。
+
+        以前这里只判 `_b is None`：用户把那只调试窗口叉掉后，`_b` 还指望它活着，
+        之后每一次云端出片都撞同一份死连接（「与页面的连接已断开」），只能重启软件。
+        """
         with self._lock:
+            if self._b is not None and not self._conn_ok(self._b):
+                self._b = None
             if self._b is None:
                 from DrissionPage import Chromium
                 os.makedirs(self.profile, exist_ok=True)
@@ -159,15 +173,36 @@ class BrowserHost:
         with self._lock:
             if self._b is None:
                 return False
-            try:
-                _ = self._b.tabs_count
-                return True
-            except Exception:
+            if not self._conn_ok(self._b):
                 self._b = None
                 return False
+            return True
 
     def tab(self):
-        return self.browser().latest_tab
+        """拿一个能用的页：连接断了就重连/重开一次。
+
+        窗口关掉后留下的死连接不该让这一路永久报废；重开一次还拿不到页才报错。
+        """
+        with self._lock:
+            for _ in range(2):
+                b = self.browser()          # 自己会丢掉死连接
+                try:
+                    return b.latest_tab
+                except IndexError:
+                    try:                    # 窗口在，只是最后一页被关了
+                        return b.new_tab()
+                    except Exception:
+                        self._b = None
+                except Exception:
+                    self._b = None
+            raise RuntimeError("浏览器窗口被关掉了，自动重开也没连上：再点一次开始")
+
+    def reset(self):
+        """丢掉当前连接（不主动杀窗口）：下一次 tab() 会重连或重开一只。"""
+        with self._lock:
+            self._b = None
+            self.current = ""
+            self.purpose = ""
 
     def close(self):
         with self._lock:
