@@ -84,6 +84,7 @@ MIC.api={
   filmList:()=>call('film_list'),
   filmResume:d=>call('film_resume',d||''),
   filmRedo:(i,deep)=>call('film_redo',i||1,!!deep),
+  filmRedoFailed:d=>call('film_redo_failed',d||''),
   filmMerge:d=>call('film_merge',d||''),
   /* 云端账号：一只共用浏览器 + 多份登录态快照；浏览器操作全部后台线程 */
   cloudState:()=>call('cloud_state'),

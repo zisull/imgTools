@@ -387,24 +387,103 @@ return Promise.all([get('queue'),get('history')]).then(function(rs){
 """
 
 
-# 平台自己的任务列表：当前任务（.rh-task-item）和历史（.history-item）都在会话页上，
-# 每条带 taskid 和状态文字（生成中 04:02 / 任务失败）。GET /history 在这套实例上一直是 0，
-# 只有这张列表能看见「我们这段到底排上没有、跑到哪、是不是已经判失败了」。
-# 只读 DOM，不点任何按钮。
+# 平台自己的任务列表：右侧那一栏同时写着 taskid、状态（生成中 04:02 / 任务失败）
+# 和运行模式，是判断「我们这段排上没有、跑到哪、是不是已经失败」最准的一处。
+# GET /history 在这套实例上常常是 0，页面队列也常常是空壳，所以优先读这张 DOM。
+# 两套取法：先按老类名（.rh-task-item / .history-item + .rh-task-id）取；
+# 类名改了就对叶子节点里的「taskid: 一串数字」兜底——H3yun 在同一个平台上
+# 就是用后一种跑完整部短剧的，不受前端改版影响。只读 DOM，不点任何按钮。
 _JS_TASKS = """
-function clean(e){if(!e)return '';
+function q(x){return String(x==null?'':x).replace(/\\s+/g,' ').trim();}
+function clean(e){
+  if(!e)return '';
   var c=e.cloneNode(true);
-  [].slice.call(c.querySelectorAll('svg,script,style')).forEach(function(x){x.remove();});
-  return (c.textContent||'').replace(/\\s+/g,' ').trim().slice(0,120);}
-function one(e){
-  var id=clean(e.querySelector('.rh-task-id,.history-id')).match(/\\d+/)||[''];
-  var st=e.querySelector('.rh-task-status,[class*=history-status]');
-  var d=e.querySelector('.history-bottom-info');
-  return {id:id[0],s:clean(st||e.querySelector('.task-status-running')),d:clean(d)};
+  var drop=c.querySelectorAll('svg,script,style,img,video,canvas');
+  for(var i=0;i<drop.length;i++){if(drop[i].parentNode)drop[i].parentNode.removeChild(drop[i]);}
+  return q(c.textContent);
 }
-return JSON.stringify({
-  cur:[].slice.call(document.querySelectorAll('.workflow-result-wrap .rh-task-item')).slice(0,6).map(one),
-  his:[].slice.call(document.querySelectorAll('.rh-task-history .history-item')).slice(0,8).map(one)});
+function stOf(t){
+  t=String(t||'');
+  var m=t.match(/(生成中|运行中|采样中|排队中|队列中|等待中|已完成|完成|成功|失败|错误|异常|已取消|取消中|已停止|已中止|中断)/);
+  return m?m[1]:'';
+}
+function tmOf(t){
+  var m=String(t||'').match(/([0-9]{1,2}:[0-9]{2}(?::[0-9]{2})?)/);
+  return m?m[1]:'';
+}
+function modeOf(t){
+  var m=String(t||'').match(/运行模式[:\\s：]*([^\\s,，。;；|]+)/);
+  if(!m)return '';
+  var v=m[1];
+  if(/ultra/i.test(v))return 'Ultra';
+  if(/plus/i.test(v))return 'Lite/Plus';
+  if(/standard/i.test(v))return 'Lite/Standard';
+  return v.slice(0,24);
+}
+function nameOf(t){
+  var m=String(t||'').match(/([\\u4e00-\\u9fa5A-Za-z0-9]{1,20}(?:运行|模板))/);
+  return m?m[1]:'';
+}
+var out={cur:[],his:[]},seen={};
+function add(id,box,leaf,isHis){
+  id=String(id||'');
+  if(!id||seen[id])return;
+  seen[id]=1;
+  var bt=clean(box)||q(leaf);
+  var stEl=box.querySelector('.rh-task-status,.task-status-running,[class*="task-status"],[class*="history-status"]');
+  var s=stEl?clean(stEl):'';
+  if(!s)s=stOf(bt);
+  var stm=s.match(/([0-9]{1,2}:[0-9]{2}(?::[0-9]{2})?)/);
+  var o={id:id,s:s,d:bt.slice(0,240),time:(stm?stm[1]:tmOf(bt)),
+         mode:modeOf(bt),name:nameOf(bt),his:!!isHis,raw:q(leaf).slice(0,120)};
+  (isHis?out.his:out.cur).push(o);
+}
+/* 先按已知类名取：老版任务项有 .rh-task-id，状态字在 .rh-task-status 里 */
+var pairs=[[".workflow-result-wrap .rh-task-item",".rh-task-id",false],
+           [".rh-task-item",".rh-task-id",false],
+           [".rh-task-history .history-item",".history-id",true],
+           [".history-item",".history-id",true]];
+pairs.forEach(function(p){
+  var els=[];
+  try{els=[].slice.call(document.querySelectorAll(p[0]));}catch(e){}
+  els.slice(0,15).forEach(function(e){
+    var t=clean(e.querySelector(p[1]));
+    var m=t.match(/[0-9]{10,}/);
+    if(m)add(m[0],e,e,p[2]);
+  });
+});
+/* 类名对不上时按「taskid: 一串数字」兜底：不受前端改版影响 */
+if(!(out.cur.length+out.his.length)){
+  var roots=['.rh-task-list','.task-list','[class*="task-list"]','[class*="taskList"]',
+             '.workflow-result-wrap','.rh-task-history'];
+  var rootsHit=[];
+  roots.forEach(function(s){
+    try{[].slice.call(document.querySelectorAll(s)).slice(0,15).forEach(function(e){rootsHit.push(e);});}catch(e){}
+  });
+  if(!rootsHit.length)rootsHit=[document];
+  rootsHit.forEach(function(root){
+    var all=[];
+    try{all=[].slice.call(root.querySelectorAll('*'));}catch(e){return;}
+    for(var i=0;i<all.length&&(out.cur.length+out.his.length)<40;i++){
+      var el=all[i];
+      if(el.children&&el.children.length>4)continue;
+      var t=q(el.textContent);
+      var m=t.match(/taskid[:\\s]*([0-9]{10,})/i);
+      if(!m)continue;
+      var id=m[1],box=el;
+      for(var j=0;j<12;j++){
+        if(!box.parentElement)break;
+        var up=box.parentElement,ut=clean(up);
+        if(ut.length>800)break;
+        box=up;
+        if(/运行模式/.test(ut)||stOf(ut))break;
+      }
+      var cls=(String(box.className||'')+' '+String((box.parentElement||{}).className||'')).toLowerCase();
+      add(id,box,t,/history/.test(cls));
+    }
+  });
+}
+return JSON.stringify(out);
 """
 
 
@@ -414,6 +493,37 @@ def browser_gone(e):
         return True
     s = str(e)
     return any(k in s for k in ("连接已断开", "已关闭", "连接失败", "页面被关闭", "没连上"))
+
+
+# 任务列表里的状态词。只认「已取消/已停止」这类完成态，不认光秃秃的「取消/停止」——
+# 任务项里常常挂着一颗「取消」按钮，把按钮字当成状态会在任务还在跑时误判失败。
+_TASK_FAIL_KW = ("失败", "错误", "异常", "已取消", "取消中", "已停止", "已中止",
+                 "中断", "failed", "error", "cancel")
+_TASK_RUN_KW = ("生成中", "运行中", "采样中", "排队", "队列", "等待",
+                "running", "queued", "pending")
+_TASK_DONE_KW = ("已完成", "完成", "成功", "completed", "success")
+
+
+def _tid_num(v):
+    try:
+        return int(str(v))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _task_failed(text):
+    s = str(text or "").lower()
+    return bool(s) and any(k in s for k in _TASK_FAIL_KW)
+
+
+def _task_running(text):
+    s = str(text or "").lower()
+    return bool(s) and any(k in s for k in _TASK_RUN_KW)
+
+
+def _task_done(text):
+    s = str(text or "").lower()
+    return bool(s) and "未完成" not in s and any(k in s for k in _TASK_DONE_KW)
 
 
 def pick_size(w, h):
@@ -453,6 +563,7 @@ class CloudH3:
         self.tag = str(self.cfg.get("exec_tag") or "Plus")
         self.has_editor = False
         self.wf_title = ""
+        self._task_id = ""          # 本段提交后从任务列表认领到的 taskid
 
     # ---------- 账号与工作流 ----------
     def account(self, aid=""):
@@ -685,6 +796,7 @@ class CloudH3:
         row = self.account(p.get("acct"))
         aid = row["id"]
         state = self.store.load(aid)
+        self._task_id = ""          # 这一段的 taskid 从提交后重新认领
         kind, src = self.wf_src(p.get("wf"))
         secs = max(5, min(15, int(p.get("seconds") or 5)))
         size = pick_size(int(p.get("width") or 768), int(p.get("height") or 768))
@@ -773,9 +885,15 @@ class CloudH3:
                 hist0 = self.history_count(tab, fid)   # 提交前有几条，之后才知道多没多
                 known = self.known_task_ids(tab)      # 提交前任务列表上已有的，几秒后才多出我们这条
                 hit = self._submit(tab, should_stop)
-                self._p(on_progress, should_stop, "云端：已提交（%s）" % hit.replace("clicked ", "").strip())
+                self._p(on_progress, should_stop,
+                        "云端：已提交（%s）…" % hit.replace("clicked ", "").strip())
+                tid = self.capture_task_id(tab, known, should_stop)
+                if tid:
+                    self._p(on_progress, should_stop,
+                            "云端：任务列表已认领 taskid %s" % tid)
                 cos, fname = self._wait_result(tab, fid, ids["out"], base_name,
-                                               on_progress, should_stop, hist0, known)
+                                               on_progress, should_stop, hist0,
+                                               known, tid)
             except CloudError:
                 raise
             except Exception as e:
@@ -1007,47 +1125,115 @@ class CloudH3:
             return 0
 
     def task_entries(self, tab):
-        """平台任务列表：当前在跑的与最近的几条历史。读不到回空表（不猜）。"""
+        """平台右侧任务列表：去重后按 taskid 从新到旧。读不到回空（不猜）。
+
+        同一条可能同时出现在「当前」和「历史」里，按 taskid 去重，只留最先读到的那份。
+        """
         try:
             raw = self.js(tab, _JS_TASKS)
-            d = json.loads(raw) if raw else {}
-            return d if isinstance(d, dict) else {}
+            if not raw:
+                return {}
+            d = json.loads(raw)
         except Exception:
             return {}
-
-    def known_task_ids(self, tab):
-        """提交前已经在那张列表上的 taskid：之后多出来的那条才是我们这段。"""
-        d = self.task_entries(tab)
-        ids = set()
+        if not isinstance(d, dict):
+            return {}
+        seen, items = set(), []
         for k in ("cur", "his"):
             for x in d.get(k) or []:
-                if x.get("id"):
-                    ids.add(str(x["id"]))
-        return ids
+                if not isinstance(x, dict):
+                    continue
+                tid = str(x.get("id") or "")
+                if not tid or tid in seen:
+                    continue
+                seen.add(tid)
+                items.append(x)
+        items.sort(key=lambda x: _tid_num(x.get("id")), reverse=True)
+        return {"items": items}
 
-    def platform_state(self, tab, fid, waited, hist0=0, known=None):
+    def known_task_ids(self, tab):
+        """提交前已经在那张列表上的 taskid：之后多出来的那条才是我们这段。
+
+        读不到列表时回 None（不是空集合）：空集合＝确实一条都没有，可以用
+        「新出现」来认领；None＝基线不可信，之后不许拿新旧差集判失败。
+        """
+        d = self.task_entries(tab)
+        if not d:
+            return None
+        return {str(x.get("id")) for x in (d.get("items") or []) if x.get("id")}
+
+    def capture_task_id(self, tab, known, stop=None, limit=40):
+        """提交后从任务列表认领我们这一段的 taskid。
+
+        每只浏览器同一时刻只有我们在提交，所以「提交后新出现的那条」就是，
+        取 taskid 最大的那条。提交前基线没读到（known 为空）时只认「在跑/排队」
+        的新条目，免得把列表里旧的失败记录当成这一段。
+        """
+        known = {str(x) for x in (known or ())}
+        t0 = time.time()
+        hit = ""
+        while time.time() - t0 < limit:
+            if stop and stop():
+                return ""
+            items = self.task_entries(tab).get("items") or []
+            new = [x for x in items if x.get("id") and str(x["id"]) not in known]
+            if new:
+                running = [x for x in new if _task_running(x.get("s"))]
+                cand = running or (new if known else [])
+                if cand:
+                    best = max(cand, key=lambda x: _tid_num(x.get("id")))
+                    hit = str(best.get("id") or "")
+                    if running or len(cand) == 1:
+                        break
+            time.sleep(1.5)
+        if hit:
+            self._task_id = hit
+            self.log("· 任务列表认领 taskid %s" % hit)
+        return hit
+
+    def platform_state(self, tab, fid, waited, hist0=0, known=None, task_id=""):
         """平台上这一段到底到哪一步了——一句话，读不到就回空串（绝不编一个）。
 
         时间波动很大（实测同参数一段 353 秒出片、一段排到二十分钟没动），
         只报「已等 N 秒」人分不清排队/在跑/已失败，所以去问平台自己：
-        任务列表那一栏（最准，平台自己写的状态）、页面内存里的队列、GET /history 的条数。
-        hist0 = 提交那一刻的历史条数；known = 提交前列表上已有的 taskid——
-        两者都只用来认出「刚多出来的那一条」是不是我们这段。
+        右侧任务列表（taskid + 状态 + 计时，最准）、页面内存里的队列、GET /history 的条数。
+        hist0 = 提交那一刻的历史条数；known = 提交前列表上已有的 taskid；
+        task_id = 提交后认领到的本段 taskid——三个都只用来认出「我们这一段」。
         """
         # 先看任务列表：它直接写着「生成中 04:02」「任务失败」，比队列更有信息量。
-        # 提交后新出现的那个 taskid 就是我们这一段；匹配不到就退回旧口径，不去猜别的任务。
-        tasks = self.task_entries(tab) if known is not None else {}
-        cand = list(tasks.get("cur") or []) + list(tasks.get("his") or [])[:1]
-        for x in cand:
-            if not x.get("id") or str(x["id"]) in (known or ()):
-                continue
-            st = str(x.get("s") or "")
-            det = str(x.get("d") or "")
-            if "失败" in st:
-                return ("平台判失败：" + (det or "任务列表把它标成失败，点开那一条看节点报错")
-                        + " · taskid " + str(x["id"]))
-            if st:
-                return "平台上这一段：" + st + " · taskid " + str(x["id"])
+        # 认领到 task_id 就只按那一条判；没认领到才用 known 差集，绝不拿旧失败顶账。
+        tasks = self.task_entries(tab) if (known is not None or task_id) else {}
+        items = list(tasks.get("items") or [])
+        known = {str(x) for x in (known or ())}
+        my = None
+        if task_id:
+            my = next((x for x in items
+                       if str(x.get("id")) == str(task_id)), None)
+        if my is None and known is not None:
+            new = [x for x in items
+                   if x.get("id") and str(x["id"]) not in known]
+            running = [x for x in new if _task_running(x.get("s"))]
+            if running:
+                my = running[0]
+            elif len(new) == 1:
+                my = new[0]
+        if my is not None:
+            s = str(my.get("s") or "").strip()
+            det = str(my.get("d") or "").strip()
+            tm = str(my.get("time") or "").strip()
+            tid = str(my.get("id") or "")
+            # 状态字读不到时，只认容器里明确的「任务失败/生成失败」，
+            # 不拿一个孤零零的「错误」去猜（旁边可能有「错误」按钮/标签）。
+            if _task_failed(s) or (not s and re.search(
+                    r"(任务失败|生成失败|执行失败|运行失败|出错了)", det)):
+                return ("平台判失败：" + (det or s
+                        or "任务列表把它标成失败，点开那一条看节点报错")
+                        + " · taskid " + tid)
+            if s:
+                extra = (" · 已运行 " + tm) if (tm and tm not in s) else ""
+                if _task_done(s):
+                    return ("平台说这段跑完了，可输出节点还没刷新 · taskid " + tid)
+                return "平台上这一段：" + s + extra + " · taskid " + tid
         try:
             raw = self.js(tab, _JS_PROGRESS, fid)
             if not raw:
@@ -1095,18 +1281,19 @@ class CloudH3:
             return "平台上查不到这段任务" + btn + "：可能在它自己的池子里排队"
         return ""
 
-    def _wait_result(self, tab, fid, out, base_name, cb, stop, hist0=0, known=None):
+    def _wait_result(self, tab, fid, out, base_name, cb, stop, hist0=0, known=None,
+                     task_id=""):
         t0 = time.time()
         seen = ""
         where = ""
+        done_at = 0.0
         while time.time() - t0 < self.timeout:
             if stop and stop():
                 raise CloudError("已停止：云端那半段还在跑，下次进来能在平台上看到")
-            time.sleep(self.poll_min)
             try:
                 d = json.loads(self.js(tab, _JS_RESULT, fid, out) or "{}")
             except ValueError:
-                continue
+                d = {}
             fname = str(d.get("filename") or "")
             if fname and fname != base_name:
                 cos = str(d.get("cos_url") or "")
@@ -1117,15 +1304,26 @@ class CloudH3:
                 # 这句只针对「刚看到的那个新文件名」：输出节点一清掉，
                 # 继续挂着就成了一句没根据的抱怨
                 seen = ""
-            where = self.platform_state(tab, fid, int(time.time() - t0), hist0, known)
+            where = self.platform_state(tab, fid, int(time.time() - t0),
+                                        hist0, known, task_id)
             # 平台自己把它标成失败了：再等下去也只是等超时，当场收手把原因带出去
             if "平台判失败" in where:
                 raise CloudError(where)
+            # 平台说跑完了、输出节点却一直不刷新：给 90 秒收尾，再等就是空耗
+            if "跑完了" in where or "输出节点还没刷新" in where:
+                if not done_at:
+                    done_at = time.time()
+                elif time.time() - done_at > 90:
+                    raise CloudError(where + "：平台说跑完了但成片一直没取回来，"
+                                     "去平台上那一页确认；没出就点重出这一段")
+            else:
+                done_at = 0.0
             if cb:
                 waited = int(time.time() - t0)
                 left = int(self.timeout - waited)
                 cb(" · ".join(x for x in ("云端出片中…已等 %d 秒（剩 %d 秒超时）"
                                           % (waited, max(0, left)), where, seen) if x))
+            time.sleep(self.poll_min)
         # 收尾那句得带上「我们到底看见了什么」：只说「等超时」等于没交代，
         # 而平台上查不到这段＝多半根本没提交成功，是另一件事。
         return self._timeout_err(where, seen)

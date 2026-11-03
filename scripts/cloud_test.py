@@ -672,6 +672,52 @@ def test_platform_state():
     assert "平台判失败" in s and "333" in s, "任务列表里的失败没读出来：%r" % s
     # 失败那条是提交前就在的旧账：不许算到这一段头上
     assert gt(dead).platform_state(None, "f", 30, 0, known={"333"}) == "", "把旧失败算成了这段的"
+    # 认领到 taskid 后就只认那一条：哪怕它早就在基线里，失败也得当场收手
+    dead2 = ('{"cur":[],"his":[{"id":"333","s":"任务失败",'
+             '"d":"任务 333 失败：节点报错 参考图没收到"}]}')
+    s = gt(dead2).platform_state(None, "f", 30, 0, known={"333"}, task_id="333")
+    assert "平台判失败" in s and "参考图没收到" in s and "333" in s, s
+    # 列表把计时也写出来时，状态行要带上「已运行 04:02」
+    live2 = '{"cur":[{"id":"111","s":"生成中","time":"04:02","d":"生成中 取消"}]}'
+    s = gt(live2).platform_state(None, "f", 30, 0, known=set(), task_id="111")
+    assert "生成中" in s and "已运行 04:02" in s, s
+    # 任务项里挂的「取消」按钮不能当成「已取消」
+    live3 = '{"cur":[{"id":"111","s":"生成中 00:12","d":"生成中 00:12 取消"}]}'
+    s = gt(live3).platform_state(None, "f", 30, 0, known=set(), task_id="111")
+    assert "平台判失败" not in s and "生成中" in s, s
+    # 任务列表去重、按 taskid 从新到旧
+    x = cg.CloudH3(TMP, {}, None, None)
+    x.js = lambda tab, script, *a: (
+        '{"cur":[{"id":"111","s":"生成中"}],'
+        '"his":[{"id":"222","s":"任务失败"},{"id":"111","s":"生成中"}]}')
+    ids = [i["id"] for i in (x.task_entries(None).get("items") or [])]
+    assert ids == ["222", "111"], ids
+    # 基线读不到＝None（不许拿新旧差集判失败）；读到了但确实为空＝空集合
+    x = cg.CloudH3(TMP, {}, None, None)
+    x.js = lambda tab, script, *a: ""
+    assert x.known_task_ids(None) is None
+    x.js = lambda tab, script, *a: '{"cur":[],"his":[]}'
+    assert x.known_task_ids(None) == set()
+    # 提交后认领：基线为空时只认「在跑」的新条目，不拿旧失败顶账
+    x = cg.CloudH3(TMP, {}, None, None)
+    seq = [{"items": []},
+           {"items": [{"id": "900000000000000001", "s": "排队中"}]}]
+    state = {"n": 0}
+
+    def te(tab):
+        out = seq[min(state["n"], len(seq) - 1)]
+        state["n"] += 1
+        return out
+
+    x.task_entries = te
+    x.log = lambda *a, **k: None
+    old_sleep = cg.time.sleep
+    cg.time.sleep = lambda s: None
+    try:
+        tid = x.capture_task_id(None, set(), limit=5)
+    finally:
+        cg.time.sleep = old_sleep
+    assert tid == "900000000000000001", tid
     # 读到失败时 _wait_result 当场收手，不干等到超时
     x = gt(dead)
     x.poll_min = 0.01

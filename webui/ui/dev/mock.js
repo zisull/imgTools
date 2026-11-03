@@ -750,6 +750,13 @@ window.MIC_MOCK={
     }
     L('↻ 重出第 '+i+' 段：作废 '+hit.length+' 段');
     return {ok:true,msg:'从第 '+i+' 段重出，作废 '+hit.length+' 段',count:hit.length};},
+  film_redo_failed(){
+    const fs=st.film;
+    if(!fs.total)return {ok:false,msg:'没有工程'};
+    const bad=fs.shots.filter(s=>s.state!=='done');
+    if(!bad.length)return {ok:false,msg:'没有没出成的段：全部都在'};
+    const i0=Math.min.apply(null,bad.map(s=>s.i));
+    return this.film_redo(i0,String(fs.mode)==='chain');},
   film_merge(){
     const fs=st.film;
     if(!fs.done)return {ok:false,msg:'还没有一段成功出片'};

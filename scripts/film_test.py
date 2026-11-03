@@ -303,8 +303,13 @@ def main():
     proj["film"] = "old.mp4"
     prj.save(d, proj)
     files_before = [prj.abs_path(d, x.get("file") or "") for x in proj["shots"]]
-    resumed = []
-    a.film_resume = lambda dd="": (resumed.append(dd) or {"ok": True})
+    launched = []
+
+    def fake_launch(dd, pp, only=None, why=""):
+        launched.append((dd, set(only or ()), str(why)))
+        return {"ok": True, "exec": "cloud"}
+
+    a._film_launch = fake_launch
     r = a.film_redo(2, False)
     proj2 = prj.load(d)
     ok("逐镜重出只重置第 2 段",
@@ -315,7 +320,9 @@ def main():
        and os.path.isfile(files_before[0])
        and not os.path.isfile(files_before[1])
        and proj2.get("film") == "", r)
-    ok("重出后走续跑而非另起工程", resumed and resumed[-1] == d, resumed)
+    ok("逐镜重出只跑目标段，不把整部重跑",
+       launched and launched[-1][0] == d and launched[-1][1] == {2},
+       launched)
 
     proj = prj.load(d)
     proj["mode"] = "chain"
@@ -329,6 +336,53 @@ def main():
        and os.path.isfile(files_before[0])
        and all(x["state"] == "wait" and x["file"] == ""
                for x in proj3["shots"][1:]), r)
+    ok("接帧重出只跑作废的那几段（第 2、3 段）",
+       launched[-1][1] == {2, 3}, launched)
+
+    # ---------------- 一键重出失败段：只补没出成的，成功段不碰 ----------------
+    proj = prj.load(d)
+    proj["mode"] = "shot"
+    p1 = prj.abs_path(d, proj["shots"][0]["file"])
+    p3 = prj.abs_path(d, prj.shot_file(3))
+    os.makedirs(os.path.dirname(p3), exist_ok=True)
+    shutil.copyfile(p1, p3)
+    proj["shots"][0].update(state="done", err="")
+    proj["shots"][1].update(state="fail", file="", frame="", err="平台判失败")
+    proj["shots"][2].update(state="done", file=prj.shot_file(3), sec=1.0, err="")
+    prj.save(d, proj)
+    launched.clear()
+    r = a.film_redo_failed()
+    proj6 = prj.load(d)
+    ok("一键重出：逐镜只补失败那段",
+       r.get("ok") and r.get("count") == 1 and launched[-1][1] == {2}
+       and proj6["shots"][0]["state"] == "done" and os.path.isfile(p1)
+       and proj6["shots"][1]["state"] == "wait"
+       and proj6["shots"][2]["state"] == "done" and os.path.isfile(p3), (r, launched))
+
+    proj = prj.load(d)
+    proj["mode"] = "chain"
+    proj["shots"][2].update(state="done", file=prj.shot_file(3))
+    prj.save(d, proj)
+    if not os.path.isfile(p3):
+        shutil.copyfile(p1, p3)
+    launched.clear()
+    r = a.film_redo_failed()
+    proj7 = prj.load(d)
+    ok("一键重出：接帧从最早失败段连带下游",
+       r.get("ok") and r.get("count") == 2 and launched[-1][1] == {2, 3}
+       and proj7["shots"][0]["state"] == "done"
+       and not os.path.isfile(p3), (r, launched))
+
+    proj = prj.load(d)
+    for sh in proj["shots"]:
+        f = prj.abs_path(d, prj.shot_file(sh["i"]))
+        os.makedirs(os.path.dirname(f), exist_ok=True)
+        if os.path.abspath(f) != os.path.abspath(p1):
+            shutil.copyfile(p1, f)
+        sh.update(state="done", file=prj.shot_file(sh["i"]), frame="", err="")
+    prj.save(d, proj)
+    r = a.film_redo_failed()
+    ok("全都在时一键重出不起跑", not r.get("ok") and "全部都在" in str(r.get("msg")), r)
 
     # ---------------- 云端多号：失败重启一次、两次换号、无号才标失败 ----------------
     class FakeHost:
@@ -490,8 +544,55 @@ def main():
        and all(x.get("acct_name") == "B号" for x in proj["shots"])
        and firsts.get(("B", 2)) == [fr1], (firsts.get(("B", 2)), fr1))
 
+    # 单段重出：只提交目标段，并先回到这段原来的账号浏览器
+    fail_ids.clear()
+    fatal_ids.clear()
+    slow_ids.clear()
+    pool = FakePool([("A", "A号"), ("B", "B号")])
+    r = cloud_start(pool, 3, acct_mode="multi")
+    ok("单段重出：底片先备好", r.get("ok") and wait_cloud(a, 90), r.get("msg"))
+    d = a._film_dir
+    proj = prj.load(d)
+
+    def drop_shot(idx, aid):
+        sh = proj["shots"][idx - 1]
+        p = prj.abs_path(d, sh.get("file") or "")
+        if p and os.path.isfile(p):
+            os.remove(p)
+        sh["file"] = ""
+        sh["frame"] = ""
+        sh["state"] = "wait"
+        sh["acct_id"] = aid
+        proj["redo"] = {"shots": [idx], "acct": aid}
+        prj.save(d, proj)
+        calls.clear()
+        firsts.clear()
+        return sh
+
+    drop_shot(2, "B")
+    a._filmpool = pool            # 直接调云端调度，不经过 film_start
+    a._film_cloud_run(d, proj, {}, time.time(), only={2})
+    ok("单段重出只提交目标段、只用它原来的号",
+       set(k[0] for k in calls) == {"B"} and all(k[1] == 2 for k in calls),
+       sorted(calls))
+    ok("单段重出没碰别的段",
+       proj["shots"][0]["state"] == "done" and proj["shots"][2]["state"] == "done",
+       [x["state"] for x in proj["shots"]])
+
+    # 原号两次不出成：只重启这一只浏览器，之后才换号；新号的浏览器没被动过
+    pool = FakePool([("A", "A号"), ("B", "B号")])
+    a._filmpool = pool
+    fail_ids.clear()
+    fail_ids.add("B")
+    drop_shot(2, "B")
+    a._film_cloud_run(d, proj, {}, time.time(), only={2})
+    ok("单段重出失败先重启原号那只，二次失败才换号",
+       pool.map["B"].host.restarts == 1 and pool.map["A"].host.restarts == 0
+       and ("A", 2) in calls and all(k[1] == 2 for k in calls),
+       (sorted(calls), pool.map["B"].host.restarts, pool.map["A"].host.restarts))
+
     # ---------------- film_state / 快照 ----------------
-    a.film_resume = type(a).film_resume.__get__(a)   # 还原，给后面真续跑用
+    a._film_launch = type(a)._film_launch.__get__(a)   # 还原，给后面真跑用
     a._ai = real_ai
     st = a.film_state()
     ok("film_state 带 ffmpeg 与 Key 状态",

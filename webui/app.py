@@ -2289,7 +2289,8 @@ class App(WindowCtl):
             if self._film_should_stop():
                 return False, "已停止", False
             sh["acct_name"] = worker.name
-            tail = "" if attempt == 0 else " · 重启浏览器重试"
+            sh["acct_id"] = worker.aid
+            tail = "" if attempt == 0 else " · 重启这只浏览器重试"
             self._log("🎬 第 %d 段 · %s%s：%d 秒 · 云端 · 参考 %d 张"
                       % (sh["i"], worker.name, tail, sh["seconds"], len(refs)))
             t1 = time.time()
@@ -2334,8 +2335,11 @@ class App(WindowCtl):
             self.st["status"] = fs.get("status") or ""
             prj.save(d, proj)
 
-    def _film_cloud_serial(self, d, proj, fs, t0, workers):
-        """单号/接帧：一段一段来。接帧的第 2 段起参考图是上一段尾帧 + 固定参考图。"""
+    def _film_cloud_serial(self, d, proj, fs, t0, workers, only=None):
+        """单号/接帧：一段一段来。接帧的第 2 段起参考图是上一段尾帧 + 固定参考图。
+
+        only 非空时只跑这几段（单段重出）；别的段只用来接上尾帧，不会重新提交。
+        """
         from filmkit import project as prj
         total = len(proj["shots"])
         last_ref = ""      # 第 1 段用固定参考池；尾帧只从第 2 段起接
@@ -2352,6 +2356,8 @@ class App(WindowCtl):
                 if fr:
                     last_ref = fr
                 continue
+            if only and sh["i"] not in only:
+                continue            # 这次只重出指定段：别的失败段原样留着
             sh["state"] = "run"
             sh["err"] = ""
             fs["current"] = sh["i"]
@@ -2417,7 +2423,7 @@ class App(WindowCtl):
             self._film_cloud_state(d, proj, fs, t0)
         return last_ref
 
-    def _film_cloud_parallel(self, d, proj, fs, t0, workers):
+    def _film_cloud_parallel(self, d, proj, fs, t0, workers, only=None):
         """逐镜模式：空闲的号自己领下一段，一段最多试两个号。"""
         from filmkit import project as prj
         from cloudkit import pool as cp
@@ -2430,7 +2436,7 @@ class App(WindowCtl):
             if prj.ok_file(d, sh):
                 sh["state"] = "done"
                 sh["err"] = ""
-            else:
+            elif not only or sh["i"] in only:
                 pending.append(sh)
         if not pending:
             return
@@ -2574,26 +2580,37 @@ class App(WindowCtl):
                 sh["err"] = state["fatal"] or "没有空闲的账号能接这一段"
         self._film_cloud_state(d, proj, fs, t0)
 
-    def _film_cloud_run(self, d, proj, fs, t0):
-        """云端成片：单号串行（可接帧）、多号并行（逐镜）；失败重启浏览器再试，二次失败换号。"""
+    def _film_cloud_run(self, d, proj, fs, t0, only=None):
+        """云端成片：单号串行（可接帧）、多号并行（逐镜）；失败重启浏览器再试，二次失败换号。
+
+        only 只有一段＝单段重出：无论账号模式都走串行，优先用这段原来的账号浏览器，
+        那一只两次不出成才换号——不去碰别的号、也不重启别的浏览器。
+        多段重出（接帧作废后续段）仍按原模式跑。
+        """
         pool = self._film_pool()
         rows = pool.accounts()
         if not rows:
             raise FilmError("没有可用的云端账号：到「环境管理 → 云端账号」登录并保存"
                             "（标成「出片失败」的号要重新登录或换号）")
-        pref = str(proj.get("acct") or "")
+        redo = proj.get("redo") or {}
+        pref = str(redo.get("acct") or proj.get("acct") or "")
         if pref:
             rows.sort(key=lambda a: 0 if a["id"] == pref else 1)
         workers = pool.workers(rows)
         single = str(proj.get("acct_mode") or "single") != "multi"
-        if str(proj.get("mode")) == "chain":
-            self._log("☁️ 云端成片：接帧串行 · %d 张参考图 · %d 个号待命（失败自动换号）"
-                      % (len(proj.get("refs") or []), len(workers)))
-            self._film_cloud_serial(d, proj, fs, t0, workers)
-        elif single:
-            self._log("☁️ 云端成片：单号串行 · %d 张参考图 · %d 个号待命（失败自动换号）"
-                      % (len(proj.get("refs") or []), len(workers)))
-            self._film_cloud_serial(d, proj, fs, t0, workers)
+        only_set = {int(x) for x in (only or ())}
+        if only_set:
+            hit = next((a for a in rows if a["id"] == pref), None)
+            self._log("☁️ 单段重出：优先用%s的浏览器；这只两次不出成才换号"
+                      % (("「%s」" % hit["name"]) if hit else "空闲号"))
+        if str(proj.get("mode")) == "chain" or single or (only_set and len(only_set) == 1):
+            how = "接帧串行" if str(proj.get("mode")) == "chain" else "单号串行"
+            self._log("☁️ 云端成片：%s · %d 张参考图 · %d 个号待命（失败自动换号）"
+                      % (how, len(proj.get("refs") or []), len(workers)))
+            self._film_cloud_serial(d, proj, fs, t0, workers, only)
+        elif only_set:
+            # 多段重出（接帧作废后续段）仍按原模式跑，但优先从原来的号开工
+            self._film_cloud_parallel(d, proj, fs, t0, workers, only)
         else:
             cap = min(4, len(workers),
                       int((self.cfg.get("cloud") or {}).get("parallel") or 3))
@@ -2601,13 +2618,15 @@ class App(WindowCtl):
                       % (len(proj.get("refs") or []), len(workers), max(1, cap)))
             self._film_cloud_parallel(d, proj, fs, t0, workers)
 
-    def _film_run(self, d, proj):
+    def _film_run(self, d, proj, only=None):
         from filmkit import project as prj
         t0 = time.time()
+        only = {int(x) for x in (only or ())} or None
         fs = self.st["film"]
         fs["state"] = "running"
         fs["phase"] = "出片"
-        fs["status"] = "准备中…"
+        fs["status"] = ("重出第 %s 段…" % "、".join(str(i) for i in sorted(only))
+                        if only else "准备中…")
         fs["shots"] = self._film_shots(proj, d)
         retry = _to_int(proj.get("retry"), 2, 0, 5)
         chain = str(proj.get("mode")) == "chain"
@@ -2632,7 +2651,7 @@ class App(WindowCtl):
             if cloud:
                 # 云端自己调度：接帧串行换号、逐镜多号并行；下面那条串行循环只跑本地
                 try:
-                    self._film_cloud_run(d, proj, fs, t0)
+                    self._film_cloud_run(d, proj, fs, t0, only)
                 finally:
                     self._film_pool_close()   # 收调度包装；账号浏览器留着，下次直接用
             for sh in ([] if cloud else proj["shots"]):
@@ -2648,6 +2667,8 @@ class App(WindowCtl):
                     if chain and fr:
                         last_ref = fr
                     continue
+                if only and sh["i"] not in only:
+                    continue            # 单段重出：别的段原样留着，不重新提交
                 sh["state"] = "run"
                 sh["err"] = ""
                 fs["current"] = sh["i"]
@@ -2776,6 +2797,9 @@ class App(WindowCtl):
                             miss = int(proj.get("merge_missing") or 0)
                             fs["status"] = "✅ 成片完成" + (
                                 "（缺 %d 段，序号没乱）" % miss if miss else "")
+                            if miss:
+                                fs["msg"] = ("有 %d 段没出成：点「重出失败段」"
+                                             "只补这几段，不用整部重跑" % miss)
                             self._film_publish(proj, film, round(time.time() - t0, 1))
                             self._log("── 成片结束：%s ──" % film)
                         except Exception as e:
@@ -2804,6 +2828,7 @@ class App(WindowCtl):
                 c["status"] = fs.get("status") or ""
                 c["done"] = fs.get("done") or 0
                 c["total"] = fs.get("total") or 0
+            proj.pop("redo", None)          # 这次要重出的段已经跑过，提示跟着清掉
             prj.save(d, proj)
             if cloud:
                 self._film_pool_close()     # 成片并行的浏览器收干净，别在桌面留一排窗口
@@ -3009,6 +3034,11 @@ class App(WindowCtl):
             self.st["film"] = self._film_view(proj, state="done", phase="完成",
                                               status="✅ 已完成")
             return {"ok": True, "msg": "这部已经完成了", "film": film}
+        return self._film_launch(
+            d, proj, why="▶️ 继续成片：%s · 从第一段没出的往后跑" % (proj.get("title") or d))
+
+    def _film_launch(self, d, proj, only=None, why=""):
+        """预检 → 占位 → 起线程。续跑和单段重出共用这一条，口径不会分叉。"""
         chk = self._film_precheck(proj, len(proj["shots"]), base_dir=d)
         if chk["err"]:
             return {"ok": False, "msg": chk["err"]}
@@ -3028,17 +3058,19 @@ class App(WindowCtl):
         self._film_dir = d
         self.st["film"] = self._film_view(proj, state="running", phase="出片",
                                           status="准备中…")
-        self._thread = threading.Thread(target=self._film_run, args=(d, proj), daemon=True)
+        self._thread = threading.Thread(target=self._film_run, args=(d, proj, only),
+                                        daemon=True)
         self._thread.start()
-        self._log("▶️ 继续成片：%s · 从第一段没出的往后跑" % (proj.get("title") or d))
+        if why:
+            self._log(why)
         return {"ok": True, "exec": proj.get("exec") or "local"}
 
     def film_redo(self, shot=1, deep=False):
         """重出某一段。接帧模式下自动连带作废后面所有段：第 N+1 段的参考
         是第 N 段的尾帧，只重出第 N 段的话，后半部还是旧画面接出来的。
 
-        作废=删掉那几段的 mp4 与尾帧、状态回到等待，再按续跑那条路跑——
-        已完成的段照旧跳过，失败段原位重试，不跳号。
+        作废=删掉那几段的 mp4 与尾帧、状态回到等待，然后只跑这些段：
+        别的失败段这次原样留着，账号也优先用这段原来那只浏览器。
         """
         from filmkit import project as prj
         if (self._lanes.get("gpu") in ("film", "film_merge")
@@ -3056,10 +3088,71 @@ class App(WindowCtl):
             return {"ok": False, "msg": "这份工程没有分镜"}
         i = _to_int(shot, 1, 1, len(shots))
         deep = bool(deep or str(proj.get("mode")) == "chain")
-        n = 0
+        targets = {int(sh.get("i") or 0) for sh in shots
+                   if sh.get("i") == i or (deep and int(sh.get("i") or 0) > i)}
+        pref_name = next((str(sh.get("acct_name") or "") for sh in shots
+                          if int(sh.get("i") or 0) == i), "")
+        self._log("↻ 重出第 %d 段%s：作废 %d 段"
+                  % (i, "（接帧，含后面所有段）" if deep else "", len(targets)))
+        r = self._film_redo_run(d, proj, targets, "第 %d 段" % i)
+        if not r.get("ok"):
+            return r
+        msg = "从第 %d 段重出，作废 %d 段" % (i, len(targets))
+        if pref_name and str(proj.get("exec")) == "cloud":
+            msg += " · 优先用「%s」的浏览器" % pref_name
+        return {"ok": True, "msg": msg, "count": len(targets),
+                "exec": r.get("exec") or "local"}
+
+    def film_redo_failed(self, dir=""):
+        """把没出成的段一次重出：逐镜只补失败的那几段。
+
+        接帧模式下第 N+1 段接着第 N 段尾帧，所以从最早失败的那段往后整段作废。
+        浏览器只动真要重跑的那几只账号，别的号不启动、也不重启。
+        """
+        from filmkit import project as prj
+        if (self._lanes.get("gpu") in ("film", "film_merge")
+                or self._lanes.get("cloud") == "film"):
+            return {"ok": False, "msg": "成片在跑：先点停止再重出"}
+        d = str(dir or "").strip() or self._film_dir
+        if not d or not os.path.isfile(os.path.join(d, "project.json")):
+            return {"ok": False, "msg": "没有工程：先跑一部，或从「最近工程」打开一份"}
+        try:
+            proj = prj.load(d)
+        except Exception as e:
+            return {"ok": False, "msg": "工程读不出来：%s" % e}
+        shots = proj.get("shots") or []
+        if not shots:
+            return {"ok": False, "msg": "这份工程没有分镜"}
+        bad = [int(sh.get("i") or 0) for sh in shots
+               if sh.get("state") != "done" or not prj.ok_file(d, sh)]
+        if not bad:
+            return {"ok": False, "msg": "没有没出成的段：全部都在"}
+        deep = str(proj.get("mode")) == "chain"
+        i0 = min(bad)
+        targets = ({int(sh.get("i") or 0) for sh in shots
+                    if int(sh.get("i") or 0) >= i0} if deep else set(bad))
+        self._log("↻ 重出失败段：%d 段没出成，这次跑 %d 段%s"
+                  % (len(bad), len(targets),
+                     "（接帧，从第 %d 段起连带后面）" % i0 if deep else ""))
+        r = self._film_redo_run(d, proj, targets, "失败段")
+        if not r.get("ok"):
+            return r
+        return {"ok": True, "count": len(targets),
+                "msg": "重出 %d 段（第 %s 段）"
+                       % (len(targets), "、".join(str(x) for x in sorted(targets))),
+                "exec": r.get("exec") or "local"}
+
+    def _film_redo_run(self, d, proj, targets, label):
+        """作废 targets（删片与尾帧、回到等待）后只跑它们；起不来就把标记撤掉。"""
+        from filmkit import project as prj
+        shots = proj.get("shots") or []
+        targets = {int(x) for x in targets if int(x) >= 1}
+        pref = ""
         for sh in shots:
-            if sh.get("i") != i and not (deep and int(sh.get("i") or 0) > i):
+            if int(sh.get("i") or 0) not in targets:
                 continue
+            if not pref:
+                pref = str(sh.get("acct_id") or "")
             for key in ("file", "frame"):
                 p = prj.abs_path(d, sh.get(key) or "")
                 if p and os.path.isfile(p):
@@ -3071,19 +3164,21 @@ class App(WindowCtl):
             sh["state"] = "wait"
             sh["sec"] = 0.0
             sh["err"] = ""
-            n += 1
         # 旧成片已经拼过被作废的段：指回它只会让人以为「改完了」
         proj["film"] = ""
         proj["merge_ok"] = True
         proj["merge_missing"] = 0
+        # 只重出这几段，并优先回到这段原来的账号浏览器；别的段这次不碰
+        proj["redo"] = {"shots": sorted(targets), "acct": pref}
         prj.save(d, proj)
-        self._log("↻ 重出第 %d 段%s：作废 %d 段"
-                  % (i, "（接帧，含后面所有段）" if deep else "", n))
-        r = self.film_resume(d)
+        r = self._film_launch(d, proj, only=targets,
+                              why="↻ 重出%s：只跑第 %s 段%s"
+                                  % (label, "、".join(str(x) for x in sorted(targets)),
+                                     "，优先用原来的号" if pref else ""))
         if not r.get("ok"):
-            return r
-        return {"ok": True, "msg": "从第 %d 段重出，作废 %d 段" % (i, n), "count": n,
-                "exec": r.get("exec") or "local"}
+            proj.pop("redo", None)      # 这次没起来：别把「优先用哪个号」留到下次
+            prj.save(d, proj)
+        return r
 
     def film_merge(self, dir=""):
         from filmkit import project as prj

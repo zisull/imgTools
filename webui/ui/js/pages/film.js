@@ -452,8 +452,12 @@ MIC.registerPage('film',{
     }else if(s.running==='film_merge'){
       acts='<span class="mut fine">合成中…</span>';
     }else{
-      if(fs.state==='paused'||fs.state==='stopped'||fs.state==='failed')
+      const canResume=fs.state==='paused'||fs.state==='stopped'||fs.state==='failed';
+      if(canResume)
         acts+=`<button class="btn pri" onclick="MIC.film.resume()">${ic('play','s')}继续</button>`;
+      if(fs.dir&&(+fs.missing||0)>0)
+        acts+=`<button class="${canResume?'btn':'btn pri'}" onclick="MIC.film.redoFailed()">`+
+          `${ic('refresh','s')}重出失败段</button>`;
       if(fs.dir&&(+fs.done||0)>0)
         acts+=`<button class="btn" onclick="MIC.film.merge()">${ic('film','s')}重新合成</button>`;
       if(fs.dir)
@@ -653,9 +657,28 @@ MIC.film={
     const chain=fs.mode==='chain';
     const msg=chain
       ?'接帧模式下重出第 '+i+' 段会作废它和后面所有段（画面要重新接）。继续？'
-      :'重出第 '+i+' 段？';
+      :'重出第 '+i+' 段？只跑这一段，别的段和浏览器不动。';
     if(!confirm(msg))return;
     MIC.api.filmRedo(i,chain).then(r=>{
+      if(!padOk(r)){toastErr(r,'没能重出');return;}
+      if(String(r.exec||fs.exec)==='cloud')
+        MIC.s.st.cloud=Object.assign({},MIC.s.st.cloud||{},{run:'film',task:'成片',
+          status:'准备中…',done:0,total:0,elapsed:0,last_fail:''});
+      else MIC.s.st.running='film';
+      if(r.msg)MIC.toast(r.msg);
+      askList(true);
+      MIC.render();
+    }).catch(e=>MIC.toast('重出失败：'+(e&&e.message||e)));
+  },
+  redoFailed(){
+    const fs=MIC.s.st.film||{};
+    if(fs.state==='running'||fs.state==='planning')return;
+    const miss=+fs.missing||0;
+    if(!miss){MIC.toast('没有没出成的段');return;}
+    const deep=fs.mode==='chain';
+    if(!confirm('重出 '+miss+' 段没出成的？'+
+       (deep?'接帧会从最早失败那段往后一起重接。':'只跑这几段，别的段和浏览器不动。')))return;
+    MIC.api.filmRedoFailed().then(r=>{
       if(!padOk(r)){toastErr(r,'没能重出');return;}
       if(String(r.exec||fs.exec)==='cloud')
         MIC.s.st.cloud=Object.assign({},MIC.s.st.cloud||{},{run:'film',task:'成片',
