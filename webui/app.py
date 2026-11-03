@@ -264,7 +264,11 @@ DEFAULT_CFG = {
     "cloud": {"port": 9333, "base": "https://www.runninghub.cn", "login_url": "",
               "browser": "", "domains": ["runninghub.cn"],
               "keep": True, "keep_min": 30, "concurrency": 1,
-              "workflow": "", "wf_host": "", "exec_tag": "Plus", "poll_sec": 5, "gen_timeout": 1800},
+              "workflow": "", "wf_host": "", "exec_tag": "Plus", "poll_sec": 5,
+              # gen_timeout＝这一段最多等多久；fail_confirm_sec＝平台把这段标成失败后
+              # 再连续看这么久才收手（页面重渲染会瞬时报错，一次读到就判死会白重交一遍）；
+              # wf_settle_sec＝灌完本地工作流后画布读数要稳这么久，防「0 个节点」那次误判
+              "gen_timeout": 1800, "fail_confirm_sec": 15, "wf_settle_sec": 6},
     # 文本 API（OpenAI 兼容）：拆分镜与提示词润色都走它。key 只存本机 config.json，
     # 从不回给界面、不写日志；运行时也可用 DEEPSEEK_API_KEY / QIC_AI_KEY 顶掉这里。
     "ai": {"base": "https://api.deepseek.com", "model": "deepseek-chat", "key": "",

@@ -471,7 +471,65 @@ def test_load_local_wf():
     except cg.CloudError as e:
         msg = str(e)
     assert "setGraph" in msg, msg
-    print("  ✓ 本地工作流：结构/连线/API 格式先拦，异步 setGraph 也当场停")
+
+    # 真机踩过的那次：restart 之后灌图，前端回执 ok 但画布一条节点都没认到，
+    # 旧写法一次读数就判死 → 整批被按「工作流加载不上」暂停。
+    # 平台自己那张图是异步挂上来的，后到时会把本地这份盖掉：给它几秒，稳住了才算灌上。
+    g3 = cg.CloudH3(ROOT, {}, None, None)
+    g3.wf_settle = 2
+    seq = {"load": 0, "state": 0}
+
+    def js3(tab, script, *a):
+        if script is cg._JS_FRONTEND_READY:
+            return True
+        if script is cg._JS_LOAD_WF:
+            seq["load"] += 1
+            return json.dumps({"ok": 1})
+        if script is cg._JS_WF_STATE:
+            seq["state"] += 1
+            if seq["state"] < 3:      # 头两次：图挂上了但节点还没换过来
+                return json.dumps({"state": "ok", "ids": [], "nodes": 0})
+            return json.dumps({"state": "ok", "ids": ["1", "2"],
+                               "main": 1, "out": 2})
+        return "f"
+
+    g3.js = js3
+    assert g3.load_local_wf(Tab(), "f", good, lambda: False) == {
+        "main": 1, "out": 2, "nodes": 2}
+    assert seq["load"] == 1, seq          # 稳住了就别再灌第二遍
+    # 默认值：配置文件没写就是 6 秒，写了按写的
+    assert cg.CloudH3(ROOT, {}, None, None).wf_settle == 6
+    assert cg.CloudH3(ROOT, {"wf_settle_sec": 2}, None, None).wf_settle == 2
+
+    # 一直认不到：三次（原地再灌一次 + 整页重开一次）都不行才停，错误照说
+    g4 = cg.CloudH3(ROOT, {}, None, None)
+    g4.wf_settle = 0
+    hits = {"load": 0, "refresh": 0}
+
+    class Tab2:
+        def refresh(self):
+            hits["refresh"] += 1
+
+    def js4(tab, script, *a):
+        if script is cg._JS_FRONTEND_READY:
+            return True
+        if script is cg._JS_LOAD_WF:
+            hits["load"] += 1
+            return json.dumps({"ok": 1})
+        if script is cg._JS_WF_STATE:
+            return json.dumps({"state": "ok", "ids": [], "nodes": 0})
+        return "f"
+
+    g4.js = js4
+    msg4 = ""
+    try:
+        g4.load_local_wf(Tab2(), "f", good, lambda: False)
+    except cg.CloudError as e:
+        msg4 = str(e)
+    assert "只认到 0 个" in msg4, msg4
+    assert hits["load"] == 3 and hits["refresh"] == 1, hits
+    print("  ✓ 本地工作流：结构/连线/API 格式先拦，异步 setGraph 也当场停，"
+          "画布 0 节点先等它稳")
 
 
 def test_write_selfcheck():
@@ -657,6 +715,22 @@ def test_platform_state():
     assert "输出节点还没刷新" in g(okd).platform_state(None, "f", 300, 1), "跑完没刷新没认出来"
     run = '{"http":{"run":0,"pend":0,"keys":["q"]},"h":{"n":2,"last":{"id":"b","s":"running"}}}'
     assert "平台已经收下这段" in g(run).platform_state(None, "f", 300, 1), "收下没跑完没认出来"
+    # 提交前那条基线没读到（None）＝不知道历史本来几条：一律不许说「多出来一条」，
+    # 否则列表一渲染，上一段的旧记录就被读成「我们这段跑完了」，催 90 秒收尾报失败
+    one = ('{"http":{"run":0,"pend":0,"keys":["q"]},'
+           '"h":{"n":1,"last":{"id":"b","s":"success","c":true}}}')
+    s = g(one).platform_state(None, "f", 300, None)
+    assert "跑完" not in s and "查不到" in s, "没基线也把一条旧历史当成了这段：%r" % s
+    err1 = ('{"http":{"run":0,"pend":0,"keys":["q"]},'
+            '"h":{"n":1,"last":{"id":"b","s":"error"}}}')
+    assert "判了失败" not in g(err1).platform_state(None, "f", 300, None), "没基线就把旧记录判成这段的失败"
+    assert "判了失败" not in g(err1).platform_state(None, "f", 300, 1), "没多出一条就别判失败"
+    # history_count 读到 0 条也算没基线（页面那栏还没挂起来时量到的同样是 0）
+    x = cg.CloudH3(TMP, {}, None, None)
+    x.js = lambda tab, script, *a: '{"h":{"n":0}}'
+    assert x.history_count(None, "f") is None, "空历史该当没基线，不许拿来比新旧"
+    x.js = lambda tab, script, *a: '{"h":{"n":3}}'
+    assert x.history_count(None, "f") == 3
 
     # 任务列表那一栏：平台自己写着「生成中 04:02」「任务失败」，比队列更直接。
     # 只认提交后新冒出来的 taskid（提交前那份 known 里的旧账一律不算）。
@@ -685,6 +759,37 @@ def test_platform_state():
     live3 = '{"cur":[{"id":"111","s":"生成中 00:12","d":"生成中 00:12 取消"}]}'
     s = gt(live3).platform_state(None, "f", 30, 0, known=set(), task_id="111")
     assert "平台判失败" not in s and "生成中" in s, s
+    # 状态元素里同时扫得到在跑和失败词：按最先出现的那个定性，在跑压过失败
+    mix = '{"cur":[{"id":"111","s":"生成中 00:12 排队中 前面有任务失败","d":""}]}'
+    s = gt(mix).platform_state(None, "f", 30, 0, known=set(), task_id="111")
+    assert "平台判失败" not in s and "生成中 00:12" in s, s
+    # 状态字读空、只有整条文本可读：从「运行模式/取消」这些噪声里认出「生成中」
+    onlyd = '{"cur":[{"id":"111","s":"","d":"taskid 111 生成中 00:30 运行模式 Lite 取消"}]}'
+    s = gt(onlyd).platform_state(None, "f", 30, 0, known=set(), task_id="111")
+    assert "平台判失败" not in s and "生成中" in s, s
+    # 「未完成」不算跑完：别拿它去催那 90 秒的收尾
+    nod = '{"cur":[{"id":"111","s":"生成中 未完成","d":""}]}'
+    s = gt(nod).platform_state(None, "f", 30, 0, known=set(), task_id="111")
+    assert "跑完" not in s and "生成中" in s, s
+    # 真机抓到的那一次：状态字写着在跑，卡片尾巴上挂着一颗「安审失败 重试」的标签
+    tag = ('{"cur":[{"id":"111","s":"生成中 07:50",'
+           '"d":"PlusH3工作流删除2026-11-03 12:32:07taskid: 111运行模式: Plus运行时长: 07:50安审失败 重试"}]}')
+    s = gt(tag).platform_state(None, "f", 30, 0, known=set(), task_id="111")
+    assert "平台判失败" not in s and "生成中 07:50" in s, "在跑的状态被卡片标签判死了：%r" % s
+    # 只有整条文本可读、里面最先出现的是「安审失败」：那才是平台自己给这段的定性
+    tag2 = tag.replace('"s":"生成中 07:50"', '"s":""')
+    s = gt(tag2).platform_state(None, "f", 30, 0, known=set(), task_id="111")
+    assert "平台判失败" in s and "taskid 111" in s, s
+    assert cg._task_word("已完成 05:12") == "已完成", cg._task_word("已完成 05:12")
+    assert cg._task_kind(cg._task_word("任务失败 错误")) == "fail", "两个失败词取最先那个"
+    assert cg._task_kind(cg._task_word("未完成")) == "", "「未完成」既不算完成也不算失败"
+    assert cg._task_kind(cg._task_word("取消")) == "", "光一颗「取消」按钮不算已取消"
+    # 认领到的 taskid 这一轮没在列表里（页面正在重渲染）：说「读不到」，不许拿别的行顶账
+    s = gt(live).platform_state(None, "f", 30, 0, known=set(), task_id="999")
+    assert s == "", "taskid 没读到还去差集里抓了一条：%r" % s
+    # 基线没读到（None）＝新旧差集不可信：列表里那条旧失败不能算到我们这段头上
+    s = gt(dead).platform_state(None, "f", 30, 0, known=None, task_id="")
+    assert "平台判失败" not in s, "基线不可信还拿差集判失败：%r" % s
     # 任务列表去重、按 taskid 从新到旧
     x = cg.CloudH3(TMP, {}, None, None)
     x.js = lambda tab, script, *a: (
@@ -692,36 +797,49 @@ def test_platform_state():
         '"his":[{"id":"222","s":"任务失败"},{"id":"111","s":"生成中"}]}')
     ids = [i["id"] for i in (x.task_entries(None).get("items") or [])]
     assert ids == ["222", "111"], ids
-    # 基线读不到＝None（不许拿新旧差集判失败）；读到了但确实为空＝空集合
+    # 基线读不到＝None；读到但一条都没有也算 None（右侧那栏还没挂起来时量到的同样是空，
+    # 分不清「真没任务」和「还没渲染」——这时候拿差集判失败，认到的多半是上一段的旧账）
     x = cg.CloudH3(TMP, {}, None, None)
     x.js = lambda tab, script, *a: ""
     assert x.known_task_ids(None) is None
     x.js = lambda tab, script, *a: '{"cur":[],"his":[]}'
-    assert x.known_task_ids(None) == set()
-    # 提交后认领：基线为空时只认「在跑」的新条目，不拿旧失败顶账
-    x = cg.CloudH3(TMP, {}, None, None)
-    seq = [{"items": []},
-           {"items": [{"id": "900000000000000001", "s": "排队中"}]}]
-    state = {"n": 0}
+    assert x.known_task_ids(None) is None
 
-    def te(tab):
-        out = seq[min(state["n"], len(seq) - 1)]
-        state["n"] += 1
-        return out
+    def cap(rows, known):
+        """按给定的一串列表快照跑一遍认领（sleep 免掉，只看认领规则）。"""
+        x = cg.CloudH3(TMP, {}, None, None)
+        seq = [{"items": r} for r in rows]
+        n = {"i": 0}
 
-    x.task_entries = te
-    x.log = lambda *a, **k: None
-    old_sleep = cg.time.sleep
-    cg.time.sleep = lambda s: None
-    try:
-        tid = x.capture_task_id(None, set(), limit=5)
-    finally:
-        cg.time.sleep = old_sleep
-    assert tid == "900000000000000001", tid
+        def te(tab):
+            out = seq[min(n["i"], len(seq) - 1)]
+            n["i"] += 1
+            return out
+
+        x.task_entries = te
+        x.log = lambda *a, **k: None
+        old_sleep = cg.time.sleep
+        cg.time.sleep = lambda s: None
+        try:
+            return x.capture_task_id(None, known, limit=0.2)
+        finally:
+            cg.time.sleep = old_sleep
+    # 提交后认领：在跑/排队的新条目认下来
+    assert cap([[], [{"id": "900000000000000001", "s": "排队中"}]], None) \
+        == "900000000000000001", "排队中的新任务没认领"
+    # 基线不可信时只认「在跑」的那条：列表里那条旧失败不是我们这段，别认领它
+    assert cap([[{"id": "800000000000000002", "s": "任务失败"}]], None) == "", \
+        "把旧失败记录认领成了本段"
+    # 基线可信（列表上已有别的号）：新冒出来那条哪怕一上来就读成失败，也要先见过它跑起来才认领
+    assert cap([[{"id": "900000000000000003", "s": "任务失败"}]],
+               {"1000000000000000001"}) == "", "只读到失败的一条不该认领"
+    assert cap([[{"id": "900000000000000004", "s": "生成中"}]],
+               {"1000000000000000001"}) == "900000000000000004", "在跑的那条该认下来"
     # 读到失败时 _wait_result 当场收手，不干等到超时
     x = gt(dead)
     x.poll_min = 0.01
     x.timeout = 5
+    x.fail_confirm = 0
     t0 = time.time()
     try:
         x._wait_result(None, "f", "out", "base", None, None, 0, {"222"})
@@ -729,6 +847,21 @@ def test_platform_state():
     except cg.CloudError as e:
         assert "平台判失败" in str(e), str(e)
     assert time.time() - t0 < 3, "失败时还在干等"
+    # 确认窗口没走完就不收手：一次读数（页面重渲染那半秒）不该重交一段还在跑的片
+    x = gt(dead)
+    x.poll_min = 0.01
+    x.timeout = 1
+    x.fail_confirm = 30
+    msgs = []
+    try:
+        x._wait_result(None, "f", "out", "base", lambda m: msgs.append(m), None, 0, {"222"})
+        raise AssertionError("超时该抛错")
+    except cg.CloudError as e:
+        assert "没出新片" in str(e) and "平台判失败" in str(e), str(e)
+    assert any("先等" in m and "确认" in m for m in msgs), msgs
+    # 窗口从配置读：cloud.fail_confirm_sec（界面不摊开，留一个能调的口子）
+    assert cg.CloudH3(TMP, {"fail_confirm_sec": 40}, None, None).fail_confirm == 40
+    assert cg.CloudH3(TMP, {}, None, None).fail_confirm == 15
     print("  ✓ 云端状态：在跑/排队/查不到/报错/跑完没刷新五种说实话，读不到就留空不编")
 
     # 超时那句也要带「看见了什么」：光说等超时，人不知道该怪排队还是怪取回

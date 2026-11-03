@@ -497,11 +497,23 @@ def browser_gone(e):
 
 # 任务列表里的状态词。只认「已取消/已停止」这类完成态，不认光秃秃的「取消/停止」——
 # 任务项里常常挂着一颗「取消」按钮，把按钮字当成状态会在任务还在跑时误判失败。
-_TASK_FAIL_KW = ("失败", "错误", "异常", "已取消", "取消中", "已停止", "已中止",
-                 "中断", "failed", "error", "cancel")
+# 一条任务里同时出现好几种词时（「生成中 …取消」「排队中 …上次失败记录」），
+# 按「最先出现的那个词」定性，运行中的词压过失败词：人在任务列表里看到「运行中」
+# 就判失败，会把还在跑的那段白白重启重交一遍。
 _TASK_RUN_KW = ("生成中", "运行中", "采样中", "排队", "队列", "等待",
-                "running", "queued", "pending")
+                "running", "queued", "pending", "wait")
+_TASK_FAIL_KW = ("失败", "错误", "异常", "已取消", "取消中", "已停止", "已中止",
+                 "中断", "failed", "error")
 _TASK_DONE_KW = ("已完成", "完成", "成功", "completed", "success")
+# 「未完成」「尚未成功」这类否定说法不算完成也不算失败：前面带这些字就当没看见
+_TASK_NEG = "未不没无非"
+
+
+_TASK_WORDS = (
+    tuple((w, "run") for w in _TASK_RUN_KW)
+    + tuple((w, "fail") for w in _TASK_FAIL_KW)
+    + tuple((w, "done") for w in _TASK_DONE_KW)
+)
 
 
 def _tid_num(v):
@@ -511,19 +523,49 @@ def _tid_num(v):
         return 0
 
 
-def _task_failed(text):
+def _task_word(text):
+    """从一串状态文本里挑出「这段任务自己的状态」：最先出现的那个状态词。
+
+    整串里到处扫失败词会误伤（按钮字、旧记录、节点名都带「错误/取消」），
+    所以只取第一个命中的词；同一位置命中多个就取最长的那个（「已完成」优先于「完成」）。
+    读不出状态词回空串——空串意味着「不知道」，不能拿去判失败。
+    """
     s = str(text or "").lower()
-    return bool(s) and any(k in s for k in _TASK_FAIL_KW)
+    hit = None
+    for kw, _kind in _TASK_WORDS:
+        k = kw.lower()
+        i = s.find(k)
+        while i >= 0 and (i > 0 and s[i - 1] in _TASK_NEG):   # 「未完成」「没有错误」不算
+            i = s.find(k, i + 1)
+        if i < 0:
+            continue
+        if hit is None or (i, -len(k)) < hit[:2]:
+            hit = (i, -len(k), kw)
+    return "" if hit is None else hit[2]
+
+
+def _task_kind(word):
+    """状态词属于哪一类："" / "run"（还在跑或排着）/ "fail" / "done"。"""
+    w = str(word or "")
+    if w in _TASK_RUN_KW:
+        return "run"
+    if w in _TASK_FAIL_KW:
+        return "fail"
+    if w in _TASK_DONE_KW:
+        return "done"
+    return ""
+
+
+def _task_failed(text):
+    return _task_kind(_task_word(text)) == "fail"
 
 
 def _task_running(text):
-    s = str(text or "").lower()
-    return bool(s) and any(k in s for k in _TASK_RUN_KW)
+    return _task_kind(_task_word(text)) == "run"
 
 
 def _task_done(text):
-    s = str(text or "").lower()
-    return bool(s) and "未完成" not in s and any(k in s for k in _TASK_DONE_KW)
+    return _task_kind(_task_word(text)) == "done"
 
 
 def pick_size(w, h):
@@ -560,6 +602,11 @@ class CloudH3:
         self.log = log or (lambda *_: None)
         self.poll_min = max(2, int(self.cfg.get("poll_sec") or 5))
         self.timeout = max(60, int(self.cfg.get("gen_timeout") or 1800))
+        # 平台标了失败要连着看这么久才收手：页面重渲染、DOM 只挂上半截都能瞬时报错，
+        # 一次读到就判死会把还在跑的那段重启重交一遍。
+        self.fail_confirm = max(0, int(self.cfg.get("fail_confirm_sec") or 15))
+        # 灌完图后画布的读数还要稳这么久：平台自己那张图后到会把本地这份盖掉
+        self.wf_settle = max(0, min(60, int(self.cfg.get("wf_settle_sec") or 6)))
         self.tag = str(self.cfg.get("exec_tag") or "Plus")
         self.has_editor = False
         self.wf_title = ""
@@ -649,8 +696,13 @@ class CloudH3:
             time.sleep(0.5)
         raise CloudError("云端编辑器还没挂好：等不到画布，重开这段再试")
 
-    def _load_once(self, tab, fid, txt, stop, meta, limit=25):
-        """灌一次并等结果（同步/异步都接）：回 (ids, 错误串)。"""
+    def _load_once(self, tab, fid, txt, stop, meta, limit=25, settle=6):
+        """灌一次并等结果（同步/异步都接）：回 (ids, 错误串)。
+
+        settle：loadGraphData 已经回执成功、画布上的节点却还差一批时再等这么久的
+        读数。平台自己那张图是异步挂上来的，它后到就会把我们灌的那份盖掉——
+        一次读数就判死，整批会被按「工作流加载不上」暂停（真机踩过）。
+        """
         from .store import brief_error
         try:
             d = json.loads(self.js(tab, _JS_LOAD_WF, fid, txt) or "{}")
@@ -661,6 +713,7 @@ class CloudH3:
         if d.get("err"):
             return None, str(d["err"])
         t0 = time.time()
+        short_at, short_msg = None, ""
         while time.time() - t0 < limit:
             if stop and stop():
                 raise CloudError("已停止")
@@ -677,14 +730,19 @@ class CloudH3:
                 got = set(str(x) for x in (st.get("ids") or []))
                 missing = meta["ids"] - got
                 if missing:
-                    return None, ("文件里 %d 个节点，画布只认到 %d 个（缺 %d）"
-                                  % (len(meta["ids"]), len(got), len(missing)))
-                if not st.get("main") or not st.get("out"):
+                    short_msg = ("文件里 %d 个节点，画布只认到 %d 个（缺 %d）"
+                                 % (len(meta["ids"]), len(got), len(missing)))
+                    if short_at is None:
+                        short_at = time.time()
+                    elif time.time() - short_at >= settle:
+                        return None, short_msg
+                elif not st.get("main") or not st.get("out"):
                     return None, "图上没有 H3 主节点/输出节点"
-                return {"main": st.get("main"), "out": st.get("out"),
-                        "nodes": len(got)}, ""
+                else:
+                    return {"main": st.get("main"), "out": st.get("out"),
+                            "nodes": len(got)}, ""
             time.sleep(0.5)
-        return None, "等 %d 秒也没把工作流挂到画布上" % limit
+        return None, short_msg or "等 %d 秒也没把工作流挂到画布上" % limit
 
     def load_local_wf(self, tab, fid, path, stop, limit=30):
         """把本地 JSON 灌进页面，再按类型重新认主节点/输出节点（那张图的 id 未必是 389）。"""
@@ -696,19 +754,24 @@ class CloudH3:
         except Exception as e:
             raise CloudError("本地工作流文件读不了：%s" % brief_error(e, 80))
         last = ""
-        for attempt in (0, 1):
+        for attempt in (0, 1, 2):
             self._wait_frontend(tab, fid, stop)
-            ids, err = self._load_once(tab, fid, txt, stop, meta)
+            ids, err = self._load_once(tab, fid, txt, stop, meta, settle=self.wf_settle)
             if ids:
                 self.wf_title = "本地 · %s" % os.path.basename(path)
                 self.log("· 灌入本地工作流「%s」：节点 %s 个 · 主节点 %s · 输出节点 %s"
                          % (os.path.basename(path), ids["nodes"], ids["main"], ids["out"]))
                 return ids
             last = err
-            # 前端偶发处在半初始化/上一张图还没清完：整页重开一次再灌，
-            # 第二次还不行就停——不拿画布上残留的旧图继续提交。
+            # 前端偶发处在半初始化/上一张图还没清完：先在这张页面原地再灌一次
+            # （多数是平台自己那张图后到、把我们的盖掉，重灌一次就压住它），
+            # 还不行才整页重开；最后一次仍失败就停——不拿画布上残留的旧图继续提交。
             if attempt == 0:
-                self.log("· 工作流没灌上（%s）：重开页面再试一次" % str(err)[:60])
+                self.log("· 工作流没灌上（%s）：这张页面再灌一次" % str(err)[:60])
+                time.sleep(1.5)
+                continue
+            if attempt == 1:
+                self.log("· 还是灌不上（%s）：重开页面再试一次" % str(err)[:60])
                 try:
                     tab.refresh()
                 except Exception as e:
@@ -1116,13 +1179,19 @@ class CloudH3:
 
     def history_count(self, tab, fid):
         """平台上现在有几条历史——提交前后各读一次，多出来的那条才是我们这段。
-        读不到回 0（宁可说「查不到」，也不把旧的一条当成新的）。"""
+
+        读不到回 None＝基线不可信：之后不许拿「比基线多了一条」判跑完或判失败。
+        「读到 0 条」同样算不可信——页面那栏还没挂起来时量到的也是 0，
+        跟这个号真的一条历史都没有分不开；拿这种 0 当基线，等列表一渲染出来就
+        会把上一段的旧记录读成「我们这段跑完了」，然后催 90 秒收尾、报生成失败。
+        """
         try:
             raw = self.js(tab, _JS_PROGRESS, fid)
             d = json.loads(raw) if raw else {}
-            return int((d.get("h") or {}).get("n") or 0)
+            n = int((d.get("h") or {}).get("n") or 0)
+            return n or None
         except Exception:
-            return 0
+            return None
 
     def task_entries(self, tab):
         """平台右侧任务列表：去重后按 taskid 从新到旧。读不到回空（不猜）。
@@ -1154,13 +1223,16 @@ class CloudH3:
     def known_task_ids(self, tab):
         """提交前已经在那张列表上的 taskid：之后多出来的那条才是我们这段。
 
-        读不到列表时回 None（不是空集合）：空集合＝确实一条都没有，可以用
-        「新出现」来认领；None＝基线不可信，之后不许拿新旧差集判失败。
+        回 None ＝ 基线不可信，之后不许拿新旧差集判失败、也不许拿「新出现」认领。
+        除了读不到，「读到但一条都没有」也算不可信：右侧那栏还没挂起来时
+        量到的同样是空，跟「平台上真的一条任务都没有」分不开——
+        这时候拿差集去判失败，认到的多半是上一段那条旧记录。
         """
         d = self.task_entries(tab)
         if not d:
             return None
-        return {str(x.get("id")) for x in (d.get("items") or []) if x.get("id")}
+        ids = {str(x.get("id")) for x in (d.get("items") or []) if x.get("id")}
+        return ids or None
 
     def capture_task_id(self, tab, known, stop=None, limit=40):
         """提交后从任务列表认领我们这一段的 taskid。
@@ -1168,7 +1240,10 @@ class CloudH3:
         每只浏览器同一时刻只有我们在提交，所以「提交后新出现的那条」就是，
         取 taskid 最大的那条。提交前基线没读到（known 为空）时只认「在跑/排队」
         的新条目，免得把列表里旧的失败记录当成这一段。
+        只读着「失败」的条目一律不认领：认领错了，之后每次轮询都盯着那条旧账，
+        还在跑的这一段会被一路判成失败。真失败了还有差集那条路能认出来。
         """
+        trusted = known is not None        # None＝基线没读到或一条都没有，不可信
         known = {str(x) for x in (known or ())}
         t0 = time.time()
         hit = ""
@@ -1178,8 +1253,10 @@ class CloudH3:
             items = self.task_entries(tab).get("items") or []
             new = [x for x in items if x.get("id") and str(x["id"]) not in known]
             if new:
-                running = [x for x in new if _task_running(x.get("s"))]
-                cand = running or (new if known else [])
+                txt = lambda x: x.get("s") or x.get("d")
+                running = [x for x in new if _task_running(txt(x))]
+                fresh = [x for x in new if not _task_failed(txt(x))]
+                cand = running or (fresh if trusted else [])
                 if cand:
                     best = max(cand, key=lambda x: _tid_num(x.get("id")))
                     hit = str(best.get("id") or "")
@@ -1191,28 +1268,31 @@ class CloudH3:
             self.log("· 任务列表认领 taskid %s" % hit)
         return hit
 
-    def platform_state(self, tab, fid, waited, hist0=0, known=None, task_id=""):
+    def platform_state(self, tab, fid, waited, hist0=None, known=None, task_id=""):
         """平台上这一段到底到哪一步了——一句话，读不到就回空串（绝不编一个）。
 
         时间波动很大（实测同参数一段 353 秒出片、一段排到二十分钟没动），
         只报「已等 N 秒」人分不清排队/在跑/已失败，所以去问平台自己：
         右侧任务列表（taskid + 状态 + 计时，最准）、页面内存里的队列、GET /history 的条数。
-        hist0 = 提交那一刻的历史条数；known = 提交前列表上已有的 taskid；
+        hist0 = 提交那一刻的历史条数（None＝没读到，不可信）；
+        known = 提交前列表上已有的 taskid（同上，None＝不可信）；
         task_id = 提交后认领到的本段 taskid——三个都只用来认出「我们这一段」。
         """
         # 先看任务列表：它直接写着「生成中 04:02」「任务失败」，比队列更有信息量。
         # 认领到 task_id 就只按那一条判；没认领到才用 known 差集，绝不拿旧失败顶账。
+        # known 是 None ＝ 提交前那张列表根本没读到，差集不可信，一律不拿来判失败
+        # （否则旧那条失败记录会被当成我们这段，还在跑的号白白重交一遍）。
         tasks = self.task_entries(tab) if (known is not None or task_id) else {}
         items = list(tasks.get("items") or [])
-        known = {str(x) for x in (known or ())}
+        base = {str(x) for x in (known or ())}
         my = None
         if task_id:
             my = next((x for x in items
                        if str(x.get("id")) == str(task_id)), None)
-        if my is None and known is not None:
+        if my is None and known is not None and not task_id:
             new = [x for x in items
-                   if x.get("id") and str(x["id"]) not in known]
-            running = [x for x in new if _task_running(x.get("s"))]
+                   if x.get("id") and str(x["id"]) not in base]
+            running = [x for x in new if _task_running(x.get("s") or x.get("d"))]
             if running:
                 my = running[0]
             elif len(new) == 1:
@@ -1222,17 +1302,29 @@ class CloudH3:
             det = str(my.get("d") or "").strip()
             tm = str(my.get("time") or "").strip()
             tid = str(my.get("id") or "")
-            # 状态字读不到时，只认容器里明确的「任务失败/生成失败」，
+            extra = (" · 已运行 " + tm) if (tm and tm not in s) else ""
+            # 状态元素里没字就去整条里找：列表把状态和计时写在两处时也能认出来。
+            w = _task_word(s) or _task_word(det)
+            kind = _task_kind(w)
+            if kind == "run":
+                # 列表自己写着在跑/排队 —— 这一句压过所有失败判断，宁可多等不重交
+                return "平台上这一段：" + (s or w) + extra + " · taskid " + tid
+            if kind == "done":
+                return "平台说这段跑完了，可输出节点还没刷新 · taskid " + tid
+            if kind == "fail":
+                # 把状态字顶在前面：日志里只留整条文本时，分不清是「状态＝失败」
+                # 还是卡片上挂着一颗「安审失败/重试」的标签——上一轮就为这个吵过。
+                bits = []
+                if s:
+                    bits.append("状态「%s」" % s)
+                if det and det != s:
+                    bits.append(det[:120])
+                return "平台判失败：" + (" · ".join(bits) or w) + " · taskid " + tid
+            # 一个状态词都没读到：只认容器里明确的「任务失败/生成失败」，
             # 不拿一个孤零零的「错误」去猜（旁边可能有「错误」按钮/标签）。
-            if _task_failed(s) or (not s and re.search(
-                    r"(任务失败|生成失败|执行失败|运行失败|出错了)", det)):
-                return ("平台判失败：" + (det or s
-                        or "任务列表把它标成失败，点开那一条看节点报错")
-                        + " · taskid " + tid)
+            if re.search(r"(任务失败|生成失败|执行失败|运行失败|出错了)", det):
+                return "平台判失败：" + det + " · taskid " + tid
             if s:
-                extra = (" · 已运行 " + tm) if (tm and tm not in s) else ""
-                if _task_done(s):
-                    return ("平台说这段跑完了，可输出节点还没刷新 · taskid " + tid)
                 return "平台上这一段：" + s + extra + " · taskid " + tid
         try:
             raw = self.js(tab, _JS_PROGRESS, fid)
@@ -1248,7 +1340,7 @@ class CloudH3:
         btn = " · 按钮「%s」" % d["btn"] if d.get("btn") else ""
         h = d.get("h") or {}
         last = h.get("last") or {}
-        new = (h.get("n") or 0) > int(hist0 or 0)     # 提交后又落了一条＝这条是我们那段
+        new = hist0 is not None and (h.get("n") or 0) > int(hist0 or 0)   # 多出一条＝这条是我们那段
         # 谁真读到用谁，且**内存那份优先**：它是页面自己按 WebSocket 推送维护的，
         # 界面那颗按钮变不变字都看它——和人在平台上看到的口径一致。
         # GET /queue 只当备份（真机两种都见过：新开的页面 app.queue 是 null，
@@ -1281,12 +1373,13 @@ class CloudH3:
             return "平台上查不到这段任务" + btn + "：可能在它自己的池子里排队"
         return ""
 
-    def _wait_result(self, tab, fid, out, base_name, cb, stop, hist0=0, known=None,
+    def _wait_result(self, tab, fid, out, base_name, cb, stop, hist0=None, known=None,
                      task_id=""):
         t0 = time.time()
         seen = ""
+        note = ""
         where = ""
-        done_at = 0.0
+        done_at = fail_at = 0.0
         while time.time() - t0 < self.timeout:
             if stop and stop():
                 raise CloudError("已停止：云端那半段还在跑，下次进来能在平台上看到")
@@ -1306,9 +1399,19 @@ class CloudH3:
                 seen = ""
             where = self.platform_state(tab, fid, int(time.time() - t0),
                                         hist0, known, task_id)
-            # 平台自己把它标成失败了：再等下去也只是等超时，当场收手把原因带出去
+            # 平台自己把它标成失败了：再等下去多半也只是等超时。
+            # 但不许一次读到就收手——连着读到 fail_confirm 秒才算数，
+            # 中间只要有一次又看到「生成中/排队」，立刻清零接着等。
             if "平台判失败" in where:
-                raise CloudError(where)
+                if not fail_at:
+                    fail_at = time.time()
+                left = int(round(self.fail_confirm - (time.time() - fail_at)))
+                if left <= 0:
+                    raise CloudError(where)
+                note = "平台刚标了失败，先等 %d 秒再确认（页面刷新会瞬时报错）" % max(0, left)
+            else:
+                fail_at = 0.0
+                note = ""
             # 平台说跑完了、输出节点却一直不刷新：给 90 秒收尾，再等就是空耗
             if "跑完了" in where or "输出节点还没刷新" in where:
                 if not done_at:
@@ -1321,7 +1424,8 @@ class CloudH3:
             if cb:
                 waited = int(time.time() - t0)
                 left = int(self.timeout - waited)
-                cb(" · ".join(x for x in ("云端出片中…已等 %d 秒（剩 %d 秒超时）"
+                # 确认那句放最前：界面那行只留前 120 字，堆在尾巴上等于没说
+                cb(" · ".join(x for x in (note or "云端出片中…已等 %d 秒（剩 %d 秒超时）"
                                           % (waited, max(0, left)), where, seen) if x))
             time.sleep(self.poll_min)
         # 收尾那句得带上「我们到底看见了什么」：只说「等超时」等于没交代，
@@ -1330,13 +1434,17 @@ class CloudH3:
 
     def _timeout_err(self, where, seen):
         hint = ""
-        if "查不到" in (where or ""):
+        w = where or ""
+        if "平台判失败" in w:
+            # 失败读到但没连续够：不是替它脱罪，是别拿一次瞬时读数重交一遍还在跑的段
+            hint = "（列表一路把它标成失败，但没连续读到确认那么久：点开那一条看节点报错）"
+        elif "查不到" in w:
             # 实测这段并不等于「没提交上」：同参数的第一段 353 秒出了片，
             # 而这一路读到的队列同样是空的——平台真正的排队不在这个页面里。
             hint = "（这段排在平台自己的池子里，这个页面看不到它到哪一步）"
-        elif "排队" in (where or ""):
+        elif "排队" in w:
             hint = "（一直在平台队列里排着：前面还有别人）"
-        elif "跑完" in (where or ""):
+        elif "跑完" in w:
             hint = "（平台说跑完了，是取回来的这一步没接上）"
         raise CloudError("等到 %d 秒也没出新片：%s%s"
                          % (self.timeout, where or "没读到平台状态", hint))
