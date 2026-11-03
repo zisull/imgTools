@@ -19,6 +19,7 @@
 App 的 __init__ 不建窗口（窗口在 main() 里），所以配置载入那段直接真跑一遍；
 档位切换、生成这类要 webview 与显卡的状态机仍留给真机冒烟（scripts\\ui_cdp.py）。
 """
+import atexit
 import copy
 import json
 import os
@@ -39,6 +40,13 @@ try:
     sys.stdout.reconfigure(encoding="utf-8")   # Windows 控制台默认 GBK，✓ 和中文会炸
 except Exception:
     pass
+
+# 这两组用例真构造 App()（配置载入、导航换代就是要在 __init__ 里跑），所以光在用例里
+# 改 CFG_PATH 不够：run.log、data/history.db、回收站读的是 QIC_CONFIG，
+# 不在 import app 之前指好，一轮自测就往用户那一份里写六条「就绪」。
+_CFG_HOME = tempfile.mkdtemp(prefix="moss_cfg_")
+os.environ["QIC_CONFIG"] = os.path.join(_CFG_HOME, "config.json")
+atexit.register(shutil.rmtree, _CFG_HOME, True)
 
 from moss_mgr import ComfyError, MossManager, _is_win  # noqa: E402
 
