@@ -77,6 +77,7 @@ MIC.api={
   aiPolish:(t,k)=>call('ai_polish',t,k||'image'),
   /* 成片：拆分镜 → 逐段出片 → 合成；长活全在后台线程，进度走 poll 的 st.film */
   filmPlan:p=>call('film_plan',p),
+  filmShotAi:p=>call('film_shot_ai',p||{}),
   filmStart:p=>call('film_start',p),
   filmStop:()=>call('film_stop'),
   filmState:()=>call('film_state'),

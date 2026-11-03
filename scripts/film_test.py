@@ -51,6 +51,12 @@ class FakeAI:
                 "count": n, "shot_sec": shot, "total_sec": n * shot,
                 "requested_sec": total}
 
+    def rewrite_shot(self, story, index, count, shot, cfg, **kw):
+        prev = (kw.get("prev") or {}).get("summary") or "无"
+        nxt = (kw.get("nxt") or {}).get("summary") or "无"
+        return {"summary": "重写第 %d 镜" % (index + 1),
+                "prompt": "第 %d 镜重写｜%s｜%s" % (index + 1, prev, nxt)}
+
     def settings(self, cfg):
         return {"key": ""}
 
@@ -189,6 +195,23 @@ def main():
     r = a.film_plan({"story": "少女走进雨夜的旧书店，店主抬头。",
                      "total": 700, "shot": 15})
     ok("film_plan 超 40 段直接拒绝", not r.get("ok"), r.get("msg"))
+
+    # ---------------- 单镜重写：只换一段，前后镜当上下文 ----------------
+    r = a.film_shot_ai({"index": 1, "count": 4, "seconds": 15,
+                        "story": "少女走进雨夜的旧书店，店主抬头，她认出了他。",
+                        "summary": "旧镜", "prompt": "旧描述",
+                        "prev": {"summary": "上一镜", "prompt": "上一镜描述"},
+                        "next": {"summary": "下一镜", "prompt": "下一镜描述"}})
+    ok("film_shot_ai 只重写一段并带前后镜上下文",
+       r.get("ok") and r.get("summary") == "重写第 2 镜"
+       and "上一镜" in r.get("prompt", "") and "下一镜" in r.get("prompt", "")
+       and r.get("seconds") == 15, r.get("msg"))
+    r = a.film_shot_ai({"index": 9, "count": 4, "seconds": 15,
+                        "story": "少女走进雨夜的旧书店，店主抬头，她认出了他。"})
+    ok("film_shot_ai 段号越界夹到末段",
+       r.get("ok") and r.get("summary") == "重写第 4 镜", r.get("summary"))
+    r = a.film_shot_ai({"index": 0, "count": 1, "story": "短"})
+    ok("film_shot_ai 剧情太短直接拒绝", not r.get("ok"))
 
     # ---------------- 文本 Key：只进本地配置，接口不回明文 ----------------
     a._ai = real_ai

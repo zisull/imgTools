@@ -277,6 +277,105 @@ def plan_shots(story, total_sec, shot_sec=15, cfg=None, *, style="", ratio="9:16
             "total_sec": actual, "requested_sec": total_sec}
 
 
+# ---------------------------------------------------------------- 单镜重写
+SHOT_SYSTEM = """你是短剧分镜师。只重写其中一个镜头，其他镜头不动，只输出 JSON，不要解释。
+规则：
+1. 这一镜 {sec} 秒，承接上一镜结尾的人物位置、动作与光线，并为下一镜留出自然接口。
+2. 写一条可直接喂给视频模型的中文提示词：主体 + 动作 + 场景 + 镜头运动 + 光线 + 画面风格 + 环境声/对白语气；90~220 字。
+3. 同一角色沿用剧情里的身份锚（年龄段、发型、服装、体态），不要换人、不要新增角色。
+4. 对白用「」括起来，只写短句。
+5. 原文里的 @1 @2 这类参考图编号引用必须保留，不要在编号前后加标点。
+6. 所有角色一律成年人；不写未成年人，不写露骨性行为、血腥细节。
+7. 输出形状：{{"summary":"一句话剧情","prompt":"提示词"}}
+"""
+
+SHOT_USER = """剧情：
+{story}
+
+整体风格：{style}
+画幅：{ratio}
+
+现在重写第 {i} / {count} 镜（{sec} 秒）。
+上一镜：{prev}
+当前这一镜（可以完全重写）：{current}
+下一镜：{next}
+"""
+
+
+def _brief(row, limit=320):
+    if isinstance(row, dict):
+        s = str(row.get("summary") or "").strip()
+        p = str(row.get("prompt") or "").strip()
+        t = ("%s｜%s" % (s, p)) if s and p else (p or s)
+    else:
+        t = str(row or "").strip()
+    return t[:limit] or "无"
+
+
+def rewrite_shot(story, index, count, shot_sec=15, cfg=None, *, current="",
+                 summary="", prev=None, nxt=None, style="", ratio="9:16",
+                 log=None):
+    """重写一个镜头：保持前后承接与身份锚，只换这一段的描述。
+
+    index 是 0 起的段号；prev/nxt 是 {summary,prompt}，只作上下文，不改它们。
+    """
+    story = str(story or "").strip()
+    if len(story) < 4:
+        raise AiError("先写一段剧情")
+    try:
+        count = max(1, min(40, int(count or 1)))
+    except (TypeError, ValueError):
+        count = 1
+    try:
+        index = max(0, min(count - 1, int(index or 0)))
+    except (TypeError, ValueError):
+        index = 0
+    try:
+        shot_sec = int(shot_sec or 15)
+    except (TypeError, ValueError):
+        shot_sec = 15
+    if shot_sec not in (5, 10, 15):
+        shot_sec = 15
+    cur = "｜".join(x for x in (str(summary or "").strip(),
+                                str(current or "").strip()) if x) or "无"
+    messages = [
+        {"role": "system", "content": SHOT_SYSTEM.format(sec=shot_sec)},
+        {"role": "user", "content": SHOT_USER.format(
+            story=story[:6000], style=style or "电影感写实", ratio=ratio,
+            i=index + 1, count=count, sec=shot_sec,
+            prev=_brief(prev), current=cur[:600], next=_brief(nxt))},
+    ]
+    prompt, summ = "", ""
+    for attempt in range(2):
+        raw = chat(messages, cfg, json_mode=True,
+                   temperature=0.7 if attempt == 0 else 0.45,
+                   max_tokens=min(settings(cfg)["max_tokens"], 900))
+        try:
+            data = extract_json(raw)
+        except AiError:
+            data = None
+        if isinstance(data, dict):
+            prompt = (data.get("prompt") or data.get("description")
+                      or data.get("text") or "")
+            summ = str(data.get("summary") or data.get("title") or "").strip()
+        elif isinstance(data, list) and data and isinstance(data[0], dict):
+            prompt = data[0].get("prompt") or data[0].get("description") or ""
+            summ = str(data[0].get("summary") or "").strip()
+        else:
+            # 兼容只回一段文字的模型：当作提示词，摘要留空
+            prompt, summ = raw, ""
+        prompt = _clean_prompt(prompt)
+        if len(prompt) >= 8:
+            if log:
+                log("· 第 %d 镜重写完成：%d 字" % (index + 1, len(prompt)))
+            return {"summary": summ[:80], "prompt": prompt[:600]}
+        messages += [
+            {"role": "assistant", "content": raw},
+            {"role": "user", "content": "这一镜的提示词太短或不完整，请按规则重写，仍然只输出 JSON。"},
+        ]
+    raise AiError("模型没给出有效的镜头描述：再点一次，或先手动补几个词")
+
+
 # ---------------------------------------------------------------- 润色
 POLISH_SYSTEM = {
     "image": """你是专业 AI 生图提示词工程师。把用户的描述润色成一条可直接生图的提示词。

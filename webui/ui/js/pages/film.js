@@ -108,7 +108,7 @@ function repaint(){
 }
 
 /* ---------- 拆分镜结果（页内存状态：改完描述直接参与出片） ---------- */
-let plan=null,planning=false,firing=false;
+let plan=null,planning=false,firing=false,regenBusy=false;
 function shotSec(){const s=+(MIC.mget(MIC.s.cfg,'film.shot')||15);return s===5||s===10?s:15;}
 function inputSig(){
   const f=MIC.s.cfg.film||{};
@@ -120,6 +120,14 @@ function normPlanShot(sh){
   return {summary:String((sh&&sh.summary)||'').trim(),
           prompt:String((sh&&sh.prompt)||'').trim(),
           seconds:Number(sh&&sh.seconds)||shotSec()};
+}
+/* 整页重画前先把还没 blur 的输入收进 plan，删/重写才不会被旧值盖回去 */
+function syncRows(){
+  if(!plan)return;
+  document.querySelectorAll('#view textarea[data-shot]').forEach(el=>{
+    const i=+el.dataset.shot;
+    if(plan.shots[i])plan.shots[i].prompt=String(el.value||'').trim();
+  });
 }
 
 /* ---------- 进度时间线 ---------- */
@@ -296,7 +304,14 @@ function planHTML(){
         ${refHint(i+1)?`<div class="sref">${esc(refHint(i+1))}</div>`:''}
       </div>
       <div class="sact"><span class="mut fine">${+sh.seconds||shotSec()} 秒</span>
-        <button class="btn sm gho" onclick="MIC.film.polish(${i})">${ic('wand','s')}润色</button>
+        <div class="sbtns">
+          <button class="btn sm gho" title="按剧情和前后镜重写这一段"
+            onclick="MIC.film.regen(${i})">${ic('refresh','s')}重写</button>
+          <button class="btn sm gho" title="润色这段描述"
+            onclick="MIC.film.polish(${i})">${ic('wand','s')}润色</button>
+          <button class="btn sm gho" title="删除这一段"
+            onclick="MIC.film.drop(${i})">${ic('trash','s')}</button>
+        </div>
       </div>
     </div>`).join('');
   return `<div class="planhead">
@@ -495,8 +510,9 @@ MIC.film={
   },
   polish(i){
     if(!plan||!plan.shots[i])return;
+    const sh=plan.shots[i];
     const ta=document.querySelector(`#view textarea[data-shot="${i}"]`);
-    const t=String(ta&&ta.value||plan.shots[i].prompt||'').trim();
+    const t=String(ta&&ta.value||sh.prompt||'').trim();
     if(!t){MIC.toast('这一段还没有描述');return;}
     if(!MIC.s.st.ai_key){
       MIC.toast('先在设置页填文本 API Key');MIC.nav.goto('settings');return;
@@ -504,17 +520,61 @@ MIC.film={
     MIC.toast('润色中…');
     MIC.api.aiPolish(t,'video').then(r=>{
       if(!padOk(r)){toastErr(r,'润色失败');return;}
-      plan.shots[i].prompt=r.text;
-      if(ta)ta.value=r.text;
-      MIC.toast('第 '+(i+1)+' 段已润色');
+      if(!plan||plan.shots.indexOf(sh)<0)return;   // 等回包时这一段被删了
+      sh.prompt=r.text;
+      if(ta&&ta.isConnected)ta.value=r.text;
+      MIC.toast('第 '+(plan.shots.indexOf(sh)+1)+' 段已润色');
     }).catch(e=>MIC.toast('润色失败：'+(e&&e.message||e)));
+  },
+  /* 只重写这一段：把剧情和前后镜一起给模型，改完仍留在分镜表里 */
+  regen(i){
+    if(regenBusy||!plan||!plan.shots[i])return;
+    const patch=MIC.form.commit();
+    const f=Object.assign({},MIC.s.cfg.film||{},patch.film||{});
+    if(String(f.story||'').trim().length<4){MIC.toast('先在左边写一段剧情');return;}
+    if(!MIC.s.st.ai_key){
+      MIC.toast('先在设置页填文本 API Key');MIC.nav.goto('settings');return;
+    }
+    syncRows();
+    const sh=plan.shots[i],prev=plan.shots[i-1],next=plan.shots[i+1];
+    if(String(sh.prompt||'').trim()&&
+       !confirm('重写第 '+(i+1)+' 段？这一段现在的描述会被替换。'))return;
+    regenBusy=true;MIC.toast('AI 重写第 '+(i+1)+' 段…');
+    const ctx=x=>x?{summary:String(x.summary||''),prompt:String(x.prompt||'')}:null;
+    MIC.api.filmShotAi({
+      index:i,count:plan.shots.length,seconds:+sh.seconds||shotSec(),
+      story:String(f.story||''),style:String(f.style||''),size:String(f.size||''),
+      shot:+f.shot||shotSec(),summary:String(sh.summary||''),
+      prompt:String(sh.prompt||''),prev:ctx(prev),next:ctx(next),
+    }).then(r=>{
+      regenBusy=false;
+      if(!padOk(r)){toastErr(r,'重写失败');return;}
+      /* 写回按段对象找位置：等回包期间用户可能删了别的段，下标已经变了 */
+      const at=plan?plan.shots.indexOf(sh):-1;
+      if(at<0)return;
+      sh.prompt=String(r.prompt||sh.prompt||'');
+      if(r.summary)sh.summary=String(r.summary);
+      if(r.seconds)sh.seconds=+r.seconds;
+      MIC.render();
+      MIC.toast('第 '+(at+1)+' 段已重写');
+    }).catch(e=>{regenBusy=false;MIC.toast('重写失败：'+(e&&e.message||e));});
+  },
+  /* 删除这一段：只改当前分镜表，序号按剩下的重排；至少留一段 */
+  drop(i){
+    if(!plan||!plan.shots[i])return;
+    if(plan.shots.length<=1){MIC.toast('至少留一段，不能全删');return;}
+    syncRows();
+    const sh=plan.shots[i];
+    const name=String(sh.summary||sh.prompt||'').slice(0,16)||('第 '+(i+1)+' 段');
+    if(!confirm('删除「'+name+'」？后面的分镜会依次前移。'))return;
+    plan.shots.splice(i,1);
+    if(plan.shot_sec)plan.total_sec=plan.shots.length*plan.shot_sec;
+    MIC.render();
+    MIC.toast('已删除，还剩 '+plan.shots.length+' 段');
   },
   shots(){
     if(!plan)return [];
-    document.querySelectorAll('#view textarea[data-shot]').forEach(el=>{
-      const i=+el.dataset.shot;
-      if(plan.shots[i])plan.shots[i].prompt=String(el.value||'').trim();
-    });
+    syncRows();
     return plan.shots.map((sh,i)=>({i:i+1,summary:sh.summary||'',
       prompt:sh.prompt||'',seconds:+sh.seconds||shotSec()}));
   },

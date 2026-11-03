@@ -2834,6 +2834,34 @@ class App(WindowCtl):
                 "count": r["count"], "shot_sec": r["shot_sec"],
                 "total_sec": r["total_sec"]}
 
+    def film_shot_ai(self, payload=None):
+        """只重写分镜表里的一段：剧情与前后镜一起交给模型，别的段不碰。"""
+        p = dict(payload or {})
+        f = self._film_cfg(p)
+        story = str(f.get("story") or "").strip()
+        if len(story) < 4:
+            return {"ok": False, "msg": "先在左边写一段剧情"}
+        count = _to_int(p.get("count"), 1, 1, 40)
+        index = _to_int(p.get("index"), 0, 0, count - 1)
+        sec = _to_int(p.get("seconds"), _to_int(f.get("shot"), 15, 5, 15), 5, 15)
+        if sec not in (5, 10, 15):
+            sec = 15
+        try:
+            r = self._ai().rewrite_shot(
+                story, index, count, sec, self.cfg,
+                current=str(p.get("prompt") or ""),
+                summary=str(p.get("summary") or ""),
+                prev=p.get("prev"), nxt=p.get("next"),
+                style=str(f.get("style") or ""),
+                ratio=self._film_ratio(str(f.get("size") or "")),
+                log=self._log)
+        except Exception as e:
+            msg = self._ai_err(e)
+            self._log("❌ 第 %d 段重写失败：%s" % (index + 1, msg))
+            return {"ok": False, "msg": msg}
+        return {"ok": True, "summary": r["summary"],
+                "prompt": r["prompt"], "seconds": sec}
+
     def film_start(self, payload=None):
         from filmkit import project as prj
         p = dict(payload or {})

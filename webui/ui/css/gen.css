@@ -241,6 +241,7 @@
 .ssum{font-size:12.5px;color:var(--fg2);margin-bottom:4px}
 .smain textarea{width:100%;box-sizing:border-box}
 .sact{flex:none;display:flex;flex-direction:column;align-items:flex-end;gap:6px}
+.sbtns{display:flex;gap:4px}
 .sref{margin-top:3px;font-size:11px;color:var(--fg3)}
 
 /* 画廊选图弹层（core/picker.js）：整块砖就是选中，缩略仍按需取 */
