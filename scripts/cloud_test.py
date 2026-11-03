@@ -395,6 +395,29 @@ def test_wf_src():
     assert g.wf_src() == ("remote", g.cfg["workflow"])
     assert g.wf_url() == cg.WF_URL % "123", g.wf_url()
     assert g.wf_label("remote", g.cfg["workflow"]).startswith("平台 · ")
+    # 下拉三选一：默认 / 金鱼 / 自定义。
+    # · 选默认时，旧的自定义值原样留着但不生效（切回自定义还能接着用）；
+    # · 金鱼是另一张画布，编号固定；
+    # · 选自定义但没填，要当场说清，不能悄悄回默认。
+    g.cfg = {"wf_preset": "default", "workflow": "https://www.runninghub.cn/workflow/123"}
+    assert g.wf_src() == ("remote", cg.WF_URL % cg.DEFAULT_WF), g.wf_src()
+    assert g.wf_label(*g.wf_src()) == "默认 · %s" % cg.LEGACY_WF_NAME
+    g.cfg = {"wf_preset": "goldfish"}
+    assert g.wf_src() == ("remote", cg.WF_URL % cg.GOLDFISH_WF), g.wf_src()
+    assert g.wf_label(*g.wf_src()) == "金鱼 · %s" % cg.GOLDFISH_WF_NAME
+    g.cfg = {"wf_preset": "custom", "workflow": "https://www.runninghub.cn/workflow/123"}
+    assert g.wf_src() == ("remote", g.cfg["workflow"]), g.wf_src()
+    g.cfg = {"wf_preset": "custom", "workflow": ""}
+    try:
+        g.wf_src()
+        raise AssertionError("自定义没填却没报错")
+    except cg.CloudError as e:
+        assert "还没填" in str(e), str(e)
+    # 老配置（没有 wf_preset）：有地址仍按自定义，空着才回默认
+    assert cg.wf_choice({"workflow": "123"}) == ("custom", "123")
+    assert cg.wf_choice({}) == ("default", "")
+    assert [x["code"] for x in cg.wf_choices()] == ["default", "goldfish", "custom"]
+    assert [x["id"] for x in cg.wf_choices()] == [cg.DEFAULT_WF, cg.GOLDFISH_WF, ""]
     # 默认那张顶上：填了本地文件或什么都没填时 wf_id 不能回空，否则拼不出入口页
     g.cfg = {"workflow": p}
     assert g.wf_id() == cg.DEFAULT_WF, g.wf_id()
@@ -421,7 +444,7 @@ def test_wf_src():
         assert g.host_url() == cg.HOST_WF_FALLBACK, g.host_url()
     finally:
         cg.DEFAULT_WF = keep
-    print("  ✓ 云端工作流：留空＝内置默认那张 / 平台那几种地址都提得出编号 / 手动覆盖仍优先")
+    print("  ✓ 云端工作流：下拉默认/金鱼/自定义 / 老配置有地址仍当自定义 / 平台那几种地址都提得出编号")
 
 
 def test_kj_write():

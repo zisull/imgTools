@@ -88,7 +88,7 @@ def main():
     state = store.load(row["id"]) or {}
     host = BrowserHost(ROOT, cloud, port=a.port, profile=a.profile)
     g = cg.CloudH3(ROOT, cloud, store, host, log=lambda *x: print("   ", " ".join(str(y) for y in x)))
-    wid = cg.wf_id_of(a.wf) or cg.DEFAULT_WF
+    wid = cg.wf_id_of(a.wf) or cg.GOLDFISH_WF
     url = cg.WF_URL % wid
     print("· 账号「%s」· 工作流 %s · 端口 %d" % (row["name"], wid, a.port))
     print("· 地址 %s" % url)

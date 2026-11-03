@@ -77,9 +77,9 @@ def main():
     g = cg.CloudH3(ROOT, cloud, store, host,
                    log=lambda *x: print("   ", " ".join(str(y) for y in x)))
     p = {"prompt": prompt, "seconds": a.secs, "width": w, "height": h,
-         "refs": refs, "wf": a.wf, "acct": acct}
+         "refs": refs, "wf": a.wf or cg.GOLDFISH_WF, "acct": acct}
     print("· 账号 %s · 工作流 %s · %ds · %dx%d · %d 张参考图"
-          % (acct, cg.wf_id_of(a.wf) or cg.DEFAULT_WF, a.secs, w, h, len(refs)))
+          % (acct, cg.wf_id_of(a.wf) or cg.GOLDFISH_WF, a.secs, w, h, len(refs)))
     t0 = time.time()
     code = 1
     try:

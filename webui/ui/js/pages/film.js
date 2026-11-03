@@ -46,9 +46,22 @@ function askBrief(force){
     if(changed)repaint();
   }).catch(()=>{briefing=false;});
 }
+function wfChoices(){
+  return ((brief&&brief.wf_choices)||[
+    {code:'default',name:'默认 · H3 参考生视频'},
+    {code:'goldfish',name:'金鱼 · MiniMax H3 参考生视频'},
+    {code:'custom',name:'指定地址 / 本地文件'}]);
+}
+function wfChoice(){
+  const c=(MIC.s.cfg&&MIC.s.cfg.cloud)||{};
+  const k=String(c.wf_preset||'');
+  if(k==='default'||k==='goldfish'||k==='custom')return k;
+  return String(c.workflow||(brief&&brief.wf)||'').trim()?'custom':'default';
+}
 function wfNow(){
   const c=(MIC.s.cfg&&MIC.s.cfg.cloud)||{};
-  return String(c.workflow||(brief&&brief.wf)||'').trim();
+  return wfChoice()==='custom'
+    ?String(c.workflow||(brief&&brief.wf)||'').trim():'';
 }
 const isFile=()=>/\.(json|txt)$/i.test(wfNow());
 const refsNow=()=>C.refsOf('film.refs');
@@ -250,8 +263,8 @@ function cloudProblem(){
     return (+b.failed||0)
       ? '可用的号都标成「出片失败」了：到「环境管理 → 云端账号」重新登录或换号'
       : '还没有可用的登录号：到「环境管理 → 云端账号」登录并保存';
-  if(!wfNow()&&!b.wf_default)
-    return '还差一份 H3 工作流：在下面那格填网页上跑通过的地址或本地 .json';
+  if(wfChoice()==='custom'&&!wfNow())
+    return '工作流选了「指定地址」：把地址或本地 .json 填上，或换回默认/金鱼';
   if(!refsNow().length)return '云端按参考生成：先选一张参考图（本地可纯文字起步）';
   return '';
 }
@@ -262,15 +275,20 @@ function acctSel(f){
   return C.sel('film.acct',list.map(a=>({name:a.name,code:a.id})),'自动分配（按空闲号）');
 }
 function wfRow(cloud){
-  const local=isFile(),cur=wfNow(),def=String((brief&&brief.wf_default)||'');
-  return C.field('工作流',
-    C.pathrow('cloud.workflow',local?'本地导出的工作流（.json）':
-      '网页上跑通过的 H3 工作流地址或 ID','file',true)+
-    (local?'<div data-role="wfchk" style="margin-top:4px">'+wfChkHTML()+'</div>':'')+
-    (cur?'<div class="fine mut" style="margin-top:4px">这趟用的是上面那份，不是默认那张 '+
-      '<button class="btn" onclick="MIC.film.useWfDefault()">用回默认</button></div>':''),
-    '和视频页共用同一份：粘地址，或把「导出工作流」存下的 .json 拖进来。本地文件开跑时自己借平台页面。'+
-    (cur?'':' 留空＝默认那张'+(def?'（#'+def+'）':'')+'。'));
+  const p=wfChoice(),local=isFile(),cur=wfNow();
+  const ch=wfChoices(),hit=ch.filter(o=>o.code===p)[0]||{};
+  const pick='<select class="inp" data-k="cloud.wf_preset" data-rr="1">'+
+    ch.map(o=>`<option value="${esc(o.code)}"${o.code===p?' selected':''}>${esc(o.name)}</option>`).join('')+
+    '</select>';
+  const extra=p==='custom'
+    ?'<div style="margin-top:6px">'+
+      C.pathrow('cloud.workflow',local?'本地导出的工作流（.json）':'网页上跑通过的 H3 工作流地址或 ID','file',true)+
+      (local?'<div data-role="wfchk" style="margin-top:4px">'+wfChkHTML()+'</div>':'')+'</div>'
+    :'';
+  const hint=p==='custom'
+    ?'和视频页共用同一份：填平台地址或本地 .json，本地文件开跑时自己借平台页。'
+    :(p==='goldfish'?'金鱼那张':'默认那张')+(hit.id?'（#'+hit.id+'）':'')+'，不用填地址。';
+  return C.field('工作流',pick+extra,hint);
 }
 /* 时长快捷键：只做「写一个键 + 重画」，不参与 data-k——
    和「秒」输入框绑同一个键的话，点按钮时读屏会把输入框里的旧数又写回去 */
@@ -488,7 +506,6 @@ function toastErr(r,def){MIC.toast((r&&r.msg)||def);}
 
 MIC.film={
   paint,
-  useWfDefault(){MIC.form.commitPath('cloud.workflow','');MIC.render();},
   refresh(){askList(true);},
   setDur(v){
     MIC.form.commitPath('film.total',+v||60);

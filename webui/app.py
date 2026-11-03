@@ -260,15 +260,15 @@ DEFAULT_CFG = {
             # API 不传 engine/model 时用谁：follow=跟随控制台当前激活的引擎
             "def_engine": "follow", "def_size": "1024x1024"},
     # 云端账号：一只调试浏览器 + 多份登录态快照（data/cloud/），浏览器只负责登录与保活
-    # workflow=云端出片用的那份 H3 工作流：留空＝软件自带的默认那张
-    # （cloudkit.gen.DEFAULT_WF，平台上 #2109907990638850050，真机量过：100 节点的
-    #  MiniMaxH3ReferenceToVideo 画布，参数从虚拟节点接，软件自己认接线）；
-    # 也可以粘平台地址（/workflow/、/ai-detail/、/post/ 三种都认）或「导出工作流」的本地 .json
-    # show_browser=关掉就不弹浏览器窗口（出片与保活走无头），登录那一步仍会弹出来给人输密码
+    # wf_preset=下拉选哪张：default（默认那张 FeiHou 画布）/ goldfish（金鱼 MiniMax 画布）/
+    # custom（读下面 workflow 那格：平台地址或「导出工作流」的本地 .json）
+    # 没选过且 workflow 有值＝自定义，空着＝默认那张；show_browser=关掉就不弹浏览器窗口
+    # （出片与保活走无头），登录那一步仍会弹出来给人输密码
     "cloud": {"port": 9333, "base": "https://www.runninghub.cn", "login_url": "",
               "browser": "", "domains": ["runninghub.cn"], "show_browser": True,
               "keep": True, "keep_min": 30, "concurrency": 1,
-              "workflow": "", "wf_host": "", "exec_tag": "Plus", "poll_sec": 5,
+              "wf_preset": "default", "workflow": "", "wf_host": "",
+              "exec_tag": "Plus", "poll_sec": 5,
               # gen_timeout＝这一段最多等多久；fail_confirm_sec＝平台把这段标成失败后
               # 再连续看这么久才收手（页面重渲染会瞬时报错，一次读到就判死会白重交一遍）；
               # wf_settle_sec＝灌完本地工作流后画布读数要稳这么久，防「0 个节点」那次误判
@@ -1771,7 +1771,7 @@ class App(WindowCtl):
         # 2 号起的号有自己的浏览器：单条视频也进它自己那只，别去顶 1 号的窗口
         g = self._cloud_h3_for(row["id"])
         try:
-            # 那一格空着＝用软件内置默认那张（DEFAULT_WF），不用人到网页里导出再拖进来。
+            # 工作流走下拉：默认/金鱼两张内置画布不用人填；只有「指定地址」才读那一格，
             # 本地文件先验结构：「API 格式 / 缺节点 / 连线断了 / 不是 H3 图」当场说清，
             # 不用等浏览器；宿主页到开页时自己借。
             kind, src = g.wf_src(str(v.get("cloud_wf") or ""))
@@ -3381,30 +3381,48 @@ class App(WindowCtl):
         except Exception:
             pass
         out["ready"] = bool(out["dp"] and out["accts"])
-        # 那一格空着也有得跑：软件自带一张默认工作流，界面据此决定是催用户填、
-        # 还是告诉他「留空就是这张」（编号给他，想去看一眼就能拼出地址）
+        # 工作流下拉：默认/金鱼两张内置画布，第三项才是自定义。
+        # 界面据此决定是催用户填、还是告诉他当前用哪张、编号是多少。
         try:
             from cloudkit import gen as cg
+            key, _custom = cg.wf_choice(c)
+            out["wf_preset"] = key
+            out["wf_choices"] = cg.wf_choices()
             out["wf_default"] = cg.DEFAULT_WF
+            out["wf_goldfish"] = cg.GOLDFISH_WF
         except Exception:
+            out["wf_preset"] = "default"
+            out["wf_choices"] = []
             out["wf_default"] = ""
+            out["wf_goldfish"] = ""
         return out
 
     def cloud_check_wf(self, path=""):
         """选完工作流先验结构：不拉浏览器、不占任务位，选完几秒内就能知道行不行。
 
         本地文件当场给结论；平台地址只能等开页再验，这里不假装知道。
+        空值不是「缺工作流」：按当前下拉的默认/金鱼画布回一句话。
         """
-        s = str(path or (self.cfg.get("cloud") or {}).get("workflow") or "").strip()
+        c = self.cfg.get("cloud") or {}
+        s = str(path or "").strip()
         if not s:
             try:
                 from cloudkit import gen as cg
-                return {"ok": True, "kind": "default",
-                        "msg": "没填＝用默认那张（%s #%s）"
-                               % (cg.DEFAULT_WF_NAME, cg.DEFAULT_WF)}
+                key, custom = cg.wf_choice(c)
+                if key == "custom":
+                    s = custom
+                elif key == "goldfish":
+                    return {"ok": True, "kind": "goldfish",
+                            "msg": "当前用金鱼那张（%s #%s）"
+                                   % (cg.GOLDFISH_WF_NAME, cg.GOLDFISH_WF)}
+                else:
+                    return {"ok": True, "kind": "default",
+                            "msg": "当前用默认那张（%s #%s）"
+                                   % (cg.LEGACY_WF_NAME, cg.DEFAULT_WF)}
             except Exception:
-                pass
-            return {"ok": False, "msg": "还没填工作流"}
+                return {"ok": False, "msg": "还没填工作流"}
+        if not s:
+            return {"ok": False, "kind": "custom", "msg": "选了「指定地址」，但那一格还没填"}
         if not re.search(r"\.json$|\.txt$", s, re.I):
             return {"ok": True, "kind": "remote", "msg": "平台工作流：开跑时进页面再验"}
         p = os.path.normpath(s if os.path.isabs(s) else os.path.join(ROOT, s))

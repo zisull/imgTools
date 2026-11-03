@@ -54,11 +54,24 @@ function repaint(){
   const typing=a&&/^(INPUT|TEXTAREA)$/.test(a.tagName)&&a.closest&&a.closest('#view');
   if(!typing)MIC.render();
 }
-/* 工作流只有一个真源：界面里那一格写的就是配置，档案（brief）只是它的镜像。
-   只读镜像的话，人刚粘完地址、提醒还挂着「差工作流」——那玩意儿 8 秒才重读一次。 */
+/* 工作流的真源是下拉 + 自定义那一格：默认/金鱼两张内置画布不用填地址，
+   只有选「指定地址」时 wfNow() 才有值。老配置没选过：有地址按自定义，空着按默认。 */
+function wfChoices(){
+  return ((brief&&brief.wf_choices)||[
+    {code:'default',name:'默认 · H3 参考生视频'},
+    {code:'goldfish',name:'金鱼 · MiniMax H3 参考生视频'},
+    {code:'custom',name:'指定地址 / 本地文件'}]);
+}
+function wfChoice(){
+  const c=(MIC.s.cfg&&MIC.s.cfg.cloud)||{};
+  const k=String(c.wf_preset||'');
+  if(k==='default'||k==='goldfish'||k==='custom')return k;
+  return String(c.workflow||(brief&&brief.wf)||'').trim()?'custom':'default';
+}
 function wfNow(){
   const c=(MIC.s.cfg&&MIC.s.cfg.cloud)||{};
-  return String(c.workflow||(brief&&brief.wf)||'').trim();
+  return wfChoice()==='custom'
+    ?String(c.workflow||(brief&&brief.wf)||'').trim():'';
 }
 /* 本地导出的那份（.json/.txt）没有平台工作流编号：开页时自动借一页 H3 画布，不再要人填宿主页 */
 const isFile=()=>/\.(json|txt)$/i.test(wfNow());
@@ -84,8 +97,11 @@ function askWfCheck(force){
   }).catch(e=>{wfChk={ok:false,msg:String(e&&e.message||e)};});
 }
 const refsNow=()=>C.refsOf('video.refs');
-/* 工作流那一格空着不算缺：软件自带默认那张，brief.wf_default 是后端对快照文件的实测 */
-function cloudReady(){return !!brief&&brief.ready&&(!!wfNow()||!!brief.wf_default);}
+/* 两张内置画布不用填；只有选「指定地址」时才要求那一格有值 */
+function cloudReady(){
+  if(!brief||!brief.ready)return false;
+  return wfChoice()!=='custom'||!!wfNow();
+}
 function acctName(v){
   const list=(brief&&brief.accts)||[];
   const hit=list.filter(a=>a.id===v.cloud_acct)[0]||list[0];
@@ -197,25 +213,29 @@ MIC.registerPage('video',{
   },
 });
 
-/* 云端两格：账号从档案里列（只列存过登录态的），工作流是这一路唯一必填的平台参数。
-   工作流绑在 cloud.workflow：以后视频以外还有云端活用时，它是环境那一条，不是任务那一条。
-   填本地导出的 .json 也行：托管前端能把图灌进页面；导出的文件不带平台编号，
-   开跑时软件自己借一页已知能开的 H3 画布进去（换图不换实例），不用再填宿主页。 */
+/* 云端两格：账号从档案里列（只列存过登录态的），工作流先从下拉选。
+   默认/金鱼是内置的两张 H3 画布，选「指定地址」才读 cloud.workflow：
+   粘平台地址，或填本地导出的 .json（开跑时软件自己借一页画布灌进去）。 */
 function acctSel(v){
   const list=(brief&&brief.accts)||[];
   if(!list.length)return '<span class="mut fine">还没有可用的号 · 到「环境管理 → 云端账号」登录并保存</span>';
   return C.sel('video.cloud_acct',list.map(a=>({name:a.name,code:a.id})),'默认第一个可用号');
 }
 function wfRow(){
-  const local=isFile(),cur=wfNow(),def=String((brief&&brief.wf_default)||'');
-  return C.field('工作流',
+  const p=wfChoice(),local=isFile(),cur=wfNow();
+  const ch=wfChoices(),hit=ch.filter(o=>o.code===p)[0]||{};
+  const pick='<select class="inp" data-k="cloud.wf_preset" data-rr="1">'+
+    ch.map(o=>`<option value="${esc(o.code)}"${o.code===p?' selected':''}>${esc(o.name)}</option>`).join('')+
+    '</select>';
+  const extra=p==='custom'
+    ?'<div style="margin-top:6px">'+
       C.pathrow('cloud.workflow',local?'本地导出的工作流（.json）':'网页上跑通过的 H3 工作流地址或 ID','file',true)+
-      (local?'<div data-role="wfchk" style="margin-top:4px">'+wfChkHTML()+'</div>':'')+
-      (cur?'<div class="fine mut" style="margin-top:4px">这趟用的是上面那份，不是默认那张 '+
-        '<button class="btn" onclick="MIC.video.useWfDefault()">用回默认</button></div>':''),
-    '粘贴浏览器里那份能出片的 H3yun 工作流地址，或把「导出工作流」存下来的 .json 拖进来。'+
-    (local?' 本地文件开跑时自己借平台页面，不用再填别的。':'')+
-    (cur?'':' 留空＝默认那张'+(def?'（#'+def+'）':'')+'。'));
+      (local?'<div data-role="wfchk" style="margin-top:4px">'+wfChkHTML()+'</div>':'')+'</div>'
+    :'';
+  const hint=p==='custom'
+    ?'填平台地址或本地 .json；本地文件开跑时自己借平台页。'
+    :(p==='goldfish'?'金鱼那张':'默认那张')+(hit.id?'（#'+hit.id+'）':'')+'，不用填地址。';
+  return C.field('工作流',pick+extra,hint);
 }
 function cloudHint(){
   const b=brief||{};
@@ -224,8 +244,8 @@ function cloudHint(){
     return (+b.failed||0)
       ? '可用的号都标成「出片失败」了：到「环境管理 → 云端账号」重新登录或换号'
       : '还没有可用的登录号：到「环境管理 → 云端账号」新建登录并保存';
-  if(!wfNow()&&!b.wf_default)
-    return '还差一份工作流：在上面那格粘贴网页上跑通过的地址';
+  if(wfChoice()==='custom'&&!wfNow())
+    return '工作流选了「指定地址」：把地址或本地 .json 填上，或换回默认/金鱼';
   if(!refsNow().length)return '云端还差一张参考图：这份工作流按参考生成，纯文字平台会判失败';
   return '云端还差一步';
 }
@@ -240,8 +260,6 @@ setInterval(()=>{
 
 let firing=false;
 MIC.video={
-  /* 那一格填过东西就永远轮不到默认那张：给一颗回到默认的键，值清掉即可 */
-  useWfDefault(){MIC.form.commitPath('cloud.workflow','');MIC.render();},
   start(){
     if(firing)return;
     const patch=MIC.form.commit();

@@ -963,7 +963,7 @@ PROBE = {
        plabels().some(x=>/^768P : 768 × 1344$/.test(x)), plabels().join('|'));
     await flip(ori(),'h');
     ok('首帧那一栏写清留空是文生视频',
-       /留空=文生视频/.test((k('video.first')||{}).placeholder||''), (k('video.first')||{}).placeholder);
+       !!document.querySelector('#view .refsbox')&&/留空=文生视频/.test(vtx()), '');
     /* 选自定义才出宽高两格；取整交给后端（16 的倍数），界面只负责原样送过去 */
     const cap={};const orig=MIC.api.videoGen;
     MIC.api.videoGen=p=>{cap.got=p;return Promise.resolve({ok:false,msg:'探针拦下，不真跑'});};
@@ -990,18 +990,25 @@ PROBE = {
        MIC.$('toast').textContent);
     ok('拦下这一段没污染配置（清晰度仍按选的走）', String(MIC.s.cfg.video.size)==='custom',
        String(MIC.s.cfg.video.size));
-    /* ---- 切到云端：同一页换执行地，账号/工作流跟着出来，步数与种子收走 ---- */
+    /* ---- 切到云端：同一页换执行地，工作流收成一格下拉，步数与种子收走 ---- */
     await click(segBtn('cloud'));
-    ok('云端那一档：账号与工作流两格出现，步数与种子不再摆着',
-       !!k('video.cloud_acct')&&!!k('cloud.workflow')
+    ok('云端那一档：账号与工作流下拉出现，步数与种子不再摆着',
+       !!k('video.cloud_acct')&&!!k('cloud.wf_preset')
        && !document.querySelector('#view [data-sk="video.seed"]')&&/Turbo 固定/.test(vtx())===false,
-       !!k('video.cloud_acct')+'/'+!!k('cloud.workflow'));
+       !!k('video.cloud_acct')+'/'+!!k('cloud.wf_preset'));
     ok('云端副标题报「云端 · 号名」，不再报引擎',
        /云端/.test(sub())&&/4 步/.test(sub())===false, sub());
     ok('云端把参考图那格改了名（首帧只是本地那条路的说法）',
        /参考图/.test(vtx()), '');
-    ok('工作流还没填：这一页直接说差什么，给一条去云端页的路',
-       /还差一份工作流/.test(vtx())&&btns().some(x=>/去处理/.test(x)),
+    ok('默认那张内置画布不用填地址：这一页只报缺参考图',
+       !/差登录或工作流/.test(sub())
+       && /还差一张参考图/.test((document.querySelector('#view .notebar')||{}).textContent||''),
+       sub()+' | '+((document.querySelector('#view .notebar')||{}).textContent||''));
+    /* 自定义那档才出地址框：空着要说清差什么，给一条去云端页的路 */
+    await flip(k('cloud.wf_preset'),'custom');
+    await wait(300);
+    ok('切「指定地址」：地址框出现，空着直说差工作流',
+       !!k('cloud.workflow')&&/工作流选了「指定地址」/.test(vtx())&&btns().some(x=>/去处理/.test(x)),
        (document.querySelector('#view .notebar')||{}).textContent);
     k('cloud.workflow').value='https://www.runninghub.cn/workflow/2103759530927673346';
     k('cloud.workflow').dispatchEvent(new Event('change',{bubbles:true}));
@@ -1009,11 +1016,10 @@ PROBE = {
     ok('粘好工作流：先报缺参考图（这份 H3 工作流没有纯文字模式）',
        /差参考图/.test(sub())&&/还差一张参考图/.test((document.querySelector('#view .notebar')||{}).textContent),
        sub()+' | '+((document.querySelector('#view .notebar')||{}).textContent||''));
-    k('video.first').value='C:/x/ref.png';
-    k('video.first').dispatchEvent(new Event('change',{bubbles:true}));
-    await wait(300);
+    MIC.mset(MIC.s.cfg,'video.refs',['C:/x/ref.png']);
+    MIC.mset(MIC.s.cfg,'video.first','C:/x/ref.png');
     MIC.render();
-    await wait(300);
+    await wait(400);
     ok('补上参考图：提醒收走，副标题改成「随时能跑」',
        !document.querySelector('#view .notebar')&&/随时能跑/.test(sub()), sub());
     cap.got=null;
@@ -1046,12 +1052,12 @@ PROBE = {
     k('cloud.workflow').value='C:/x/h3.json';
     k('cloud.workflow').dispatchEvent(new Event('change',{bubbles:true}));
     await wait(500);
-    ok('填本地 .json：不多要宿主页，提示里讲清开跑时自己借平台页面',
-       !k('cloud.wf_host')&&/借平台页面/.test(tips())&&!document.querySelector('#view .notebar'), '');
+    ok('填本地 .json：不多要宿主页，提示里讲清开跑时自己借平台页',
+       !k('cloud.wf_host')&&/借平台页/.test(tips())&&!document.querySelector('#view .notebar'), '');
     ok('本地 .json 也算备齐：副标题直接写「随时能跑」', /随时能跑/.test(sub()), sub());
     await click(segBtn('local'));
-    ok('切回本地：步数那格（Turbo 4 步）与种子都回来，工作流格子收走',
-       /Turbo 固定/.test(vtx())&&!!document.querySelector('#view .seedw')&&!k('cloud.workflow'),'');
+    ok('切回本地：步数那格（Turbo 4 步）与种子都回来，工作流那格收走',
+       /Turbo 固定/.test(vtx())&&!!document.querySelector('#view .seedw')&&!k('cloud.wf_preset'),'');
     MIC.api.videoGen=orig;
     /* 真跑一轮：没拉起 ComfyUI 时先载入、随后自动接上出片（与后端那条路同构） */
     /* 换档会把整页重画一遍（自定义那两格要收走），所以先等这一拍落地再填描述——
@@ -1257,6 +1263,77 @@ PROBE = {
 })();
 </script>
 """,
+    # 两张画布共存＝一格下拉切换：默认/金鱼都内置、不用填地址，只有「指定地址」才出输入框；
+    # 视频页与成片页读同一份配置，切页不另起一套
+    "wf": """
+<script>
+(async function(){
+  const R=[],ok=(n,c,x)=>R.push((c?'PASS ':'FAIL ')+n+(x!=null?' · '+x:''));
+  const wait=ms=>new Promise(r=>setTimeout(r,ms));
+  const sel=()=>document.querySelector('#view select[data-k="cloud.wf_preset"]');
+  const box=()=>document.querySelector('#view [data-k="cloud.workflow"]');
+  const sub=()=>((document.querySelector('#view .psub')||{}).textContent||'').trim();
+  const txt=()=>document.getElementById('view').textContent;
+  const tips=()=>[].slice.call(document.querySelectorAll('#view label.tip'))
+      .map(x=>x.title||'').join(' ');
+  const pick=async v=>{const s=sel();s.value=v;
+    s.dispatchEvent(new Event('change',{bubbles:true}));await wait(800);};
+  const put=async v=>{const el=box();el.value=v;
+    el.dispatchEvent(new Event('change',{bubbles:true}));await wait(800);};
+  try{
+    await wait(1800);
+    MIC.s.cfg.video.exec='cloud';
+    MIC.mset(MIC.s.cfg,'cloud.wf_preset','default');
+    MIC.mset(MIC.s.cfg,'cloud.workflow','');
+    MIC.render();await wait(800);
+    let s=sel();
+    ok('工作流是一格下拉，不再只有一行地址', !!s, s?'有':'没有');
+    const labels=s?[].slice.call(s.options).map(o=>o.textContent.trim()):[];
+    ok('三项按顺序：默认 / 金鱼 / 指定地址',
+       labels.length===3&&/^默认 · H3/.test(labels[0])&&/^金鱼 · MiniMax/.test(labels[1])
+       &&/指定地址/.test(labels[2]), labels.join('|'));
+    ok('默认选中「默认」那张', s&&s.value==='default', s&&s.value);
+    ok('默认不用填地址（不出地址框）', !box());
+    ok('说明里带默认那张的编号', /2117505440799084545/.test(tips()), tips());
+    await pick('goldfish');
+    ok('切金鱼落进 cloud.wf_preset', String(MIC.s.cfg.cloud.wf_preset)==='goldfish',
+       String(MIC.s.cfg.cloud.wf_preset));
+    ok('金鱼仍不出地址框、下拉停在金鱼',
+       !box()&&sel()&&sel().value==='goldfish', sel()&&sel().value);
+    ok('说明换成金鱼那张的编号', /2109907990638850050/.test(tips()), tips());
+    ok('金鱼这张备齐就能跑：不报缺工作流', !/差登录或工作流/.test(sub()), sub());
+    await pick('custom');
+    ok('切指定地址：地址/文件那一格才出现', !!box());
+    ok('空着这一格：副标题与提醒都说差工作流',
+       /差登录或工作流/.test(sub())&&/把地址或本地 \\.json 填上/.test(txt()), sub());
+    const url='https://www.runninghub.cn/workflow/2103759530927673346';
+    await put(url);
+    ok('填上地址：提醒收走，副标题改口缺参考图',
+       !/差登录或工作流/.test(sub())&&/差参考图/.test(sub()), sub());
+    ok('地址真的落进配置', String(MIC.s.cfg.cloud.workflow)===url, String(MIC.s.cfg.cloud.workflow));
+    await pick('default');
+    ok('切回默认：地址框收走、填过的地址仍留在配置里（不丢）',
+       !box()&&String(MIC.s.cfg.cloud.workflow)===url, String(MIC.s.cfg.cloud.workflow));
+    await pick('custom');
+    ok('再切回来：填过的地址原样出现', !!box()&&box().value===url, box()&&box().value);
+    /* 成片页共用同一份：同一格配置，切页不另起一套 */
+    MIC.s.cfg.film.exec='cloud';
+    MIC.nav.goto('film');
+    await wait(900);
+    const fs=sel();
+    ok('成片页也是同一个三项下拉、同一份选择',
+       !!fs&&[].slice.call(fs.options).length===3&&fs.value==='custom', fs&&fs.value);
+    MIC.mset(MIC.s.cfg,'cloud.wf_preset','goldfish');MIC.render();await wait(500);
+    MIC.nav.goto('video');
+    await wait(900);
+    ok('成片页选金鱼，视频页跟着金鱼（一份配置）',
+       sel()&&sel().value==='goldfish'&&String(MIC.s.cfg.cloud.wf_preset)==='goldfish',
+       sel()&&sel().value);
+  }catch(e){ok('探针跑完',false,String(e));}
+  document.body.insertAdjacentHTML('beforeend','<pre id="probe">'+R.join('\\n')+'</pre>');
+})();
+</script>
+""",
 }
 
 PROBE["dlbar"] = """
@@ -1412,12 +1489,13 @@ PROBE["win"] = """
 PROBE_PAGE = {"inpaint": "inpaint", "again": "t2i", "repeat": "t2i", "kits": "t2i",
               "loadbar": "t2i", "env": "env_qwen", "lazy": "t2i", "nav": "t2i",
               "gal": "gallery", "merge": "t2i", "sw": "t2i", "tier": "t2i",
-              "greet": "t2i", "vid": "video", "dlbar": "env_qwen", "win": "t2i"}
+              "greet": "t2i", "vid": "video", "dlbar": "env_qwen", "win": "t2i",
+              "wf": "video"}
 
 # 有的探针要等两轮「一键补齐」跑完（mock 里补全按秒级推进），默认 9 秒预算根本活不到收尾。
 # 没列在这里的探针用默认值。
 PROBE_BUDGET = {"env": 60000, "lazy": 40000, "tier": 25000, "vid": 45000, "sw": 20000,
-                "greet": 30000, "dlbar": 30000, "gal": 30000, "win": 20000}
+                "greet": 30000, "dlbar": 30000, "gal": 30000, "win": 20000, "wf": 30000}
 
 
 def main():

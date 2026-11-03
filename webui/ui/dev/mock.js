@@ -32,7 +32,7 @@ const cfg={
        def_engine:'follow',def_size:'1024x1024'},
   cloud:{port:9333,base:'https://www.runninghub.cn',login_url:'',browser:'',
          domains:['runninghub.cn'],show_browser:true,keep:true,keep_min:30,concurrency:1,
-         workflow:'',exec_tag:'Plus',poll_sec:5,gen_timeout:1800},
+         wf_preset:'default',workflow:'',exec_tag:'Plus',poll_sec:5,gen_timeout:1800},
   nav:[
     {id:'g_out',type:'group',name:'创作',icon:'flower',children:[
       {id:'t_gen',type:'tab',name:'文生图',icon:'flower',page:'t2i'},
@@ -388,8 +388,13 @@ L('就绪 · Qwen 生图控制台');
 L('显存基线：桌面占用 0.6 / 12 GB');
 
 /* 云端账号假数据：只用于浏览器里看页面，真实快照在 data/cloud/（脚本不内联） */
-/* 和 cloudkit.gen.DEFAULT_WF 同步：软件内置那张默认画布的编号 */
-const WF_DEFAULT='2109907990638850050';
+/* 和 cloudkit.gen 同步：默认是之前那张 FeiHou 画布，金鱼单独一项 */
+const WF_DEFAULT='2117505440799084545';
+const WF_GOLDFISH='2109907990638850050';
+const WF_CHOICES=[
+  {code:'default',name:'默认 · H3 参考生视频',id:WF_DEFAULT},
+  {code:'goldfish',name:'金鱼 · MiniMax H3 参考生视频',id:WF_GOLDFISH},
+  {code:'custom',name:'指定地址 / 本地文件',id:''}];
 const CLOUD={
   br:{on:true,port:9333,base:'https://www.runninghub.cn',account:'acc_demo1'},
   keep:{on:true,min:30,last:Date.now()/1000-600,msg:'保活完成：2 个账号',purpose:''},
@@ -811,12 +816,17 @@ window.MIC_MOCK={
   cloud_brief(){
     const accts=CLOUD.accts.filter(a=>a.state==='ok').map(a=>({id:a.id,name:a.name}));
     return {dp:true,accts:accts,wf:String(cfg.cloud.workflow||''),
-      wf_default:WF_DEFAULT,
+      wf_preset:cfg.cloud.wf_preset||'default',wf_choices:WF_CHOICES,
+      wf_default:WF_DEFAULT,wf_goldfish:WF_GOLDFISH,
       ready:accts.length>0,busy:!!st.cloud_busy||!!st.cloud.run};},
   /* 选完工作流先验结构：本地文件当场给结论，平台地址只能说「开页再验」 */
   cloud_check_wf(p){
     const s=String(p||cfg.cloud.workflow||'').trim();
-    if(!s)return {ok:true,kind:'default',msg:'没填＝用默认那张（H3 参考生视频 #'+WF_DEFAULT+'）'};
+    if(!s){
+      if(cfg.cloud.wf_preset==='goldfish')
+        return {ok:true,kind:'goldfish',msg:'当前用金鱼那张（MiniMax H3 参考生视频 #'+WF_GOLDFISH+'）'};
+      return {ok:true,kind:'default',msg:'当前用默认那张（H3 参考生视频 #'+WF_DEFAULT+'）'};
+    }
     if(!/\.(json|txt)$/i.test(s))
       return {ok:true,kind:'remote',msg:'平台工作流：开跑时进页面再验'};
     return {ok:true,kind:'file',nodes:100,links:75,shape:'kj',

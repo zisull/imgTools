@@ -25,14 +25,47 @@ import time
 from . import mention
 
 WF_URL = "https://www.runninghub.cn/workflow/%s"
-# 默认那张「YZ金鱼-MiniMax H3 终极篇-文武双全」：界面那一格空着就开这一页，
-# 平台上作者改了软件跟着走。真机量过（独立端口 + 临时 profile，没顶软件那两只窗口）：
-# 进去挂出 100 个节点，主节点 MiniMaxH3ReferenceToVideo、输出节点 VHS_VideoCombine。
-# 这张图的参数不在主节点自己身上——提示词/时长/尺寸都从虚拟节点接进来，见下面 SHAPE_KJ。
-DEFAULT_WF = "2109907990638850050"
-DEFAULT_WF_NAME = "H3 参考生视频"
-# 上一张默认（FeiHou 形状，主节点 389 / 输出 325）：留着当兜底入口，也还能手填。
+# 两张内置画布，界面上是下拉里的两项；「默认」仍是之前那张 FeiHou 画布，
+# 金鱼那张单独列出来，不替默认。两张的节点类型和写路径都不同，见下面 SHAPE_FH/SHAPE_KJ。
 LEGACY_WF = "2117505440799084545"
+LEGACY_WF_NAME = "H3 参考生视频"
+GOLDFISH_WF = "2109907990638850050"
+GOLDFISH_WF_NAME = "MiniMax H3 参考生视频"
+# 界面上「默认」的空值口径没有变：DEFAULT_WF 就是默认那张。
+DEFAULT_WF = LEGACY_WF
+DEFAULT_WF_NAME = LEGACY_WF_NAME
+WF_CUSTOM_NAME = "指定地址 / 本地文件"
+WF_PRESETS = (
+    {"code": "default", "name": "默认 · " + LEGACY_WF_NAME, "id": LEGACY_WF},
+    {"code": "goldfish", "name": "金鱼 · " + GOLDFISH_WF_NAME, "id": GOLDFISH_WF},
+)
+
+
+def wf_choice(cfg):
+    """这份云端配置选的是哪张：("default"|"goldfish"|"custom", 自定义值)。
+
+    老配置里没有 wf_preset：填过地址/文件就当自定义，空着就是默认那张——
+    这样升级不会把人家手填的工作流悄悄换掉。
+    """
+    c = cfg if isinstance(cfg, dict) else {}
+    key = str(c.get("wf_preset") or "").strip()
+    custom = str(c.get("workflow") or c.get("wf") or "").strip()
+    if key == "goldfish":
+        return "goldfish", custom
+    if key == "custom":
+        return "custom", custom
+    if key == "default":
+        return "default", custom
+    return ("custom", custom) if custom else ("default", custom)
+
+
+def wf_choices():
+    """给界面下拉的三项：默认 / 金鱼 / 自定义。编号一并给出去，方便界面上写清楚。"""
+    out = [{"code": p["code"], "name": p["name"], "id": p["id"]} for p in WF_PRESETS]
+    out.append({"code": "custom", "name": WF_CUSTOM_NAME, "id": ""})
+    return out
+
+
 # 本地导出的画布没有平台编号；借平台上的某一页进实例（换图不换实例）。
 # 这一页只是入口，跑的还是灌进去的那张图——和 H3yun 内置的宿主页同一个。
 HOST_WF_FALLBACK = WF_URL % "2103759530927673346"
@@ -884,9 +917,15 @@ class CloudH3:
         return rows[0]
 
     def wf_id(self, wf=""):
-        s = str(wf or self.cfg.get("workflow") or self.cfg.get("wf") or "").strip()
-        # 界面填本地文件时提不出编号：那格旁边的 default_wf 先顶上，再退到内置默认那张
-        return wf_id_of(s) or wf_id_of(self.cfg.get("default_wf")) or DEFAULT_WF
+        s = str(wf or "").strip()
+        if s:
+            return wf_id_of(s) or wf_id_of(self.cfg.get("default_wf")) or DEFAULT_WF
+        choice, custom = wf_choice(self.cfg)
+        if choice == "goldfish":
+            return GOLDFISH_WF
+        if choice == "custom":
+            return wf_id_of(custom) or wf_id_of(self.cfg.get("default_wf")) or DEFAULT_WF
+        return DEFAULT_WF
 
     def wf_url(self, wf=""):
         return WF_URL % self.wf_id(wf)
@@ -898,11 +937,21 @@ class CloudH3:
         导出的 JSON 里不带工作流编号（实测只有一个随机 uuid），所以本地那份
         还得借一个平台页进去跑，见 host_url。
 
-        那一格空着就开默认那张（DEFAULT_WF）：用户不用填、也不用去网页里导出。
+        界面上选「默认」/「金鱼」就走两张内置画布；选「指定地址」才读 workflow 那格。
+        没选过（老配置）就有地址按自定义、没有按默认，见 wf_choice。
         """
-        s = str(wf or self.cfg.get("workflow") or self.cfg.get("wf") or "").strip()
+        s = str(wf or "").strip()
         if not s:
-            return ("remote", WF_URL % DEFAULT_WF)
+            choice, custom = wf_choice(self.cfg)
+            if choice == "goldfish":
+                return ("remote", WF_URL % GOLDFISH_WF)
+            if choice == "custom":
+                s = custom
+                if not s:
+                    raise CloudError("工作流选了「%s」，但那一格还没填地址或文件"
+                                     % WF_CUSTOM_NAME)
+            else:
+                return ("remote", WF_URL % DEFAULT_WF)
         if re.search(r"\.json$|\.txt$", s, re.I):
             path = self._ref(s)
             if not path:
@@ -911,14 +960,17 @@ class CloudH3:
         return ("remote", s)
 
     def wf_label(self, kind="", src=""):
-        """这一张在界面上怎么称呼：默认那张说「默认」，本地那份只报文件名。"""
+        """这一张在界面上怎么称呼：两张内置画布点名，本地那份只报文件名。"""
         if not src:
             kind, src = self.wf_src()
         if kind == "file":
             return "本地 · %s" % os.path.basename(src)
         wid = wf_id_of(src)
-        return ("默认 · %s" % DEFAULT_WF_NAME if wid == DEFAULT_WF
-                else "平台 · %s" % (wid or src[:40]))
+        if wid == DEFAULT_WF:
+            return "默认 · %s" % LEGACY_WF_NAME
+        if wid == GOLDFISH_WF:
+            return "金鱼 · %s" % GOLDFISH_WF_NAME
+        return "平台 · %s" % (wid or src[:40])
 
     def host_url(self):
         """本地那份借哪一页进去：手动覆盖 → 平台默认 → 默认那张 → 内置那一页。
