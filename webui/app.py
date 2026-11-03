@@ -35,7 +35,9 @@ for _p in (_HERE, os.path.join(_HERE, "ui"), os.path.join(ROOT, "engine")):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-LOG_DIR = os.path.join(ROOT, "logs")
+import datahome  # noqa: E402  # logs/data 的唯一解析点：QIC_CONFIG 在仓库外时跟着配置走
+
+LOG_DIR = datahome.logs_dir(ROOT)
 RUN_LOG = os.path.join(LOG_DIR, "run.log")
 
 # pythonw.exe 自己没有控制台。不传这个创建标志，Windows 会给每个子进程
@@ -50,17 +52,17 @@ class _Tee(io.TextIOBase):
     会无处可去 —— 这份日志就是唯一的现场，所以它必须在 import webview/torch 之前接好。
     """
 
-    def __init__(self, stream, fh):
+    def __init__(self, stream, fh, lock=None):
         self._s = stream
         self._f = fh
+        self._lock = lock
 
     def write(self, s):
         txt = s if isinstance(s, str) else str(s)
         for o in (self._f, self._s):
             try:
                 if o is not None:
-                    o.write(txt)
-                    o.flush()
+                    _write_raw(o, txt, self._lock)
             except Exception:
                 pass
         return len(txt)
@@ -77,19 +79,56 @@ class _Tee(io.TextIOBase):
         return False
 
 
+_LOG_FH = None
+_LOG_LOCK = threading.Lock()      # 落盘那只句柄：stdout 转发和界面日志共用一只文件
+_RE_KEY = re.compile(r"sk-[A-Za-z0-9_-]{10,}")   # 只认 Key 的形状，别拿长数字（taskid）开刀
+
+
+def _write_raw(stream, txt, lock):
+    """一路写入：带锁时整段（可能半行）互斥，避免界面日志和 traceback 互相插字。"""
+    if lock is None:
+        stream.write(txt)
+        stream.flush()
+        return
+    with lock:
+        stream.write(txt)
+        stream.flush()
+
+
+def _log_to_file(stamp, text):
+    """「运行日志」页里那条也落一份盘。
+
+    只在内存里记的话，窗口一关这一轮就死无对证：run.log 翻到底只剩一行启动标记，
+    人对着「刚才明明报过错」猜。前缀三个空格 + 时间，和 stdout 转发的行一眼分得开。
+    """
+    if _LOG_FH is None:
+        return
+    try:
+        one = " ↵ ".join(x.strip() for x in str(text).split("\n") if x.strip())
+        _write_raw(_LOG_FH, "   [%s] %s\n" % (stamp, _RE_KEY.sub("sk-***", one)), _LOG_LOCK)
+    except Exception:
+        pass
+
+
 def _setup_streams():
+    global _LOG_FH
     fh = None
     try:
         os.makedirs(LOG_DIR, exist_ok=True)
         if os.path.exists(RUN_LOG) and os.path.getsize(RUN_LOG) > 4 * 1024 * 1024:
             os.replace(RUN_LOG, RUN_LOG + ".1")      # 只留一代，日志目录不无限长
         fh = open(RUN_LOG, "a", encoding="utf-8", errors="replace", buffering=1)
-        fh.write("\n===== %s 启动（%s）=====\n"
-                 % (time.strftime("%Y-%m-%d %H:%M:%S"), " ".join(sys.argv[1:3]) or "桌面"))
+        who = " ".join(sys.argv[1:3]) or os.path.basename(sys.argv[0] or "") or "桌面"
+        # 自测把 QIC_CONFIG 指到临时目录，启动标记要认得出它是谁：
+        # 满屏 PASS 混进用户会话里，真实堆栈就再也翻不到了。
+        if datahome.home(ROOT) != os.path.abspath(ROOT):
+            who += "· 自测"
+        fh.write("\n===== %s 启动（%s）=====\n" % (time.strftime("%Y-%m-%d %H:%M:%S"), who))
     except Exception:
         fh = None
-    sys.stdout = _Tee(sys.__stdout__, fh)
-    sys.stderr = _Tee(sys.__stderr__, fh)
+    _LOG_FH = fh
+    sys.stdout = _Tee(sys.__stdout__, fh, _LOG_LOCK)
+    sys.stderr = _Tee(sys.__stderr__, fh, _LOG_LOCK)
 
 
 _setup_streams()
@@ -393,10 +432,10 @@ class App(WindowCtl):
         self._ff_ts = 0.0
         self._thumbs = OrderedDict()  # (path, mtime, wide) -> data url，缩略缓存（LRU 逐出）
         from store import Store
-        self.store = Store(os.path.join(ROOT, "data", "history.db"))
+        self.store = Store(os.path.join(datahome.data_dir(ROOT), "history.db"))
         self.store.init()
         # 删除撤销：文件先移进回收站而不是真删，栈里记着原路径与历史参数
-        self._trash_dir = os.path.join(ROOT, "data", "trash")
+        self._trash_dir = os.path.join(datahome.data_dir(ROOT), "trash")
         self._trash = []
         self._trash_lock = threading.Lock()
         self._trash_purge()
@@ -682,11 +721,14 @@ class App(WindowCtl):
 
     # ------------------------------------------------------------ 日志
     def _log(self, text):
+        stamp = time.strftime("%H:%M:%S")
+        txt = str(text)
         with self._lock:
             self._seq += 1
-            self._logs.append([self._seq, time.strftime("%H:%M:%S"), str(text)])
+            self._logs.append([self._seq, stamp, txt])
             if len(self._logs) > 3000:
                 del self._logs[:len(self._logs) - 3000]
+        _log_to_file(stamp, txt)     # 落盘放在锁外：文件卡一下不该拖慢每一轮 poll
 
     # ------------------------------------------------------------ js_api：取数
     def _cfg_public(self):

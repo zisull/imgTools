@@ -417,6 +417,13 @@ def test_snap_copy():
 
         def _busy(self):
             return False
+
+        # 快照里那两个「本机能力」的灯（ffmpeg / 文本 API Key）各页都读，假对象也得答得出
+        def _ff(self):
+            return False
+
+        def _ai_has(self):
+            return False
     d = Dummy()
     snap = app.App._snap(d)
     ok("状态快照复制下载进度", snap["dl"] == {"busy": True, "done": 3})

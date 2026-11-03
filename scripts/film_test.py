@@ -114,10 +114,6 @@ def main():
     out = os.path.join(TMP, "outputs")
     os.makedirs(out, exist_ok=True)
     a.cfg["console"]["output_dir"] = out
-    a.store = Store(os.path.join(TMP, "history.db"))
-    a.store.init()
-    a._trash_dir = os.path.join(TMP, "trash")
-
     ff, fp = stitch.tools(ROOT)
     ok("ffmpeg 扩展环境可用", bool(ff and fp), os.path.basename(ff or ""))
 

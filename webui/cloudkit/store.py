@@ -18,6 +18,8 @@ import shutil
 import time
 import uuid
 
+import datahome  # noqa: E402  # 能 import 到 cloudkit 就说明 webui/ 已在 sys.path 上
+
 MAX_BACKUPS = 12
 TS_RE = re.compile(r"^\d{8}-\d{6}-\d{3}$")
 # Chrome 还回来的 cookie 字段很多，只留回填时真正用得上的这些；
@@ -119,8 +121,16 @@ def brief_error(e, limit=120):
 
 
 def cloud_dir(root):
-    """账号库根目录。自测用 QIC_CLOUD_DIR 指到临时目录，别把假 cookie 写进用户目录。"""
-    return os.environ.get("QIC_CLOUD_DIR") or os.path.join(root, "data", "cloud")
+    """账号库根目录：<数据根>/data/cloud，数据根随 QIC_CONFIG 走（见 datahome.py）。
+
+    自测也可以用 QIC_CLOUD_DIR 单独指定，但一般不必了：回归脚本的固定做法是把
+    QIC_CONFIG 指到自己的临时文件，账号库跟着它走就不会把假 cookie 写进用户目录，
+    也不会反过来把用户真实账号当成测试数据读走。
+    """
+    alt = os.environ.get("QIC_CLOUD_DIR")
+    if alt:
+        return alt
+    return os.path.join(datahome.data_dir(root), "cloud")
 
 
 def _now():
