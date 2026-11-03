@@ -55,6 +55,33 @@ def chip_html(n, filename, label=None):
     )
 
 
+def picture_text(text, count):
+    """把编号写成 `<Picture N>` 纯文本，返回 (文本, 引用数)。
+
+    新形状（MiniMaxH3ReferenceToVideo）的提示词走 Text 节点，没有 contenteditable
+    编辑器，也就没有 chip 这一说——节点自己就把 `<Picture N>` 当引用认
+    （作者那张图的提示词通篇就是这么写的，实测线上序列化出来一模一样）。
+    没写编号但给了多张图时，开头补一串 `<Picture 1> <Picture 2>…`：
+    不写它模型分不清第几张图是谁。
+    """
+    s = str(text or "")
+    count = max(0, int(count or 0))
+    n = [0]
+
+    def rep(m):
+        k = int(m.group(1) or m.group(2))
+        if count and (k < 1 or k > count):
+            raise ValueError("引用了第 %d 张参考图，但这次只上传了 %d 张" % (k, count))
+        n[0] += 1
+        return "<Picture %d>" % k
+
+    out = _REF_RE.sub(rep, s)
+    if n[0] == 0 and count > 1:
+        out = " ".join("<Picture %d>" % i for i in range(1, count + 1)) + " " + out
+        n[0] = count
+    return out, n[0]
+
+
 def _by_ordinal(media):
     out = {}
     for i, m in enumerate(media or []):

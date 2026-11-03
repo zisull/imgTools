@@ -260,9 +260,13 @@ DEFAULT_CFG = {
             # API 不传 engine/model 时用谁：follow=跟随控制台当前激活的引擎
             "def_engine": "follow", "def_size": "1024x1024"},
     # 云端账号：一只调试浏览器 + 多份登录态快照（data/cloud/），浏览器只负责登录与保活
-    # workflow=云端出片用的那份 H3 工作流（必须是这个号在网页上跑通过的）
+    # workflow=云端出片用的那份 H3 工作流：留空＝软件自带的默认那张
+    # （cloudkit.gen.DEFAULT_WF，平台上 #2109907990638850050，真机量过：100 节点的
+    #  MiniMaxH3ReferenceToVideo 画布，参数从虚拟节点接，软件自己认接线）；
+    # 也可以粘平台地址（/workflow/、/ai-detail/、/post/ 三种都认）或「导出工作流」的本地 .json
+    # show_browser=关掉就不弹浏览器窗口（出片与保活走无头），登录那一步仍会弹出来给人输密码
     "cloud": {"port": 9333, "base": "https://www.runninghub.cn", "login_url": "",
-              "browser": "", "domains": ["runninghub.cn"],
+              "browser": "", "domains": ["runninghub.cn"], "show_browser": True,
               "keep": True, "keep_min": 30, "concurrency": 1,
               "workflow": "", "wf_host": "", "exec_tag": "Plus", "poll_sec": 5,
               # gen_timeout＝这一段最多等多久；fail_confirm_sec＝平台把这段标成失败后
@@ -1767,18 +1771,12 @@ class App(WindowCtl):
         # 2 号起的号有自己的浏览器：单条视频也进它自己那只，别去顶 1 号的窗口
         g = self._cloud_h3_for(row["id"])
         try:
+            # 那一格空着＝用软件内置默认那张（DEFAULT_WF），不用人到网页里导出再拖进来。
+            # 本地文件先验结构：「API 格式 / 缺节点 / 连线断了 / 不是 H3 图」当场说清，
+            # 不用等浏览器；宿主页到开页时自己借。
             kind, src = g.wf_src(str(v.get("cloud_wf") or ""))
-            # 本地文件没有平台编号：宿主页到开页时再自动借，这里先验结构；
-            # 「API 格式 / 缺节点 / 连线断了 / 不是 H3 图」都能当场说清，不用等浏览器。
             if kind == "file":
                 g.check_wf_file(src)
-                if not g.host_url():
-                    return {"ok": False,
-                            "msg": "本地工作流要借一页平台画布入口：先在「环境管理 → 云端账号」"
-                                   "填一份能打开的 H3 工作流地址当兜底"}
-                wf = ""
-            else:
-                wf = g.wf_url(src)
         except Exception as e:
             return {"ok": False, "msg": "%s" % e}
         if not self._launch("video", lambda: self._do_video_cloud(v), lane="cloud"):
@@ -1787,8 +1785,7 @@ class App(WindowCtl):
         refs = list(v.get("refs") or [])
         self._log("☁️ 云端出片：%ds · %dx%d · 参考 %d 张 · 号「%s」· 浏览器 %d · %s（按平台计费）"
                   % (_to_int(v.get("seconds"), 5, 5, 15), w, h, len(refs), row["name"],
-                     self._cloudkit()["browsers"].slot(row["id"]),
-                     ("本地 · " + os.path.basename(src)) if kind == "file" else wf))
+                     self._cloudkit()["browsers"].slot(row["id"]), g.wf_label(kind, src)))
         return {"ok": True, "total": 1, "exec": "cloud", "acct": row["name"]}
 
     def _do_video_cloud(self, v):
@@ -2166,13 +2163,8 @@ class App(WindowCtl):
                         acct_name = "自动分配"
                     kind, src = g.wf_src(wf)
                     if kind == "file":
+                        # 缺节点 / 连线断了 / 不是 H3 图：在这里就说清，别等开出浏览器
                         g.check_wf_file(src)
-                        if not g.host_url():
-                            raise RuntimeError("本地工作流要借一页平台画布入口："
-                                               "先在「环境管理 → 云端账号」填一份能打开的"
-                                               " H3 工作流地址当兜底")
-                    else:
-                        g.wf_url(src)
                 except Exception as e:
                     err = str(e)
         elif not err and not self._env_on().get("h3"):
@@ -3042,12 +3034,38 @@ class App(WindowCtl):
                     "film": str(proj.get("film") or ""),
                     # 「当前」与「正在跑」是两件事：跑完的当前工程仍要能点继续/重出
                     "current": d == (self._film_dir or ""),
-                    "running": (d == (self._film_dir or "")
-                                and (self._lanes.get("gpu") in ("film", "film_merge")
-                                     or self._lanes.get("cloud") == "film")),
+                    "running": self._film_running(d),
                 })
         items.sort(key=lambda x: x["time"], reverse=True)
         return {"ok": True, "items": items[:20]}
+
+    def _film_running(self, d):
+        """这一个工程目录此刻是不是被软件占着在跑（删它之前要先问一句）。"""
+        return (str(d or "") == (self._film_dir or "")
+                and (self._lanes.get("gpu") in ("film", "film_merge")
+                     or self._lanes.get("cloud") == "film"))
+
+    def film_delete(self, dir=""):
+        """最近工程那一行的 ×：整个目录搬进回收目录，films 里不再有它就再也列不出来。
+
+        只认输出目录/films 下面那一层，别处一律不动；正在跑的拦下来。
+        """
+        base = os.path.normpath(_abs_path(
+            os.path.join(self.cfg["console"]["output_dir"], "films")))
+        d = os.path.normpath(str(dir or ""))
+        if not d or os.path.dirname(d).lower() != base.lower() or not os.path.isdir(d):
+            return {"ok": False, "msg": "这个工程不在成片目录里，不动它"}
+        if self._film_running(d):
+            return {"ok": False, "msg": "这个工程正在跑：先停止再删"}
+        try:
+            self._trash_move(d)
+        except OSError as e:
+            return {"ok": False, "msg": "删不动：%s" % e}
+        if self._film_dir == d:
+            self._film_dir = ""
+        self._log("🗑 已删工程：%s（回收目录里留 %d 天）"
+                  % (os.path.basename(d), self.TRASH_DAYS))
+        return {"ok": True}
 
     def film_resume(self, dir=""):
         from filmkit import project as prj
@@ -3363,6 +3381,13 @@ class App(WindowCtl):
         except Exception:
             pass
         out["ready"] = bool(out["dp"] and out["accts"])
+        # 那一格空着也有得跑：软件自带一张默认工作流，界面据此决定是催用户填、
+        # 还是告诉他「留空就是这张」（编号给他，想去看一眼就能拼出地址）
+        try:
+            from cloudkit import gen as cg
+            out["wf_default"] = cg.DEFAULT_WF
+        except Exception:
+            out["wf_default"] = ""
         return out
 
     def cloud_check_wf(self, path=""):
@@ -3372,6 +3397,13 @@ class App(WindowCtl):
         """
         s = str(path or (self.cfg.get("cloud") or {}).get("workflow") or "").strip()
         if not s:
+            try:
+                from cloudkit import gen as cg
+                return {"ok": True, "kind": "default",
+                        "msg": "没填＝用默认那张（%s #%s）"
+                               % (cg.DEFAULT_WF_NAME, cg.DEFAULT_WF)}
+            except Exception:
+                pass
             return {"ok": False, "msg": "还没填工作流"}
         if not re.search(r"\.json$|\.txt$", s, re.I):
             return {"ok": True, "kind": "remote", "msg": "平台工作流：开跑时进页面再验"}
@@ -3956,7 +3988,10 @@ class App(WindowCtl):
         return dst
 
     def _trash_purge(self):
-        """启动时清回收站：撤销只活在这一次运行里，超过保留期的旧文件直接删掉。"""
+        """启动时清回收站：撤销只活在这一次运行里，超过保留期的旧文件直接删掉。
+
+        成片工程搬进来的是一个目录（os.remove 删不动），所以两种都要认。
+        """
         try:
             names = os.listdir(self._trash_dir)
         except OSError:
@@ -3966,8 +4001,12 @@ class App(WindowCtl):
             head = name.split("_", 1)[0]
             if head.isdigit() and int(head) / 1000.0 >= ttl:
                 continue
+            p = os.path.join(self._trash_dir, name)
             try:
-                os.remove(os.path.join(self._trash_dir, name))
+                if os.path.isdir(p):
+                    shutil.rmtree(p, ignore_errors=True)
+                else:
+                    os.remove(p)
             except OSError:
                 pass
 
@@ -3979,8 +4018,12 @@ class App(WindowCtl):
         except OSError:
             return
         for name in names:
+            p = os.path.join(self._trash_dir, name)
             try:
-                os.remove(os.path.join(self._trash_dir, name))
+                if os.path.isdir(p):
+                    shutil.rmtree(p, ignore_errors=True)
+                else:
+                    os.remove(p)
             except OSError:
                 pass
 

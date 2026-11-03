@@ -597,6 +597,26 @@ def main():
     ok("快照含成片三件套",
        "film" in snap and "ffmpeg" in snap and "ai_key" in snap)
 
+    # ---------------- 最近工程那行的 ×：只搬不删，范围外的目录一律不动 ----------------
+    outside = os.path.join(TMP, "outside")
+    os.makedirs(outside, exist_ok=True)
+    r = a.film_delete(outside)
+    ok("× 不碰成片目录以外的目录", not r.get("ok") and os.path.isdir(outside), r.get("msg"))
+    ok("× 空路径不误删", not a.film_delete("").get("ok"))
+    keep_running = a._film_running
+    a._film_running = lambda _d: True
+    try:
+        r = a.film_delete(d)
+        ok("× 正在跑的工程拦下来", not r.get("ok") and "先停止" in str(r.get("msg")), r.get("msg"))
+    finally:
+        a._film_running = keep_running
+    ok("拦下来之后工程还在", os.path.isdir(d))
+    r = a.film_delete(d)
+    ok("× 删工程：整个目录搬进回收", r.get("ok") and not os.path.isdir(d), r.get("msg"))
+    ok("删掉的工程不再出现在清单里",
+       d not in [x.get("dir") for x in (a.film_list().get("items") or [])])
+    ok("删的是当前那个就把指针清掉", a._film_dir != d, a._film_dir)
+
     # ---------------- 真拼一条：参数不一致要停下 ----------------
     d2 = prj.new_dir(out)
     p1 = make_clip(ff, os.path.join(d2, "shots", "001.mp4"), "0x112233")

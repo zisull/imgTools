@@ -120,6 +120,8 @@ class BrowserHost:
         self.domains = [str(s).lstrip(".").lower()
                         for s in (self.cfg.get("domains") or ["runninghub.cn"]) if s]
         self._b = None
+        # 这只进程起的时候是不是无头：窗口已经开着就改不了，登录时要先换成有头那一只
+        self._headless = False
         self._lock = threading.RLock()
         self.current = ""
         # 这段浏览器的用途：login=人正在登录/看，gen=云端出片占着，''=空闲。
@@ -140,6 +142,13 @@ class BrowserHost:
         if path:
             co.set_browser_path(path)
         co.set_load_mode("eager")
+        # 「显示浏览器」关掉后出片不弹窗口，省桌面。无头/有头是进程级参数，
+        # 只在真起进程这一刻读；登录那一步人必须看得见，所以 purpose=login 时这一档自动让开，
+        # 只有出片和保活享受无头。
+        self._headless = (not bool(self.cfg.get("show_browser", True))
+                          and self.purpose != "login")
+        if self._headless:
+            co.headless(True)
         co.set_timeouts(base=10, page_load=30, script=20)
         co.set_argument("--no-default-browser-check")
         co.set_argument("--disable-features=Translate,MediaRouter")
@@ -265,6 +274,11 @@ class BrowserHost:
     def open_login(self, state=None, aid=""):
         url = str(self.cfg.get("login_url") or self.base)
         with self._lock:
+            if self._b is not None and self._headless:
+                # 无头那一只人根本看不见，登录要先关掉它、重新起一只看得见的。
+                # 顺序要紧：close() 会把 purpose 抹平，所以「登录中」要在那之后才标。
+                self.close()
+            self.purpose = "login"      # 人正在这个窗口里登录，保活别来顶号
             tab = self.tab()
             if state is not None:
                 tab.get(self.base)

@@ -84,7 +84,8 @@ function askWfCheck(force){
   }).catch(e=>{wfChk={ok:false,msg:String(e&&e.message||e)};});
 }
 const refsNow=()=>C.refsOf('video.refs');
-function cloudReady(){return !!brief&&brief.ready&&!!wfNow();}
+/* 工作流那一格空着不算缺：软件自带默认那张，brief.wf_default 是后端对快照文件的实测 */
+function cloudReady(){return !!brief&&brief.ready&&(!!wfNow()||!!brief.wf_default);}
 function acctName(v){
   const list=(brief&&brief.accts)||[];
   const hit=list.filter(a=>a.id===v.cloud_acct)[0]||list[0];
@@ -159,7 +160,7 @@ MIC.registerPage('video',{
         C.refsRow('video.refs',4,
           cloud?'点「加图」从画廊挑；描述里用 @1 @2 点名第几张'
                :'留空=文生视频；第一张就是首帧，多图只走云端'),
-        cloud?'上传到这个号平台的 input 里当身份/场景参考。这份 H3 工作流只有图生与参考生视频两种模式，不填平台会判失败'
+        cloud?'上传到这个号平台的 input 里当身份/场景参考。这份工作流按参考生成，一张都不填平台会判失败'
              :'想接着上一段拍就把那一帧存成图填进来；本地只认第一张')+
       (cloud?wfRow():'')+
       (cloud?'':C.field('种子',C.seedRow('video.seed'),'开着每次换一版；关掉固定种子可复现'))+
@@ -206,13 +207,15 @@ function acctSel(v){
   return C.sel('video.cloud_acct',list.map(a=>({name:a.name,code:a.id})),'默认第一个可用号');
 }
 function wfRow(){
-  const local=isFile();
+  const local=isFile(),cur=wfNow(),def=String((brief&&brief.wf_default)||'');
   return C.field('工作流',
       C.pathrow('cloud.workflow',local?'本地导出的工作流（.json）':'网页上跑通过的 H3 工作流地址或 ID','file',true)+
-      (local?'<div data-role="wfchk" style="margin-top:4px">'+wfChkHTML()+'</div>':''),
+      (local?'<div data-role="wfchk" style="margin-top:4px">'+wfChkHTML()+'</div>':'')+
+      (cur?'<div class="fine mut" style="margin-top:4px">这趟用的是上面那份，不是默认那张 '+
+        '<button class="btn" onclick="MIC.video.useWfDefault()">用回默认</button></div>':''),
     '粘贴浏览器里那份能出片的 H3yun 工作流地址，或把「导出工作流」存下来的 .json 拖进来。'+
     (local?' 本地文件开跑时自己借平台页面，不用再填别的。':'')+
-    (wfNow()?'':' 现在还没填，填了云端这条路才算通。'));
+    (cur?'':' 留空＝默认那张'+(def?'（#'+def+'）':'')+'。'));
 }
 function cloudHint(){
   const b=brief||{};
@@ -221,7 +224,8 @@ function cloudHint(){
     return (+b.failed||0)
       ? '可用的号都标成「出片失败」了：到「环境管理 → 云端账号」重新登录或换号'
       : '还没有可用的登录号：到「环境管理 → 云端账号」新建登录并保存';
-  if(!wfNow())return '还差一份工作流：在上面那格粘贴网页上跑通过的地址';
+  if(!wfNow()&&!b.wf_default)
+    return '还差一份工作流：在上面那格粘贴网页上跑通过的地址';
   if(!refsNow().length)return '云端还差一张参考图：这份工作流按参考生成，纯文字平台会判失败';
   return '云端还差一步';
 }
@@ -236,6 +240,8 @@ setInterval(()=>{
 
 let firing=false;
 MIC.video={
+  /* 那一格填过东西就永远轮不到默认那张：给一颗回到默认的键，值清掉即可 */
+  useWfDefault(){MIC.form.commitPath('cloud.workflow','');MIC.render();},
   start(){
     if(firing)return;
     const patch=MIC.form.commit();

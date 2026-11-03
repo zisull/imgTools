@@ -108,7 +108,10 @@ function browserCard(){
       `<button class="btn sm gho" onclick="MIC.cloud.stop()"${busy||!on?' disabled':''}>关闭全部</button>`+
     '</div>'+
     C.field('自动保活',C.sw('cloud.keep'),
-      `每 ${k.min||30} 分钟把每个号在自己的浏览器里访问一次平台，把服务端刷新的 cookie 存回去；没开的窗口跳过`));
+      `每 ${k.min||30} 分钟把每个号在自己的浏览器里访问一次平台，把服务端刷新的 cookie 存回去；没开的窗口跳过`)+
+    C.field('显示浏览器',C.sw('cloud.show_browser'),
+      '关掉后出片和保活都不弹窗口，省桌面；点「新建登录」时照样弹出，好让你输账号。'+
+      '改完点上面的「关闭全部」才生效'));
 }
 
 function page(){

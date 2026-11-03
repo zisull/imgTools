@@ -334,6 +334,175 @@ def sweep_sizes(host, fid, node):
              after.get("resolution"), after.get("aspect_ratio")))
 
 
+# 「YZ金鱼」那种图用的是另一套形状：主节点的提示词/尺寸/时长都不是裸控件，
+# 而是从 Text / PrimitiveFloat / ResolutionSelector 经 SetNode→GetNode 虚拟节点接进来的。
+# 软件要写它，先得按名字把这些源节点找回来——所以这一步只读着把「谁喂给谁」摊开看。
+_JS_KJ_MAP = """
+var f=document.getElementById(arguments[0]);
+var w=f.contentWindow,g=w.app.graph;
+var mtype=arguments[1]||'MiniMaxH3ReferenceToVideo';
+var nodes=g._nodes||[];
+function wv(n,i){var x=(n.widgets||[])[i];return x?String(x.value).slice(0,120):null;}
+function nameOf(n){var x=(n.widgets||[])[0];return x?String(x.value):'';}
+var sets={},gets={};
+nodes.forEach(function(n){
+  if(n.type==='SetNode')sets[nameOf(n)]=n;
+  else if(n.type==='GetNode')(gets[nameOf(n)]=gets[nameOf(n)]||[]).push(n);
+});
+// 顺着一条入参往回走：GetNode→同名 SetNode→它的来源；Reroute/分组开关只看那一条链接
+function back(node,depth){
+  for(var k=0;node&&k<(depth||6);k++){
+    if(node.type==='GetNode'){node=sets[nameOf(node)]||null;continue;}
+    if(node.type==='SetNode'||/Reroute|Primitive/i.test(node.type)){
+      var li=(node.inputs||[]).filter(function(i){return i.link;})[0];
+      if(!li)return node;
+      var L=g.links?g.links[li.link]:null;
+      node=L?g.getNodeById(L.origin_id):null;
+      var sl=(L||{}).origin_slot;
+      if(node&&node.outputs&&node.outputs[sl])node=node;
+      continue;
+    }
+    return node;
+  }
+  return node;
+}
+var main=null;
+nodes.forEach(function(n){if(n.type===mtype&&!main)main=n;});
+if(!main)return JSON.stringify({err:'图上没有 '+mtype});
+var out={main:main.id,type:main.type,slots:{},images:[],videos:[],audits:[],loaders:[]};
+(main.inputs||[]).forEach(function(i){
+  if(!i.widget)return;
+  var L=g.links?g.links[i.link]:null;
+  var src=L?g.getNodeById(L.origin_id):null;
+  out.slots[i.name]={link:!!L,from:src?src.type:'',via:src?src.id:0,
+                     root:(function(){var r=back(src);return r?{id:r.id,type:r.type,
+                       widgets:(r.widgets||[]).map(function(x){return x.name;})}:null;})()};
+});
+// 参考图：LoadImage 喂给哪个 SetNode，SetNode 名字里的数字就是 <Picture N> 的 N
+nodes.forEach(function(n){
+  if(n.type!=='LoadImage')return;
+  var o=(n.outputs||[]).filter(function(x){return x.name==='IMAGE';})[0]||{};
+  var to=[];
+  (o.links||[]).forEach(function(t){var L=g.links[t];
+    if(!L)return;var r=g.getNodeById(L.target_id);
+    to.push(r?r.type+':'+nameOf(r):'');});
+  out.images.push({id:n.id,mode:n.mode,file:wv(n,0),to:to.join(',')});
+});
+nodes.forEach(function(n){
+  if(n.type==='VHS_LoadVideo')out.videos.push({id:n.id,mode:n.mode});
+  else if(n.type==='LoadAudio')out.audits.push({id:n.id,mode:n.mode});
+  else if(/LoraLoader|UNETLoader|CLIPLoader|VAELoader|CheckpointLoader/.test(n.type))
+    out.loaders.push({id:n.id,type:n.type,mode:n.mode,file:wv(n,0)});
+});
+// 尺寸那顆 combo 的实时可选值：写进去的画幅必须在这一串里
+var sel=null;
+nodes.forEach(function(n){if(n.type==='ResolutionSelector')sel=n;});
+if(sel)out.size={id:sel.id,widgets:(sel.widgets||[]).map(function(x){
+  return {name:x.name,value:String(x.value).slice(0,40),
+          opts:(x.options&&x.options.values||[]).slice(0,30)};})};
+var out2=null;
+nodes.forEach(function(n){if(n.type==='VHS_VideoCombine'&&!out2)out2=n;});
+out.vhs=out2?out2.id:0;
+return JSON.stringify(out);
+"""
+# 实例上到底有没有这些模型文件：只 GET /object_info/<节点类型>，不看队列、不提交
+_JS_OBJINFO = """
+var f=document.getElementById(arguments[0]);
+var w=f.contentWindow,A=w.comfyAPI&&w.comfyAPI.api&&w.comfyAPI.api.api;
+if(!A)return JSON.stringify({err:'no_api'});
+function url(ep){var u=A.apiURL?A.apiURL(ep):'';
+  return u&&u.indexOf('http')===0?u:w.location.origin+(u[0]==='/'?u:'/'+u);}
+var ts=[].slice.call(arguments,1);
+return Promise.all(ts.map(function(t){
+  return fetch(url('object_info/'+t),{credentials:'include'})
+    .then(function(r){return r.status===200?r.text():('http'+r.status);})
+    .catch(function(e){return 'err'+String(e).slice(0,30);});})).then(function(rs){
+  var o={};
+  rs.forEach(function(s,i){var t=ts[i];try{
+    var j=JSON.parse(s),k=Object.keys(j)[0];
+    var inps=(j[k]||{}).input||{},need=inps.required||{},opt=inps.optional||{},list={};
+    Object.keys(need).concat(Object.keys(opt)).forEach(function(nm){
+      var v=need[nm]||opt[nm];
+      if(Array.isArray(v[0]))list[nm]=v[0];
+      else list[nm]=[String(v[0]||'').slice(0,24)];});
+    o[t]=list;
+  }catch(e){o[t]={_bad:String(s).slice(0,80)};}});
+  return JSON.stringify(o);});
+"""
+
+
+def kj_map(host, fid, maintype):
+    """把「能写的节点」摊开：每个控件槽位背后真正的源节点是谁。"""
+    raw = str(js(host, _JS_KJ_MAP, fid, maintype) or "")
+    try:
+        d = json.loads(raw)
+    except ValueError:
+        print("✗ 映射回包不是 JSON：%s" % raw[:200])
+        return None
+    if d.get("err"):
+        print("✗ %s" % d["err"])
+        return d
+    print("· 主节点 %s（%s）· 输出节点 %s" % (d.get("main"), d.get("type"), d.get("vhs")))
+    for k, v in sorted((d.get("slots") or {}).items()):
+        r = v.get("root") or {}
+        print("    %-10s 连着=%s ← %s(%s) ← 根 %s(%s) 控件=%s"
+              % (k, v.get("link"), v.get("from"), v.get("via"),
+                 r.get("type"), r.get("id"), ",".join(r.get("widgets") or [])))
+    print("· 参考图 LoadImage（mode 0=正常 4=旁路）：")
+    for x in d.get("images") or []:
+        print("    id %-4s mode %s → %-8s %s" % (x["id"], x["mode"], x["to"],
+                                                 str(x["file"])[:36]))
+    print("· 参考视频 %s 个 · 参考音频 %s 个"
+          % (len(d.get("videos") or []), len(d.get("audits") or [])))
+    for x in d.get("loaders") or []:
+        print("    模型 %-20s id %-4s mode %s %s"
+              % (x["type"], x["id"], x["mode"], x["file"]))
+    sz = d.get("size")
+    if sz:
+        print("· 尺寸选择器 %s：" % sz.get("id"))
+        for x in sz.get("widgets") or []:
+            print("    %-14s = %s · 可选 %s"
+                  % (x["name"], x["value"], json.dumps(x["opts"], ensure_ascii=False)[:400]))
+    return d
+
+
+def models_check(host, fid, need):
+    """这台实例上到底有哪些模型文件，和那张图点名的对一对。
+    只 GET /object_info/<类型>，不进队列、不提交、不扣积分。"""
+    raw = str(js(host, _JS_OBJINFO, fid, "LoraLoaderModelOnly",
+                 "UNETLoader", "CLIPLoader", "VAELoader") or "")
+    try:
+        d = json.loads(raw)
+    except ValueError:
+        print("✗ object_info 回包读不懂：%s" % raw[:200])
+        return
+    pools = {}
+    for t, w in (d or {}).items():
+        if not isinstance(w, dict):
+            continue
+        if "_bad" in w:
+            print("· %s 的 object_info 读不懂：%s" % (t, w["_bad"]))
+        for nm, vals in w.items():
+            if isinstance(vals, list) and vals and isinstance(vals[0], str):
+                pools.setdefault(nm.lower(), set()).update(vals)
+    allnames = set().union(*list(pools.values())) if pools else set()
+    print("· 实例上的模型清单：%s" % ", ".join("%s(%d)" % (k, len(v))
+                                              for k, v in sorted(pools.items())))
+    miss = []
+    for f in need or []:
+        hit = f in allnames
+        print("    %-62s %s" % (f[:62], "在" if hit else "✗ 这台实例上没有"))
+        if not hit:
+            miss.append(f)
+            stem = f.split(".")[0][:14]
+            near = [x for x in allnames if stem.lower() in x.lower()][:4]
+            if near:
+                print("        相近的：%s" % ", ".join(near))
+    if miss:
+        print("· 缺 %d 个：跑这张图前要么平台上加模型，要么把这些节点旁路掉" % len(miss))
+    return miss
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--url", default=os.environ.get("QIC_CLOUD_URL") or DEFAULT_URL)
@@ -356,10 +525,34 @@ def main():
     ap.add_argument("--load", default="", metavar="FILE",
                     help="把本地工作流文件灌回页面（app.loadGraphData），验本地文件这条路通不通；不保存不提交")
     ap.add_argument("--keep", action="store_true", help="探完不关浏览器")
+    ap.add_argument("--kj", action="store_true",
+                    help="按「虚拟节点那张图」的形状反查能写的节点（Text/PrimitiveFloat/"
+                         "ResolutionSelector/LoadImage），并把主节点与输出节点指过去")
+    ap.add_argument("--maintype", default="MiniMaxH3ReferenceToVideo",
+                    help="--kj 找的主节点类型")
+    ap.add_argument("--models", action="store_true",
+                    help="配 --kj：把图上没旁路的模型文件和实例上的清单对一遍（只 GET）")
+    ap.add_argument("--port", type=int, default=9335,
+                    help="另起一只浏览器的调试端口：软件保活正占着 9333/9334，"
+                         "顶上去等于把用户正在用的窗口开走")
+    ap.add_argument("--profile", default="",
+                    help="配套的 user-data-dir；留空＝TEMP 下临时一份。"
+                         "别用软件那份：同目录会被已经开着的 Chrome 锁住")
     a = ap.parse_args()
 
-    os.environ.setdefault("QIC_CONFIG", os.path.join(
-        os.environ.get("TEMP", "/tmp"), "qic_cloud_probe_config.json"))
+    import socket
+    with socket.socket() as s:
+        s.settimeout(0.6)
+        if s.connect_ex(("127.0.0.1", a.port)) == 0:
+            print("✗ 端口 %d 上已经有一只浏览器：换一个 --port，"
+                  "别接管软件那两只（9333/9334）" % a.port)
+            return 1
+    if not a.profile:
+        a.profile = os.path.join(os.environ.get("TEMP", "/tmp"),
+                                 "qic_probe_profile_%d" % a.port)
+
+    # 账号库读的是用户那一份（只取快照，不改它）：所以这里不再设 QIC_CONFIG 把
+    # 数据根整体挪走——挪走以后 AccountStore 里一个号都没有，探测就无从谈起。
     from cloudkit import store as cs
     from cloudkit.browser import BrowserHost, login_state
 
@@ -367,6 +560,7 @@ def main():
         if os.path.isfile(os.path.join(ROOT, "config.json")) else {}
     cloud = dict(cfg.get("cloud") or {})
     cloud["login_url"] = a.url
+    cloud["port"] = a.port         # 另起一只，不顶软件保活那两只
     store = cs.AccountStore(ROOT)
     accts = store.list()
     if not accts:
@@ -379,7 +573,8 @@ def main():
           % (row["name"], len(state.get("cookies") or []),
              len(cs.auth_headers(state.get("cookies"), state.get("storage")))))
 
-    host = BrowserHost(ROOT, cloud)
+    host = BrowserHost(ROOT, cloud, port=a.port, profile=a.profile)
+    print("· 另起一只浏览器：端口 %d · profile %s" % (a.port, a.profile))
     code = 1
     try:
         host.apply(state, aid=aid)              # 灌快照：共用浏览器先清残留
@@ -444,6 +639,17 @@ def main():
                     print("· GET %s 出错：%s" % (ep, str(e)[:120]))
         except ImportError:
             print("· 没装 requests，跳过纯 HTTP 试探")
+        kj = None
+        if a.kj:
+            kj = kj_map(host, fid, a.maintype)
+            if kj and (kj.get("main") or 0):
+                a.node = kj["main"]
+            if kj and (kj.get("vhs") or 0):
+                a.out = kj["vhs"]
+            if a.models and kj:
+                models_check(host, fid, [x.get("file") for x in (kj.get("loaders") or [])
+                                         if x.get("mode") == 0 and x.get("file")
+                                         and x["file"] != "None"])
         for label, nid in (("主节点", a.node), ("输出节点", a.out)):
             raw = js(host, _JS_NODE, fid, nid)
             try:

@@ -31,7 +31,7 @@ const cfg={
   api:{enabled:false,lan:false,host:'127.0.0.1',port:8765,token:'',no_token:false,
        def_engine:'follow',def_size:'1024x1024'},
   cloud:{port:9333,base:'https://www.runninghub.cn',login_url:'',browser:'',
-         domains:['runninghub.cn'],keep:true,keep_min:30,concurrency:1,
+         domains:['runninghub.cn'],show_browser:true,keep:true,keep_min:30,concurrency:1,
          workflow:'',exec_tag:'Plus',poll_sec:5,gen_timeout:1800},
   nav:[
     {id:'g_out',type:'group',name:'创作',icon:'flower',children:[
@@ -388,6 +388,8 @@ L('就绪 · Qwen 生图控制台');
 L('显存基线：桌面占用 0.6 / 12 GB');
 
 /* 云端账号假数据：只用于浏览器里看页面，真实快照在 data/cloud/（脚本不内联） */
+/* 和 cloudkit.gen.DEFAULT_WF 同步：软件内置那张默认画布的编号 */
+const WF_DEFAULT='2109907990638850050';
 const CLOUD={
   br:{on:true,port:9333,base:'https://www.runninghub.cn',account:'acc_demo1'},
   keep:{on:true,min:30,last:Date.now()/1000-600,msg:'保活完成：2 个账号',purpose:''},
@@ -715,6 +717,17 @@ window.MIC_MOCK={
     return {ok:true,items:fs.total?[{id:fs.id,title:fs.title,dir:fs.dir,time:stamp(),
       done:fs.done,total:fs.total,film:fs.film,current:true,
       running:st.running==='film'||st.cloud.run==='film'}]:[]};},
+  /* 最近工程那行的 ×：真后端把整个目录搬进回收，这里只把状态清干净 */
+  film_delete(dir){
+    const fs=st.film;
+    if(!fs.total||String(fs.dir)!==String(dir))
+      return {ok:false,msg:'这个工程不在成片目录里，不动它'};
+    if(st.running==='film'||st.cloud.run==='film')
+      return {ok:false,msg:'这个工程正在跑：先停止再删'};
+    L('🗑 删掉工程：'+fs.title+'（演示数据，没真搬文件）');
+    Object.assign(fs,{state:'idle',phase:'',status:'',id:'',title:'',dir:'',total:0,done:0,
+                      current:0,elapsed:0,film:'',err:'',shots:[],missing:0,msg:''});
+    return {ok:true};},
   film_resume(){
     const fs=st.film;
     if(!fs.total)return {ok:false,msg:'还没有可续跑的工程'};
@@ -798,7 +811,16 @@ window.MIC_MOCK={
   cloud_brief(){
     const accts=CLOUD.accts.filter(a=>a.state==='ok').map(a=>({id:a.id,name:a.name}));
     return {dp:true,accts:accts,wf:String(cfg.cloud.workflow||''),
+      wf_default:WF_DEFAULT,
       ready:accts.length>0,busy:!!st.cloud_busy||!!st.cloud.run};},
+  /* 选完工作流先验结构：本地文件当场给结论，平台地址只能说「开页再验」 */
+  cloud_check_wf(p){
+    const s=String(p||cfg.cloud.workflow||'').trim();
+    if(!s)return {ok:true,kind:'default',msg:'没填＝用默认那张（H3 参考生视频 #'+WF_DEFAULT+'）'};
+    if(!/\.(json|txt)$/i.test(s))
+      return {ok:true,kind:'remote',msg:'平台工作流：开跑时进页面再验'};
+    return {ok:true,kind:'file',nodes:100,links:75,shape:'kj',
+      msg:'结构没问题：100 个节点 · 主节点/输出节点都在'};},
   cloud_new(name){
     const id='acc_'+Math.random().toString(36).slice(2,8);
     CLOUD.accts.push({id:id,name:String(name||'').trim()||('账号 '+(CLOUD.accts.length+1)),

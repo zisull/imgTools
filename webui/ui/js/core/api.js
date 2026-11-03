@@ -86,6 +86,7 @@ MIC.api={
   filmRedo:(i,deep)=>call('film_redo',i||1,!!deep),
   filmRedoFailed:d=>call('film_redo_failed',d||''),
   filmMerge:d=>call('film_merge',d||''),
+  filmDelete:d=>call('film_delete',d||''),
   /* 云端账号：一只共用浏览器 + 多份登录态快照；浏览器操作全部后台线程 */
   cloudState:()=>call('cloud_state'),
   /* 视频页云端那一格要的一句话实话（有几个号、缺不缺 DrissionPage、用的哪份工作流）：

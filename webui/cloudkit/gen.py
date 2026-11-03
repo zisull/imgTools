@@ -13,9 +13,11 @@ node.__h3Editor 的内容覆盖 widgets[prompt].value，所以直接改控件是
 这一条也是实测过的（改成 TEST_A <Picture 2> TEST_B，提交体就成了 …_REF_2__…）。
 
 所有值都从「用户已登录的那份工作流」里读，不预设节点 id：
-主节点按 class_type 找 FeiHouEasyH3RH，输出节点按 VHS_VideoCombine 找。
+主节点按 class_type 找 FeiHouEasyH3RH（老形状）或 MiniMaxH3ReferenceToVideo
+（新形状，参数挂在虚拟节点上），输出节点按 VHS_VideoCombine 找。
 """
 import json
+import math
 import os
 import re
 import time
@@ -23,15 +25,52 @@ import time
 from . import mention
 
 WF_URL = "https://www.runninghub.cn/workflow/%s"
+# 默认那张「YZ金鱼-MiniMax H3 终极篇-文武双全」：界面那一格空着就开这一页，
+# 平台上作者改了软件跟着走。真机量过（独立端口 + 临时 profile，没顶软件那两只窗口）：
+# 进去挂出 100 个节点，主节点 MiniMaxH3ReferenceToVideo、输出节点 VHS_VideoCombine。
+# 这张图的参数不在主节点自己身上——提示词/时长/尺寸都从虚拟节点接进来，见下面 SHAPE_KJ。
+DEFAULT_WF = "2109907990638850050"
+DEFAULT_WF_NAME = "H3 参考生视频"
+# 上一张默认（FeiHou 形状，主节点 389 / 输出 325）：留着当兜底入口，也还能手填。
+LEGACY_WF = "2117505440799084545"
 # 本地导出的画布没有平台编号；借平台上的某一页进实例（换图不换实例）。
 # 这一页只是入口，跑的还是灌进去的那张图——和 H3yun 内置的宿主页同一个。
 HOST_WF_FALLBACK = WF_URL % "2103759530927673346"
+# 平台上见过的两种 H3 画布形状：
+#   feihou —— 主节点 FeiHouEasyH3RH 自带提示词编辑器和媒体清单，写它就够；
+#   kj     —— 主节点 MiniMaxH3ReferenceToVideo，提示词在 Text 节点、时长在
+#             PrimitiveFloat（后面挂一条换算公式）、尺寸在 ResolutionSelector，
+#             参考图是 9 个 LoadImage；这些都通过 SetNode→GetNode 虚拟节点接进主节点。
 MAIN_TYPE = "FeiHouEasyH3RH"
+MAIN_TYPE_KJ = "MiniMaxH3ReferenceToVideo"
 OUT_TYPE = "VHS_VideoCombine"
+SHAPE_FH = "feihou"
+SHAPE_KJ = "kj"
 MODE_REF = "Reference-to-video"
+# kj 那张的参考图槽位编号：SetNode 名字里的数字就是提示词里的 <Picture N>
+KJ_IMAGE_NAME = "图像%d"
+KJ_PROMPT_NAME = "提示词"
+KJ_MAX_IMAGES = 9
 # 云端只放开这三档画幅：界面上横/方/竖已经是全集，其它画幅留给「自定义宽高」
 RATIO_BY_ORIENT = {"h": "16:9", "s": "1:1", "v": "9:16"}
 TIERS = [360, 416, 480, 540, 640, 720, 768, 832, 928, 1024, 1080]
+# ResolutionSelector 的百万像素就照作者那张说明表的口径给（0.2→608x352 … 2.0→1920x1088）
+KJ_MP_MIN, KJ_MP_MAX = 0.2, 2.0
+
+
+def wf_id_of(s):
+    """从平台那一格里粘来的地址提出工作流编号，认这几种写法：
+    /workflow/<id>（编辑器与运行入口）、/ai-detail/<类型>/workflow/<id>、
+    /ai-detail/<id>（「查看工作流」那页，地址栏里最常见）、/post/<id>（作品详情页，
+    社区分享出来的就是这一种，进去点「查看工作流」才挂画布）。
+    只给编号、或一个 URL 都提不出，就按原样收。
+    """
+    s = str(s or "").strip()
+    for pat in (r"/workflow/(\d+)", r"/ai-detail/(?:\d+/)?(\d+)", r"/post/(\d+)"):
+        m = re.search(pat, s)
+        if m:
+            return m.group(1)
+    return s if s.isdigit() else ""
 
 
 class CloudError(RuntimeError):
@@ -52,12 +91,14 @@ _JS_READY = """
 var f=document.getElementById(arguments[0]);
 if(!f||!f.contentWindow)return JSON.stringify({err:'no_frame'});
 var n=((f.contentWindow.app||{}).graph||{})._nodes||[];
-var main=0,out=0;
+var main=0,out=0,kj=0;
 n.forEach(function(x){
   if(x.type==='FeiHouEasyH3RH')main=x.id;
+  else if(x.type==='MiniMaxH3ReferenceToVideo')kj=x.id;
   else if(x.type==='VHS_VideoCombine')out=x.id;
 });
-return JSON.stringify({nodes:n.length,main:main,out:out});
+if(!main&&kj)main=kj;
+return JSON.stringify({nodes:n.length,main:main,out:out,shape:(main===kj?'kj':'feihou')});
 """
 # 本地工作流文件这条路：真机量过托管前端确实有 app.loadGraphData（探针 --dump/--load 往返
 # 过一次：导出 65605 字节、灌回去 23 个节点、主节点 389 与输出节点 325 都按类型认得）。
@@ -89,11 +130,14 @@ _JS_WF_STATE = """
 var f=document.getElementById(arguments[0]);
 if(!f||!f.contentWindow)return JSON.stringify({state:'err',msg:'画布不在了'});
 var w=f.contentWindow,s=w.__qicWfLoad||{state:'none'};
-var n=((w.app||{}).graph||{})._nodes||[],main=0,out=0;
+var n=((w.app||{}).graph||{})._nodes||[],main=0,out=0,kj=0;
 n.forEach(function(x){if(x.type==='FeiHouEasyH3RH')main=x.id;
+  else if(x.type==='MiniMaxH3ReferenceToVideo')kj=x.id;
   else if(x.type==='VHS_VideoCombine')out=x.id;});
+if(!main&&kj)main=kj;
 return JSON.stringify({state:s.state||'none',msg:s.msg||'',nodes:n.length,
-  main:main,out:out,ids:n.map(function(x){return String(x.id);})});
+  main:main,out:out,shape:(main===kj?'kj':'feihou'),
+  ids:n.map(function(x){return String(x.id);})});
 """
 # 前端真正能接图：loadGraphData 是函数只是第一道，graph 也得挂上
 _JS_FRONTEND_READY = """
@@ -154,11 +198,17 @@ def check_workflow_json(path):
         if str(l[1]) not in ids or str(l[3]) not in ids:
             raise CloudError("工作流连线指向了不存在的节点（%s → %s）：重新导出一次再试"
                              % (l[1], l[3]))
-    if "FeiHouEasyH3RH" not in types:
-        raise CloudError("这份工作流里没有 H3 主节点（FeiHouEasyH3RH）：不是这条路要的那张图")
+    if MAIN_TYPE in types:
+        shape = SHAPE_FH
+    elif MAIN_TYPE_KJ in types:
+        shape = SHAPE_KJ
+    else:
+        raise CloudError("这份工作流里没有 H3 主节点（%s 或 %s）：不是这条路要的那张图"
+                         % (MAIN_TYPE, MAIN_TYPE_KJ))
     if "VHS_VideoCombine" not in types:
         raise CloudError("这份工作流里没有 VHS_VideoCombine 输出节点：取不到成片")
-    return {"nodes": len(nodes), "links": len(links), "ids": ids, "types": types}
+    return {"nodes": len(nodes), "links": len(links), "ids": ids, "types": types,
+            "shape": shape}
 # 自动找宿主页那套（列表页点卡片 → 作品页 → 运行）依赖平台 SPA 的路由，
 # 实测客户端跳转偶尔只落空壳、按钮不挂出来——不如内置一页稳，整段去掉。
 # 写之前先看一眼：主节点现在的控件名与值、媒体那一份的真实形状（拿它当模板）
@@ -295,6 +345,206 @@ if(!f||!f.contentWindow)return 0;
 var d=f.contentDocument||f.contentWindow.document;
 return d.querySelectorAll('.fh-h3-media-slot.has-media').length;
 """
+# ---------- 新形状（MiniMaxH3ReferenceToVideo）：先把「能写的节点」反查出来 ----------
+# 主节点上那几颗控件（prompt/width/height/length）多半挂着链接，直接改值等于写在
+# 一个被连线盖住的空壳上——序列化时链接值会把它们整个盖掉。所以要顺着链接往回走：
+# GetNode→同名 SetNode→它的来源，Reroute/Primitive/数学式这类中转再往前一跳，
+# 落到真正写数的 Text / PrimitiveFloat / ResolutionSelector 上；没连线的才写主节点自己。
+# 参考图同理：LoadImage 喂给哪个 SetNode，SetNode 名字里的数字就是提示词的 <Picture N>。
+# 这一步只读（不点保存、不提交）；写什么值由 Python 侧按接线算，页面脚本只照清单落值。
+_JS_KJ_MAP = """
+var f=document.getElementById(arguments[0]);
+if(!f||!f.contentWindow)return JSON.stringify({err:'no_frame'});
+var w=f.contentWindow,g=w.app.graph,nodes=(g||{})._nodes||[];
+function name0(n){var x=(n.widgets||[])[0];return x?String(x.value):'';}
+function linkOf(id){return (g.links||{})[id]||(id&&g.links&&g.links[String(id)])||null;}
+var sets={};
+nodes.forEach(function(n){if(n.type==='SetNode')sets[name0(n)]=n;});
+function back(node,depth){
+  for(var k=0;node&&k<(depth||8);k++){
+    if(node.type==='GetNode'){node=sets[name0(node)]||null;continue;}
+    if(node.type==='ComfyMathExpression'||node.type==='SetNode'
+       ||/Reroute|Primitive/i.test(node.type)){
+      var li=(node.inputs||[]).filter(function(x){return x.link;})[0];
+      if(!li)return node;
+      var L=linkOf(li.link);
+      node=L?g.getNodeById(L.origin_id):null;
+      continue;
+    }
+    return node;
+  }
+  return node;
+}
+var main=null;
+nodes.forEach(function(n){if(n.type==='MiniMaxH3ReferenceToVideo'&&!main)main=n;});
+if(!main)return JSON.stringify({err:'图上没有 MiniMaxH3ReferenceToVideo'});
+var out={main:main.id,roles:{},aspect:[],images:[],res:null,multiple:0};
+(main.inputs||[]).forEach(function(i){
+  var nm=(i.widget||{}).name;
+  if(!nm)return;
+  if(!i.link){out.roles[nm]={id:main.id,w:nm,src:'direct'};return;}
+  var L=linkOf(i.link),r=L?back(g.getNodeById(L.origin_id)):null;
+  if(!r)return;
+  if(r.type==='Text')out.roles[nm]={id:r.id,w:'text',src:'text'};
+  else if(/Primitive/.test(r.type))out.roles[nm]={id:r.id,w:'value',src:'prim'};
+  else if(r.type==='ResolutionSelector'){
+    out.roles[nm]={id:r.id,w:'aspect_ratio',src:'res'};
+    (r.widgets||[]).forEach(function(x){
+      if(x.name==='aspect_ratio'&&x.options&&x.options.values)
+        out.aspect=x.options.values.slice(0,40);
+      // 百万像素那一格只认它自己那几档（下拉或按 step 取整）：写一个它不认的小数，
+      // 节点回头自己改成别的一档，出片尺寸就不是界面要的那一格了。
+      if(x.name==='megapixels')out.res={
+        opts:x.options&&x.options.values?x.options.values.slice(0,60):null,
+        min:x.options?x.options.min:null,max:x.options?x.options.max:null,
+        step:x.options?x.options.step:null,val:x.value};
+      if(x.name==='multiple')out.multiple=x.value;});
+  } else out.roles[nm]={id:r.id,w:'',src:r.type};
+});
+nodes.forEach(function(n){
+  if(n.type!=='LoadImage')return;
+  var o=(n.outputs||[]).filter(function(x){return x.name==='IMAGE';})[0]||{};
+  var nm='';
+  (o.links||[]).some(function(t){var L=linkOf(t);if(!L)return false;
+    var r=g.getNodeById(L.target_id);
+    if(r&&r.type==='SetNode'){nm=name0(r);return true;}return false;});
+  out.images.push({id:n.id,name:nm,mode:n.mode});
+});
+var vhs=null;
+nodes.forEach(function(n){if(n.type==='VHS_VideoCombine'&&!vhs)vhs=n;});
+out.out=vhs?vhs.id:0;
+return JSON.stringify(out);
+"""
+# 照清单落值：每项是 [节点 id, 控件名, 值, 是否必须是下拉里的合法值, 标签]。
+# 下拉（画幅）不认就拦下来不写——写进去一个平台不认的字符串，出的是废片还照扣积分；
+# 参考图那一格反倒不能拦：刚 upload 上来的文件名还没进这一版前端缓存的列表里，
+# 但控件收得下，节点执行时按文件名取图（老形状那条路也是这么走的）。
+# 写完拿 graphToPrompt 的序列化结果对账：提示词和文件名有没有真的进去——
+# 虚拟节点会把值折成连线引用，主节点自己那格未必是字符串，所以整串里搜最稳。
+_JS_KJ_WRITE = """
+var fid=arguments[0],mid=arguments[1],spec=JSON.parse(arguments[2]);
+var f=document.getElementById(fid);
+if(!f||!f.contentWindow)return JSON.stringify({err:'no_frame'});
+var w=f.contentWindow,g=w.app.graph;
+var bad=[],warn=[],ck={},seen={};
+function widget(node,name){var hit=null;
+  (node.widgets||[]).forEach(function(x){if(x.name===name)hit=x;});return hit;}
+(spec.writes||[]).forEach(function(it){
+  var id=it[0],name=it[1],val=it[2],strict=it[3],tag=it[4];
+  if(!id||!name){bad.push('接线不全:'+tag);return;}
+  var node=g.getNodeById(id);
+  if(!node){bad.push('节点没了:'+tag);return;}
+  var x=widget(node,name);
+  if(!x){bad.push('没控件:'+tag);return;}
+  var vals=x.options&&x.options.values;
+  var ok=Array.isArray(vals)&&vals.length&&
+         vals.map(function(v){return String(v);}).indexOf(String(val))>=0;
+  if(strict&&!ok){warn.push(tag+'：这个值不在下拉里（'+String(val).slice(0,40)+'），没写');return;}
+  try{ if(x.setOption&&ok)x.setOption(val); else x.value=val; }
+  catch(e){ try{x.value=val;}catch(e2){bad.push('写不进:'+tag);return;} }
+  x.value=val;
+  try{ if(typeof x.callback==='function')x.callback(val); }catch(e){}
+  g.setNodeDirty&&g.setNodeDirty(node);
+  seen[tag]=String(x.value).slice(0,60);
+});
+g.setDirtyCanvas&&g.setDirtyCanvas(true,true);
+ck.seen=seen;
+function pack(){return JSON.stringify({bad:bad,warn:warn,check:ck});}
+function chk(o){
+  var ser='';try{ser=JSON.stringify((o&&o.output)||{});}catch(e){}
+  ck.serBytes=ser.length;
+  var frag=String(spec.frag||'');
+  ck.prompt=frag?ser.indexOf(frag)>=0:true;
+  ck.files=(spec.files||[]).map(function(fn){return ser.indexOf(String(fn))>=0;});
+  var m=g.getNodeById(mid)||{},wm={};
+  (m.widgets||[]).forEach(function(x){wm[x.name]=x.value;});
+  ck.width=wm.width;ck.height=wm.height;ck.length=wm.length;
+  return pack();
+}
+var p=null;
+try{
+  p=(w.app.graphToPrompt&&w.app.graphToPrompt())||(w.graphToPrompt&&w.graphToPrompt());
+}catch(e){ck.err=String(e&&e.message||e).slice(0,100);return pack();}
+if(p&&p.then)return p.then(chk,function(e){ck.err=String(e&&e.message||e).slice(0,100);
+                                          return pack();});
+return chk(p);
+"""
+
+
+def ratio_label(opts, ratio):
+    """在 ResolutionSelector 的实时可选值里挑出这一画幅那一条（"16:9 (Widescreen)" 之类）。
+    对不上就回空串：宁可停下说一声，也不拿一个近似档位糊过去。"""
+    want = str(ratio or "").strip()
+    for x in opts or []:
+        if str(x or "").strip() == want:
+            return str(x)
+    for x in opts or []:
+        if str(x or "").strip().startswith(want):
+            return str(x)
+    return ""
+
+
+def megapixels_of(w, h):
+    """界面那对宽高折成 ResolutionSelector 的百万像素（作者那张说明表就是这个口径）。
+    节点自己再按 multiple 取整，所以实际出片尺寸会比界面写的大半格小半格。"""
+    mp = max(0, int(w or 0)) * max(0, int(h or 0)) / 1000000.0
+    return round(min(KJ_MP_MAX, max(KJ_MP_MIN, mp)), 2)
+
+
+def _num_of(x):
+    """从 "0.9" / "0.9MP" / 0.9 里抠出那个数；抠不到回 None。"""
+    if isinstance(x, bool) or x is None:
+        return None
+    if isinstance(x, (int, float)):
+        return float(x)
+    m = re.search(r"\d+(?:\.\d+)?", str(x))
+    return float(m.group()) if m else None
+
+
+def snap_megapixels(target, res):
+    """这一格是下拉就挑它给的那几条；是浮点就原样写，让它自己取整。
+
+    下拉不能糊：写一个列表里没有的字符串节点不认，出的是废片还照扣积分。
+    浮点反倒别抢着替它取整——实测它的 options.step 报 1，真按 1 的格子圆会把
+    1280x720 抬到 1.0 兆像素（出片 1344x768，比界面要的还大一档，白烧显存）；
+    原样写 0.92，节点自己圆成 0.9，回读那个数才是真出片的数。
+    """
+    info = res if isinstance(res, dict) else {}
+    pairs = [(v, x) for x in (info.get("opts") or [])
+             for v in [_num_of(x)] if v is not None]
+    if not pairs:
+        return target
+    return min(pairs, key=lambda p: abs(p[0] - target))[1]
+
+
+def kj_out_size(mp, ratio, multiple=32):
+    """按「百万像素 × 画幅 × multiple」推节点最后算出来的那对宽高。
+    它是往上贴格子的：拿作者说明表对过 0.2→608x352、0.98→1344x768、2.0→1920x1088，
+    四舍五入算不出这三组，只有进一位能对上。"""
+    parts = str(ratio or "").replace(" ", "").split(":")[:2]
+    if len(parts) < 2:
+        return 0, 0
+    a, b = _num_of(parts[0]), _num_of(parts[1])
+    mp = _num_of(mp)
+    if not a or not b or not mp or mp <= 0:
+        return 0, 0
+    w = (mp * 1000000.0 * a / b) ** 0.5
+    h = w * b / a
+    m = _num_of(multiple)
+    if m and m > 0:
+        w = m * math.ceil(w / m)
+        h = m * math.ceil(h / m)
+    return int(w), int(h)
+
+
+def kj_frames(secs):
+    """秒数换成这份节点要的帧数：24fps，再补齐到「除 17 余 5」。
+    作者图上那条数学式就是这个（max(5,round(a*24)) + (5-…) % 17），
+    实测 12 秒 → 294 帧 → 回来的文件正好 294 帧 / 12.25 秒。"""
+    n = max(5, int(round(max(1, int(secs)) * 24)))
+    return n + (5 - n % 17) % 17
+
+
 # 输出节点：文件名 + 公开下载地址
 _JS_RESULT = """
 var f=document.getElementById(arguments[0]);
@@ -609,6 +859,7 @@ class CloudH3:
         self.wf_settle = max(0, min(60, int(self.cfg.get("wf_settle_sec") or 6)))
         self.tag = str(self.cfg.get("exec_tag") or "Plus")
         self.has_editor = False
+        self.shape = SHAPE_FH          # 这一张到底是哪种画法：feihou 还是虚拟节点那张
         self.wf_title = ""
         self._task_id = ""          # 本段提交后从任务列表认领到的 taskid
 
@@ -634,29 +885,24 @@ class CloudH3:
 
     def wf_id(self, wf=""):
         s = str(wf or self.cfg.get("workflow") or self.cfg.get("wf") or "").strip()
-        m = re.search(r"workflow/(\d+)", s)
-        if m:
-            return m.group(1)
-        if s.isdigit():
-            return s
-        return str(self.cfg.get("default_wf") or "")
+        # 界面填本地文件时提不出编号：那格旁边的 default_wf 先顶上，再退到内置默认那张
+        return wf_id_of(s) or wf_id_of(self.cfg.get("default_wf")) or DEFAULT_WF
 
     def wf_url(self, wf=""):
-        wid = self.wf_id(wf)
-        if not wid:
-            raise CloudError("没给工作流：在「视频生成」或「剧本成片」页填一个已跑通过的 H3 工作流地址")
-        return WF_URL % wid
+        return WF_URL % self.wf_id(wf)
 
     def wf_src(self, wf=""):
-        """这份工作流从哪儿来：("file", 本地路径) 或 ("remote", 平台编号)，都没给就 ("", "")。
+        """这份工作流从哪儿来：("file", 本地路径) 或 ("remote", 平台编号/地址)。
 
         判据只认结尾是不是 .json/.txt——平台上「导出工作流」存下来就是这份；
         导出的 JSON 里不带工作流编号（实测只有一个随机 uuid），所以本地那份
         还得借一个平台页进去跑，见 host_url。
+
+        那一格空着就开默认那张（DEFAULT_WF）：用户不用填、也不用去网页里导出。
         """
         s = str(wf or self.cfg.get("workflow") or self.cfg.get("wf") or "").strip()
         if not s:
-            return ("", "")
+            return ("remote", WF_URL % DEFAULT_WF)
         if re.search(r"\.json$|\.txt$", s, re.I):
             path = self._ref(s)
             if not path:
@@ -664,17 +910,29 @@ class CloudH3:
             return ("file", path)
         return ("remote", s)
 
+    def wf_label(self, kind="", src=""):
+        """这一张在界面上怎么称呼：默认那张说「默认」，本地那份只报文件名。"""
+        if not src:
+            kind, src = self.wf_src()
+        if kind == "file":
+            return "本地 · %s" % os.path.basename(src)
+        wid = wf_id_of(src)
+        return ("默认 · %s" % DEFAULT_WF_NAME if wid == DEFAULT_WF
+                else "平台 · %s" % (wid or src[:40]))
+
     def host_url(self):
-        """本地那份借哪一页进去：手动覆盖 → 平台默认 → 内置那一页。
+        """本地那份借哪一页进去：手动覆盖 → 平台默认 → 默认那张 → 内置那一页。
 
         换的是画布上那张图，跑它的还是那台实例——「换图不换实例」。
-        内置页只是入口，谁都借得到；真跑的一定是灌进去的本地画布。
+        入口页只是跳板，真跑的一定是灌进去的那张画布。
         """
         for cand in (self.cfg.get("wf_host"), self.cfg.get("default_wf"),
-                     HOST_WF_FALLBACK):
+                     DEFAULT_WF, HOST_WF_FALLBACK):
             s = str(cand or "").strip()
-            m = re.search(r"workflow/(\d+)", s)
-            wid = m.group(1) if m else (s if s.isdigit() else "")
+            if re.search(r"\.json$|\.txt$", s, re.I):
+                continue          # default_wf 被人填成本地文件时别把路径当编号拼进 URL
+            # 三种平台地址写法（/workflow/、/ai-detail/、/ai-detail/<类型>/）都提得出一样的编号
+            wid = wf_id_of(s)
             if wid:
                 return WF_URL % wid
         return ""
@@ -740,6 +998,7 @@ class CloudH3:
                     return None, "图上没有 H3 主节点/输出节点"
                 else:
                     return {"main": st.get("main"), "out": st.get("out"),
+                            "shape": st.get("shape") or SHAPE_FH,
                             "nodes": len(got)}, ""
             time.sleep(0.5)
         return None, short_msg or "等 %d 秒也没把工作流挂到画布上" % limit
@@ -758,8 +1017,10 @@ class CloudH3:
             self._wait_frontend(tab, fid, stop)
             ids, err = self._load_once(tab, fid, txt, stop, meta, settle=self.wf_settle)
             if ids:
-                self.wf_title = "本地 · %s" % os.path.basename(path)
-                self.log("· 灌入本地工作流「%s」：节点 %s 个 · 主节点 %s · 输出节点 %s"
+                # 内置默认那张在界面上说人话，别摆出安装目录里的一长串
+                self.wf_title = self.wf_label("file", path)
+                self.shape = str(ids.get("shape") or SHAPE_FH)
+                self.log("· 灌入工作流「%s」：节点 %s 个 · 主节点 %s · 输出节点 %s"
                          % (os.path.basename(path), ids["nodes"], ids["main"], ids["out"]))
                 return ids
             last = err
@@ -898,51 +1159,79 @@ class CloudH3:
                     ids = self.load_local_wf(tab, fid, src, should_stop)
                 else:
                     ids = self._wait_graph(tab, fid, should_stop)
-                self._wait_editor(tab, fid, should_stop)
-                self._log_shape(tab, fid, ids["main"])
+                shape = str(ids.get("shape") or SHAPE_FH)
+                self.shape = shape
+                kmap = None
+                if shape == SHAPE_KJ:
+                    # 新形状没有提示词编辑器可等，也没有 feihou 那串属性可看：
+                    # 要等的是接线——谁喂主节点的提示词、谁喂时长和尺寸。
+                    kmap = self._kj_map(tab, fid)
+                else:
+                    self._wait_editor(tab, fid, should_stop)
+                    self._log_shape(tab, fid, ids["main"])
                 self._p(on_progress, should_stop,
                         "云端：上传参考图（%d 张）…" % len(refs))
                 media = []
                 for i, path in enumerate(refs, 1):
                     fn, sub = self.upload(path, state)
                     media.append(self.media_item(fn, sub, i))
-                try:
-                    prompt_html, chips = mention.render_prompt(
-                        str(p.get("prompt") or ""), media)
-                except ValueError as e:
-                    raise CloudError(str(e))
-                spec = {
-                    "prompt": str(p.get("prompt") or ""),
-                    # 有 chip 时编辑器写 HTML；单图且没写编号时留空，走原来的纯文本通路
-                    "prompt_html": prompt_html or "",
-                    "chips": chips,
-                    "media": media,
-                    # 画廊预览：H3yun 每段都写这一份；少了它画廊不按新图刷新
-                    "preview": {"shown": {"aspect_ratio": size["aspect_ratio"],
-                                          "fps": 24, "resolution": size["resolution"]},
-                                "fallback": {"aspect_ratio": size["aspect_ratio"], "fps": 24}},
-                    "widgets": {
-                        # 有图就走「参考生视频」：节点的参考模式才认 embedded_media 清单。
-                        # 之前切到 I2V/首尾帧，序列化里 mode=image，但节点执行时按参考槽取图，
-                        # 拿不到就把整段判成「参考生视频未收到图片或视频」——这是那条报错的来源。
-                        "mode": MODE_REF,
-                        "seconds": secs,
-                        "fps": 24,
-                        "audio_duration_auto": "Off",
-                        "ref_image_size": "640",
-                        "reference_mention_mode": "By index",
-                        # 节点自带的提示词扩写会再去请求一次 LLM，SSL 一抖整段就废；H3yun 默认关
-                        "prompt_optimizer_enabled": False,
-                        "reference_text_only": not bool(media),
-                        "low_vram_streamed_attention": False,
-                        "resolution": size["resolution"],
-                        "aspect_ratio": size["aspect_ratio"],
-                        "width": size["width"],
-                        "height": size["height"],
-                    },
-                }
-                self._p(on_progress, should_stop, "云端：写入参数…")
-                self._write(tab, fid, ids, spec, secs, size)
+                if shape == SHAPE_KJ:
+                    slots = kmap.get("slots") or {}
+                    gap = [i for i in range(1, len(refs) + 1) if i not in slots]
+                    if gap:
+                        raise CloudError("这张图只留着 %d 个参考图槽位，第 %s 号被旁路了："
+                                         "少给几张图或换一张图"
+                                         % (len(slots), "、".join(str(x) for x in gap)))
+                    try:
+                        prompt_text, _pics = mention.picture_text(
+                            str(p.get("prompt") or ""), len(refs))
+                    except ValueError as e:
+                        raise CloudError(str(e))
+                    files = [(i, slots[i],
+                              ("%s/%s" % (sub, fn)) if sub else fn)
+                             for i, m in enumerate(media, 1)
+                             for fn, sub in [(m["filename"], m["subfolder"])]]
+                    self._p(on_progress, should_stop, "云端：写入参数…")
+                    self._write_kj(tab, fid, ids, kmap, prompt_text, secs, size, files)
+                else:
+                    try:
+                        prompt_html, chips = mention.render_prompt(
+                            str(p.get("prompt") or ""), media)
+                    except ValueError as e:
+                        raise CloudError(str(e))
+                    spec = {
+                        "prompt": str(p.get("prompt") or ""),
+                        # 有 chip 时编辑器写 HTML；单图且没写编号时留空，走原来的纯文本通路
+                        "prompt_html": prompt_html or "",
+                        "chips": chips,
+                        "media": media,
+                        # 画廊预览：H3yun 每段都写这一份；少了它画廊不按新图刷新
+                        "preview": {"shown": {"aspect_ratio": size["aspect_ratio"],
+                                              "fps": 24, "resolution": size["resolution"]},
+                                    "fallback": {"aspect_ratio": size["aspect_ratio"],
+                                                  "fps": 24}},
+                        "widgets": {
+                            # 有图就走「参考生视频」：节点的参考模式才认 embedded_media 清单。
+                            # 之前切到 I2V/首尾帧，序列化里 mode=image，但节点执行时按参考槽取图，
+                            # 拿不到就把整段判成「参考生视频未收到图片或视频」——这是那条报错的来源。
+                            "mode": MODE_REF,
+                            "seconds": secs,
+                            "fps": 24,
+                            "audio_duration_auto": "Off",
+                            "ref_image_size": "640",
+                            "reference_mention_mode": "By index",
+                            # 节点自带的提示词扩写会再去请求一次 LLM，SSL 一抖整段就废；H3yun 默认关
+                            "prompt_optimizer_enabled": False,
+                            "reference_text_only": not bool(media),
+                            "low_vram_streamed_attention": False,
+                            "resolution": size["resolution"],
+                            "aspect_ratio": size["aspect_ratio"],
+                            "width": size["width"],
+                            "height": size["height"],
+                        },
+                    }
+                    self._p(on_progress, should_stop, "云端：写入参数…")
+                    self._write(tab, fid, ids, spec, secs, size)
                 base_name = self._filename(tab, fid, ids["out"])
                 self._p(on_progress, should_stop, "云端：提交任务…")
                 hist0 = self.history_count(tab, fid)   # 提交前有几条，之后才知道多没多
@@ -1008,9 +1297,12 @@ class CloudH3:
                 d = {}
             if d.get("main") and d.get("out"):
                 self.wf_title = str(getattr(tab, "title", "") or "")
-                return {"main": d["main"], "out": d["out"]}
+                return {"main": d["main"], "out": d["out"],
+                        "nodes": d.get("nodes"),
+                        "shape": d.get("shape") or SHAPE_FH}
             time.sleep(3)
-        raise CloudError("图加载完但没找到 H3 主节点/输出节点：这份工作流不是 H3 成片图")
+        raise CloudError("图加载完但没找到 H3 主节点/输出节点：这份工作流不是 H3 成片图"
+                         "（要 %s 或 %s 那两种画法之一）" % (MAIN_TYPE, MAIN_TYPE_KJ))
 
     def _wait_editor(self, tab, fid, stop, limit=20):
         """等提示词编辑器挂好再写。等不到也只是记一条——有的工作流版本可能真没有编辑器。"""
@@ -1151,9 +1443,142 @@ class CloudH3:
             self.log("· 提示词写进了控件而不是编辑器：这份云上没渲染出编辑器，可能被 graphToPrompt 覆盖")
         return d
 
+    # ---------- 新形状（虚拟节点那张）：认接线 → 照清单写 → 对序列化 ----------
+    def _kj_map(self, tab, fid):
+        """顺着 SetNode/GetNode 把「能写的节点」认出来。认不到就停，不拿默认值瞎写。"""
+        from .store import brief_error
+        try:
+            raw = self.js(tab, _JS_KJ_MAP, fid)
+        except Exception as e:
+            raise CloudError("读这张图的接线失败：%s" % brief_error(e, 80))
+        try:
+            d = json.loads(raw or "{}")
+        except ValueError:
+            raise CloudError("读这张图的接线：页面回的不是 JSON")
+        if d.get("err"):
+            raise CloudError("这份工作流不是能写的 H3 图：%s" % str(d["err"])[:80])
+        roles = d.get("roles") or {}
+        miss = [k for k in ("prompt", "length", "width", "height") if k not in roles]
+        if miss:
+            raise CloudError("主节点上没有 %s 这几个入参：这张图的写法软件还不认"
+                             % "、".join(miss))
+        for k in ("prompt", "length", "width", "height"):
+            src = str((roles[k] or {}).get("src") or "")
+            if src not in ("direct", "text", "prim", "res"):
+                raise CloudError("主节点的 %s 是从「%s」接过来的，这一种还没学会写"
+                                 % (k, src or "未知节点"))
+        slots = {}
+        for x in d.get("images") or []:
+            m = re.search(r"(\d+)", str(x.get("name") or ""))
+            if not m or int(x.get("mode") or 0) != 0:
+                continue        # 旁路掉的槽位不能挂图，作者就是这么留空档的
+            slots.setdefault(int(m.group(1)), int(x["id"]))
+        d["slots"] = slots
+        self.log("· 接线：提示词→%s(%s) · 时长→%s(%s) · 尺寸→%s(%s) · 参考图槽 %d 个"
+                 % ((roles["prompt"] or {}).get("id"), (roles["prompt"] or {}).get("src"),
+                    (roles["length"] or {}).get("id"), (roles["length"] or {}).get("src"),
+                    (roles["width"] or {}).get("id"), (roles["width"] or {}).get("src"),
+                    len(slots)))
+        return d
+
+    def _kj_writes(self, map, prompt, secs, size):
+        """按接线算出要写的每一格：[节点 id, 控件名, 值, 必须是合法选项, 标签]。"""
+        r = map.get("roles") or {}
+        w = []
+        p = r.get("prompt") or {}
+        w.append([p.get("id"), p.get("w"), prompt, False, "prompt"])
+        # 时长挂在 PrimitiveFloat 上时写的是秒数——它后面那条数学式自己换成帧数；
+        # 主节点那一格没连线才由我们直接写帧数（照作者那条式子的口径）。
+        l = r.get("length") or {}
+        w.append([l.get("id"), l.get("w"),
+                  secs if l.get("src") != "direct" else kj_frames(secs),
+                  False, "seconds"])
+        wd, hg = r.get("width") or {}, r.get("height") or {}
+        if (wd.get("src") == "res" and hg.get("src") == "res"
+                and wd.get("id") == hg.get("id")):
+            label = ratio_label(map.get("aspect"), size["aspect_ratio"])
+            if not label:
+                raise CloudError("这张图的尺寸选择器里没有 %s 画幅（它给的是 %s）："
+                                 "换个画幅或换一张图"
+                                 % (size["aspect_ratio"],
+                                    "、".join(str(x) for x in (map.get("aspect") or [])[:6])))
+            w.append([wd.get("id"), "aspect_ratio", label, True, "aspect"])
+            w.append([wd.get("id"), "megapixels",
+                      snap_megapixels(megapixels_of(size["width"], size["height"]),
+                                      map.get("res")), False, "megapixels"])
+        else:
+            w.append([wd.get("id"), wd.get("w"), size["width"], False, "width"])
+            w.append([hg.get("id"), hg.get("w"), size["height"], False, "height"])
+        return w
+
+    def _write_kj(self, tab, fid, ids, map, prompt, secs, size, files):
+        """files 是 [(序号, 节点 id, 文件名)]：先照清单落值，再拿序列化结果对账。"""
+        writes = self._kj_writes(map, prompt, secs, size)
+        names = []
+        for n, nid, fn in files:
+            tag = "图%d" % n
+            writes.append([nid, "image", fn, False, tag])
+            names.append((tag, fn))
+        spec = {"writes": writes,
+                # 对账用的两串：提示词开头那段 + 每张图的文件名（按序号排）
+                "frag": str(prompt or "")[:24],
+                "files": [fn for _tag, fn in names]}
+        try:
+            raw = self.js(tab, _JS_KJ_WRITE, fid, ids["main"],
+                          json.dumps(spec, ensure_ascii=False))
+        except Exception as e:
+            from .store import brief_error
+            raise CloudError("写入节点出错：%s" % brief_error(e, 80))
+        try:
+            d = json.loads(raw or "{}")
+        except ValueError:
+            raise CloudError("写入节点的返回读不懂：%s" % str(raw)[:160])
+        if d.get("err"):
+            raise CloudError("写入失败：%s" % d["err"])
+        c = d.get("check") or {}
+        if c.get("err"):
+            raise CloudError("提交前自检读不到序列化结果（%s）：不敢盲提交"
+                             % str(c.get("err"))[:80])
+        for x in (d.get("warn") or []):
+            self.log("· 接线提醒：%s" % str(x)[:80])
+        bad = list(d.get("bad") or [])
+        seen = c.get("seen") or {}
+        if str(seen.get("prompt") or "")[:24] != str(prompt or "")[:24]:
+            bad.append("提示词写不进那格（回读「%s」）" % str(seen.get("prompt"))[:24])
+        if prompt and not c.get("prompt"):
+            bad.append("提示词没进序列化：交上去的还是这张图原来那段话")
+        if str(seen.get("seconds")) != str(secs):
+            bad.append("时长没进去（回读 %s，该 %s）" % (seen.get("seconds"), secs))
+        for i, ok in enumerate(c.get("files") or []):
+            if not ok:
+                bad.append("第 %d 张参考图没进序列化" % (i + 1))
+        if bad:
+            raise CloudError("提交前自检没过：%s" % "、".join(str(x)[:60] for x in bad[:6]))
+        # 尺寸只提醒不拦：这一档差半格就差了，不至于废片
+        if "aspect" in seen:
+            # 走分辨率选择器时，主节点那两格是被连线盖住的旧值，不能拿它当回报；
+            # 照选择器自己的口径（百万像素 × 画幅 × multiple）推出真正会出的那对宽高。
+            ow, oh = kj_out_size(seen.get("megapixels"), size["aspect_ratio"],
+                                 map.get("multiple"))
+            if (ow, oh) != (size["width"], size["height"]):
+                self.log("· 画幅 %s · %d 秒 · 出片 %dx%d（界面写的 %dx%d，"
+                         "这张图的尺寸档只到这一格）"
+                         % (seen.get("aspect"), secs, ow or size["width"],
+                            oh or size["height"], size["width"], size["height"]))
+            else:
+                self.log("· 画幅 %s · %d 秒 · 出片 %dx%d"
+                         % (seen.get("aspect"), secs, ow, oh))
+        else:
+            for k in ("width", "height"):
+                if c.get(k) not in (None, size[k]):
+                    self.log("· 主节点读回的 %s=%s，界面写的是 %s：这一段出片尺寸会和界面不一样"
+                             % (k, c.get(k), size[k]))
+        return d
+
     def _filename(self, tab, fid, out):
         try:
-            return str(json.loads(self.js(tab, _JS_RESULT, fid, out) or "{}").get("filename") or "")
+            return str(json.loads(self.js(tab, _JS_RESULT, fid, out) or "{}")
+                       .get("filename") or "")
         except ValueError:
             return ""
 

@@ -250,7 +250,8 @@ function cloudProblem(){
     return (+b.failed||0)
       ? '可用的号都标成「出片失败」了：到「环境管理 → 云端账号」重新登录或换号'
       : '还没有可用的登录号：到「环境管理 → 云端账号」登录并保存';
-  if(!wfNow())return '还差一份 H3 工作流：在下面那格填网页上跑通过的地址或本地 .json';
+  if(!wfNow()&&!b.wf_default)
+    return '还差一份 H3 工作流：在下面那格填网页上跑通过的地址或本地 .json';
   if(!refsNow().length)return '云端按参考生成：先选一张参考图（本地可纯文字起步）';
   return '';
 }
@@ -261,13 +262,15 @@ function acctSel(f){
   return C.sel('film.acct',list.map(a=>({name:a.name,code:a.id})),'自动分配（按空闲号）');
 }
 function wfRow(cloud){
-  const local=isFile();
+  const local=isFile(),cur=wfNow(),def=String((brief&&brief.wf_default)||'');
   return C.field('工作流',
     C.pathrow('cloud.workflow',local?'本地导出的工作流（.json）':
       '网页上跑通过的 H3 工作流地址或 ID','file',true)+
-    (local?'<div data-role="wfchk" style="margin-top:4px">'+wfChkHTML()+'</div>':''),
+    (local?'<div data-role="wfchk" style="margin-top:4px">'+wfChkHTML()+'</div>':'')+
+    (cur?'<div class="fine mut" style="margin-top:4px">这趟用的是上面那份，不是默认那张 '+
+      '<button class="btn" onclick="MIC.film.useWfDefault()">用回默认</button></div>':''),
     '和视频页共用同一份：粘地址，或把「导出工作流」存下的 .json 拖进来。本地文件开跑时自己借平台页面。'+
-    (wfNow()?'':' 现在还没填，云端这条路不算通。'));
+    (cur?'':' 留空＝默认那张'+(def?'（#'+def+'）':'')+'。'));
 }
 /* 时长快捷键：只做「写一个键 + 重画」，不参与 data-k——
    和「秒」输入框绑同一个键的话，点按钮时读屏会把输入框里的旧数又写回去 */
@@ -333,6 +336,8 @@ function projectsHTML(){
         `${it.film?' · 有成片':''}${cur?' · 当前':''}</span></div>
       ${run?'':`<button class="btn sm" onclick="MIC.film.resumeAt(${i})">继续</button>`}
       ${it.film?`<button class="btn sm gho" onclick="MIC.film.openAt(${i})">${ic('play','s')}成片</button>`:''}
+      ${run?'':`<button class="btn sm gho" title="删掉这个工程" `+
+        `onclick="MIC.film.delAt(${i})">${ic('close','s')}</button>`}
     </div>`;
   }).join('');
 }
@@ -483,6 +488,7 @@ function toastErr(r,def){MIC.toast((r&&r.msg)||def);}
 
 MIC.film={
   paint,
+  useWfDefault(){MIC.form.commitPath('cloud.workflow','');MIC.render();},
   refresh(){askList(true);},
   setDur(v){
     MIC.form.commitPath('film.total',+v||60);
@@ -707,6 +713,18 @@ MIC.film={
   resumeAt(i){const it=projects[i];if(it)this.resume(it.dir);},
   mergeAt(i){const it=projects[i];if(it)this.merge(it.dir);},
   openAt(i){const it=projects[i];if(it&&it.film)MIC.api.openPath(it.film);},
+  /* 小叉号删工程：整个目录搬进回收目录（不是硬删），所以先问一句 */
+  delAt(i){
+    const it=projects[i];if(!it)return;
+    const t=it.title||it.id;
+    if(!confirm('删掉工程「'+t+'」？分镜和已出的段一起搬走，回收目录里还留几天。'))return;
+    MIC.api.filmDelete(it.dir).then(r=>{
+      if(!r||!r.ok){MIC.toast((r&&r.msg)||'删除失败');return;}
+      projects=projects.filter(x=>x.dir!==it.dir);
+      MIC.render();
+      MIC.toast('已删工程：'+t);
+    }).catch(()=>MIC.toast('删除失败'));
+  },
 };
 
 /* 生图/视频页的「AI 润色」：取当前那格的文字，交给文本 API 按专业构图语言重写。

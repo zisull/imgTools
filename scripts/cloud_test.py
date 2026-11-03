@@ -377,10 +377,27 @@ def test_wf_src():
         json.dump({"nodes": [{"id": 1, "type": "FeiHouEasyH3RH"}], "links": []}, f)
 
     g = cg.CloudH3(ROOT, {}, None, None)
-    assert g.wf_src() == ("", ""), g.wf_src()
+    # 留空＝软件自带那张默认画布（平台上那张 H3 参考生视频），不用人填也不用拖文件
+    kind, src = g.wf_src()
+    assert (kind, src) == ("remote", cg.WF_URL % cg.DEFAULT_WF), src
+    assert g.wf_label(kind, src).startswith("默认 · "), g.wf_label(kind, src)
+    # 平台那一格能粘好几种地址，编号都提得出来、都拼成编辑器入口那一页
+    for u, want in (("https://www.runninghub.cn/ai-detail/1/workflow/123", "123"),
+                    ("https://www.runninghub.cn/ai-detail/%s" % cg.DEFAULT_WF, cg.DEFAULT_WF),
+                    ("https://www.runninghub.cn/ai-detail/2/%s" % cg.DEFAULT_WF, cg.DEFAULT_WF),
+                    ("https://www.runninghub.cn/workflow/%s" % cg.DEFAULT_WF, cg.DEFAULT_WF),
+                    # 分享页那一格也算：人从社区里点进来的就是这种地址
+                    ("https://www.runninghub.cn/post/%s/?inviteCode=rh-v1333" % cg.DEFAULT_WF,
+                     cg.DEFAULT_WF),
+                    (cg.DEFAULT_WF, cg.DEFAULT_WF)):
+        assert cg.wf_id_of(u) == want, u
     g.cfg = {"workflow": "https://www.runninghub.cn/ai-detail/1/workflow/123"}
     assert g.wf_src() == ("remote", g.cfg["workflow"])
+    assert g.wf_url() == cg.WF_URL % "123", g.wf_url()
+    assert g.wf_label("remote", g.cfg["workflow"]).startswith("平台 · ")
+    # 默认那张顶上：填了本地文件或什么都没填时 wf_id 不能回空，否则拼不出入口页
     g.cfg = {"workflow": p}
+    assert g.wf_id() == cg.DEFAULT_WF, g.wf_id()
     assert g.wf_src() == ("file", os.path.normpath(p)), g.wf_src()
     g.cfg = {"workflow": os.path.join(d, "nope.json")}
     try:
@@ -396,8 +413,98 @@ def test_wf_src():
     g.cfg = {"wf_host": "", "default_wf": "888"}
     assert g.host_url() == cg.WF_URL % "888", g.host_url()
     g.cfg = {"workflow": p}
-    assert g.host_url() == cg.HOST_WF_FALLBACK, g.host_url()
-    print("  ✓ 云端工作流：平台地址 / 本地 .json 借用内置页 / 手动覆盖仍优先")
+    assert g.host_url() == cg.WF_URL % cg.DEFAULT_WF, g.host_url()
+    # 连默认那张都没了也要有页可开：内置那一页是最后一级跳板
+    keep = cg.DEFAULT_WF
+    try:
+        cg.DEFAULT_WF = ""
+        assert g.host_url() == cg.HOST_WF_FALLBACK, g.host_url()
+    finally:
+        cg.DEFAULT_WF = keep
+    print("  ✓ 云端工作流：留空＝内置默认那张 / 平台那几种地址都提得出编号 / 手动覆盖仍优先")
+
+
+def test_kj_write():
+    """新形状（参数挂在虚拟节点上那张）：认完接线之后要写哪几格、尺寸怎么折。
+
+    这几条都是真机量出来的，钉住免得以后改回「拿默认值瞎写」：
+      · 帧数那条数学式（5 秒→124、12 秒→294，回来的文件就是 294 帧 / 12.25 秒）；
+      · 分辨率选择器往上贴格子（作者说明表 0.2→608x352、0.98→1344x768）；
+      · 百万像素那格是浮点，别替它抢着圆——按它报的 step=1 圆会把 1280x720 抬到 1.0 兆，
+        出片反而比界面大一档，白烧显存。
+    """
+    from cloudkit import gen as cg
+    assert [cg.kj_frames(s) for s in (5, 6, 8, 10, 12, 15)] == [124, 158, 192, 243, 294, 362]
+    assert cg.kj_out_size("0.9", "16:9", 32) == (1280, 736)
+    assert cg.kj_out_size(0.98, "16:9", 32) == (1344, 768)
+    assert cg.kj_out_size(0.2, "16:9", 32) == (608, 352)
+    assert cg.kj_out_size(0.9, "9:16", 32) == (736, 1280)
+    assert cg.kj_out_size(0.9, "坏画幅", 32) == (0, 0)
+    assert cg.megapixels_of(1280, 720) == 0.92
+    assert cg.snap_megapixels(0.92, {"opts": ["0.5", "0.9", "1.5"]}) == "0.9"
+    assert cg.snap_megapixels(0.92, {"opts": None, "step": 1}) == 0.92
+    opts = ["1:1 (Square)", "9:16 (Portrait Widescreen)", "16:9 (Widescreen)"]
+    assert cg.ratio_label(opts, "16:9") == "16:9 (Widescreen)"
+    assert cg.ratio_label(opts, "4:5") == ""
+
+    g = cg.CloudH3(ROOT, {}, None, None)
+    size = cg.pick_size(1280, 720)
+    res = {"roles": {"prompt": {"id": 263, "w": "text", "src": "text"},
+                     "length": {"id": 259, "w": "value", "src": "prim"},
+                     "width": {"id": 252, "w": "aspect_ratio", "src": "res"},
+                     "height": {"id": 252, "w": "aspect_ratio", "src": "res"}},
+           "aspect": opts, "res": {"opts": None, "step": 1}, "multiple": 32}
+    w = g._kj_writes(res, "雨夜的旧书店 <Picture 1>", 5, size)
+    assert [x[4] for x in w] == ["prompt", "seconds", "aspect", "megapixels"], w
+    assert w[0][:3] == [263, "text", "雨夜的旧书店 <Picture 1>"], w[0]
+    assert w[1][2] == 5, "接了数学式的那格写秒数，帧数由它自己算"
+    assert w[2][2] == "16:9 (Widescreen)" and w[2][3] is True, "画幅必须是下拉里的值"
+    assert w[3][2] == 0.92
+    # 主节点自己带宽高（没接选择器）：直接写那两格，不去找画幅；时长也就写帧数
+    direct = {"roles": {"prompt": {"id": 389, "w": "prompt", "src": "direct"},
+                        "length": {"id": 389, "w": "length", "src": "direct"},
+                        "width": {"id": 389, "w": "width", "src": "direct"},
+                        "height": {"id": 389, "w": "height", "src": "direct"}}}
+    w2 = g._kj_writes(direct, "x", 5, size)
+    assert [x[4] for x in w2] == ["prompt", "seconds", "width", "height"], w2
+    assert w2[1][2] == cg.kj_frames(5) and w2[0][3] is False
+    # 画幅对不上这张图的档位：停下说一声，别交一个它不认的字符串出去
+    bad = dict(res, aspect=["1:1 (Square)"])
+    try:
+        g._kj_writes(bad, "x", 5, size)
+        raise AssertionError("画幅不在选项里却没报错")
+    except cg.CloudError as e:
+        assert "画幅" in str(e), str(e)
+
+    # 形状：两种画法都得认，缺主节点的照样拦
+    d = tempfile.mkdtemp(prefix="kj_", dir=TMP)
+
+    def wf(nodes):
+        p = os.path.join(d, "n.json")
+        with open(p, "w", encoding="utf-8") as f:
+            json.dump({"nodes": nodes, "links": []}, f)
+        return p
+    kj = wf([{"id": 265, "type": cg.MAIN_TYPE_KJ}, {"id": 364, "type": cg.OUT_TYPE}])
+    assert cg.check_workflow_json(kj)["shape"] == cg.SHAPE_KJ
+    fh = wf([{"id": 389, "type": cg.MAIN_TYPE}, {"id": 325, "type": cg.OUT_TYPE}])
+    assert cg.check_workflow_json(fh)["shape"] == cg.SHAPE_FH
+    try:
+        cg.check_workflow_json(wf([{"id": 1, "type": "KSampler"}]))
+        raise AssertionError("没有 H3 主节点却没报错")
+    except cg.CloudError as e:
+        assert "主节点" in str(e), str(e)
+
+    # 界面口径的编号 → 节点认的 <Picture N>
+    assert cg.mention.picture_text("a @1 b [2] c", 2) == ("a <Picture 1> b <Picture 2> c", 2)
+    txt, n = cg.mention.picture_text("什么编号都没写", 3)
+    assert n == 3 and txt.startswith("<Picture 1> <Picture 2> <Picture 3>"), txt
+    assert cg.mention.picture_text("单图不用点名", 1) == ("单图不用点名", 0)
+    try:
+        cg.mention.picture_text("@5 超出了", 2)
+        raise AssertionError("引用越界却没报错")
+    except ValueError as e:
+        assert "第 5 张" in str(e), str(e)
+    print("  ✓ 新形状写路径：接线清单 / 帧数与尺寸口径 / 两种画法都认 / 编号换成 <Picture N>")
 
 
 def test_load_local_wf():
@@ -429,8 +536,8 @@ def test_load_local_wf():
     g.js = lambda *a: json.dumps({"ok": 1, "state": "ok", "ids": ["1", "2"],
                                   "main": 1, "out": 2, "nodes": 2})
     assert g.load_local_wf(Tab(), "f", good, lambda: False) == {
-        "main": 1, "out": 2, "nodes": 2}
-    assert g.wf_title.startswith("本地 · "), g.wf_title
+        "main": 1, "out": 2, "nodes": 2, "shape": cg.SHAPE_FH}
+    assert g.shape == cg.SHAPE_FH and g.wf_title.startswith("本地 · "), g.wf_title
 
     def boom(path, tab=None):
         try:
@@ -495,7 +602,7 @@ def test_load_local_wf():
 
     g3.js = js3
     assert g3.load_local_wf(Tab(), "f", good, lambda: False) == {
-        "main": 1, "out": 2, "nodes": 2}
+        "main": 1, "out": 2, "nodes": 2, "shape": cg.SHAPE_FH}
     assert seq["load"] == 1, seq          # 稳住了就别再灌第二遍
     # 默认值：配置文件没写就是 6 秒，写了按写的
     assert cg.CloudH3(ROOT, {}, None, None).wf_settle == 6
@@ -1119,6 +1226,7 @@ def main():
         test_keepalive_sweep,
         test_pick_size,
         test_wf_src,
+        test_kj_write,
         test_load_local_wf,
         test_write_selfcheck,
         test_media_item,
