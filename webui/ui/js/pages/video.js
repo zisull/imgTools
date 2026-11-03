@@ -10,12 +10,12 @@ const C=MIC.form, ic=MIC.ic, esc=MIC.esc;
 const LEN=[{code:'5',name:'5 秒'},{code:'10',name:'10 秒'},{code:'15',name:'15 秒'}];
 
 /* H3 的原生画幅是 1344×768（768P / 16:9），竖屏镜像 768×1344。
-   按 16 取整会算成 1360，所以给这一档登记一个换算：下拉里写的、换朝向写回的、
-   后端算的全是同一套数——以前前端一套 sizeOf、后端一套 tier×ratio，两边各算各的。 */
+   别的档按 32 贴格（720P 短边 736、480P 长边 864），latent 才不会出现奇数边；
+   下拉里写的、换朝向写回的、后端算的全是同一套数。 */
 const NATIVE={h768:[1344,768],v768:[768,1344]};
 C.dimSnap['video.size']=function(p,o){
   const n=NATIVE[o+p];
-  return n?{w:n[0],h:n[1]}:C.pDims(p,o);
+  return n?{w:n[0],h:n[1]}:C.pDims32(p,o);
 };
 
 /* 换通道顺手把清晰度收进这一档的档位表：云端能到 2K，本地只到 768（权重原生档）。
@@ -112,7 +112,7 @@ function acctName(v){
    与后端 _h3_size 的优先级排法一致，界面上写的数就是出片的数。 */
 function dimText(v){
   const s=String(v.size||'');
-  if(s==='custom')return C.a16(Number(v.cw)||1344)+'×'+C.a16(Number(v.ch)||768);
+  if(s==='custom')return C.a32(Number(v.cw)||1344)+'×'+C.a32(Number(v.ch)||768);
   return s?s.replace('x','×'):'—';
 }
 
@@ -169,8 +169,8 @@ MIC.registerPage('video',{
                 '权重里那条 Turbo LoRA 就是训到 4 步的，加步数只会更糊；要换步数得先换 LoRA'))+
       '</div>'+
       (String(v.size)==='custom'?'<div class="grid3">'+
-        C.field('宽（px）',C.num('video.cw','1344'),'自动贴到 16 的倍数')+
-        C.field('高（px）',C.num('video.ch','768'),'自动贴到 16 的倍数')+
+        C.field('宽（px）',C.num('video.cw','1344'),'自动贴到 32 的倍数')+
+        C.field('高（px）',C.num('video.ch','768'),'自动贴到 32 的倍数')+
       '</div>':'')+
       C.field(cloud?'参考图（1~4 张）':'首帧',
         C.refsRow('video.refs',4,

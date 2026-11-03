@@ -330,30 +330,34 @@ def test_pick_size():
 
     线上实测过：档位/画幅那两颗控件改了以后序列化里的宽高纹丝不动，
     出片尺寸完全由 width/height 决定（提交 848×480 → 文件就是 848×480）。
-    所以档位只是名字：凑得出短边档位就写 480P，凑不出就写 Custom，宽高一律原样带过去。
+    宽高一律贴 32（H3 的 latent 再按 2×2 切 patch，和本地同一个口径）；
+    档位只按界面给的短边标一个名，贴格不改变「720P / 480P」的叫法。
     """
     from cloudkit import gen as cg
     cases = [
-        ((848, 480), {"resolution": "480P", "aspect_ratio": "16:9", "width": 848, "height": 480}),
-        ((480, 848), {"resolution": "480P", "aspect_ratio": "9:16", "width": 480, "height": 848}),
-        # 原生档：按 16 取整会算成 1360，界面登记的 1344 原样送过去
+        ((848, 480), {"resolution": "480P", "aspect_ratio": "16:9", "width": 864, "height": 480}),
+        ((480, 848), {"resolution": "480P", "aspect_ratio": "9:16", "width": 480, "height": 864}),
+        # 原生档：1344×768 本来就在 32 网格上，原样送过去
         ((1344, 768), {"resolution": "768P", "aspect_ratio": "16:9",
                        "width": 1344, "height": 768}),
         ((768, 1344), {"resolution": "768P", "aspect_ratio": "9:16",
                        "width": 768, "height": 1344}),
         ((768, 768), {"resolution": "768P", "aspect_ratio": "1:1", "width": 768, "height": 768}),
-        # 自定义（短边不在档位上）：档位写 Custom，但画幅一个像素都不替人改
+        # 720 不是 32 的倍数：出片抬到 736，档位名仍按界面写的 720P
+        ((1280, 720), {"resolution": "720P", "aspect_ratio": "16:9",
+                       "width": 1280, "height": 736}),
+        # 自定义（短边不在档位上）：档位写 Custom，宽高只贴格、不改画幅
         ((900, 600), {"resolution": "Custom", "aspect_ratio": "16:9",
                       "width": 896, "height": 608}),
         ((1350, 749), {"resolution": "Custom", "aspect_ratio": "16:9",
-                       "width": 1344, "height": 752}),
+                       "width": 1344, "height": 736}),
     ]
     for (w, h), want in cases:
         got = cg.pick_size(w, h)
         assert got == want, ((w, h), got, want)
-    # 840 正好卡在「.5」上：两边都必须四舍五入到 848（Python 自带的 round 是「.5 向偶数」，
+    # 848 正好卡在「.5」上：两边都必须进位到 864（Python 自带的 round 是「.5 向偶数」，
     # 会给出 832，前后端就差一格——这条锁就是为它写的）
-    assert cg.pick_size(840, 480)["width"] == 848, cg.pick_size(840, 480)
+    assert cg.pick_size(848, 480)["width"] == 864, cg.pick_size(848, 480)
     # 2K 是短边 1440（2560×1440），平台档位表里没有这一档，写 Custom、宽高原样带过去；
     # 再往上平台不收，钳在 2560
     assert cg.pick_size(2560, 1440) == {"resolution": "Custom", "aspect_ratio": "16:9",
@@ -482,7 +486,9 @@ def test_kj_write():
     assert w[0][:3] == [263, "text", "雨夜的旧书店 <Picture 1>"], w[0]
     assert w[1][2] == 5, "接了数学式的那格写秒数，帧数由它自己算"
     assert w[2][2] == "16:9 (Widescreen)" and w[2][3] is True, "画幅必须是下拉里的值"
-    assert w[3][2] == 0.92
+    # 宽高贴 32 后是 1280×736，折成 0.94；节点自己按 0.1 的格子圆到 0.9，
+    # 出片仍是 1280×736——所以这里不能替它先按 step=1 圆成 1.0
+    assert w[3][2] == 0.94, w[3]
     # 主节点自己带宽高（没接选择器）：直接写那两格，不去找画幅；时长也就写帧数
     direct = {"roles": {"prompt": {"id": 389, "w": "prompt", "src": "direct"},
                         "length": {"id": 389, "w": "length", "src": "direct"},

@@ -342,6 +342,16 @@ def _snap16(x, lo=16, hi=2048):
     return max(lo, min(hi, int(float(x) / 16.0 + 0.5) * 16))
 
 
+def _snap32(x, lo=32, hi=2048):
+    """贴到 32 的倍数——H3 的硬要求，和界面里的 C.a32 同一套舍入。
+
+    latent 在宽高上各下采样 16，模型再按 2×2 切 patch：像素落在 32 网格上，
+    latent 才是偶数边；否则 1136 这种尺寸会得到 71 的奇数高，采样第一拍就报
+    shape invalid。云端那份工作流的尺寸选择器也是按 32 进位的。
+    """
+    return max(lo, min(hi, int(float(x) / 32.0 + 0.5) * 32))
+
+
 _seed_lock = threading.Lock()
 _seed_seq = [0]
 
@@ -1606,7 +1616,7 @@ class App(WindowCtl):
     H3_RATIOS = {"16:9": (16, 9), "9:16": (9, 16), "1:1": (1, 1),
                  "4:3": (4, 3), "3:4": (3, 4), "21:9": (21, 9)}
     # 原生画布是 1344×768（768P / 16:9），竖屏镜像 768×1344；
-    # 按 16 取整会算成 1360×768，所以这一档钉死成模板里的数
+    # 按 32 取整会把 16:9 算成 1376×768，所以这一档钉死成模板里的数
     H3_NATIVE = {("768", "16:9"): (1344, 768), ("768", "9:16"): (768, 1344)}
     # 短边上限分两路：本地停在 2048（12G 卡 + 768P 权重就是天花板），
     # 云端放到 2560——官方 2K 就是短边 1440（2560×1440），往上没有档了。
@@ -1625,7 +1635,7 @@ class App(WindowCtl):
         return n + (5 - (n % 17)) % 17
 
     def _h3_native(self, w, h):
-        """768P 的 16:9 原生画幅是 1344×768：按 16 取整会算成 1360，这一档贴回原生。
+        """768P 的 16:9 原生画幅是 1344×768：按 32 取整会算成 1376，这一档贴回原生。
 
         只认「短边正好是原生档的 P 数、长宽比也贴着原生」的尺寸；
         用户自己填的 1400×768 不在这条线上，原样给他，别替人改画幅。
@@ -1639,11 +1649,17 @@ class App(WindowCtl):
                 return (nw, nh) if nw >= nh else (nh, nw)
         return w, h
 
-    def _h3_size(self, v, hi=None):
-        """清晰度（短边）× 画幅 → 宽高，两边各贴 16 的倍数、上限按通道给（hi）。
+    def _h3_fit(self, w, h):
+        """先认原生画幅，再贴 32：768P 16:9 的 1376 得先被拉回 1344。"""
+        w, h = self._h3_native(w, h)
+        return _snap32(w, hi=self.H3_HI_MAX), _snap32(h, hi=self.H3_HI_MAX)
 
-        节点 latent 按 16 切，所以 720 这种不是 32 倍数的短边也能跑（云端 432×768 同理）；
-        反过来按 32 取整会把 720P 打成 704P，档位名就对不上了。
+    def _h3_size(self, v, hi=None):
+        """清晰度（短边）× 画幅 → 宽高，两边各贴 32 的倍数、上限按通道给（hi）。
+
+        H3 的 latent 宽高各按 16 下采样，模型再按 2×2 切 patch：像素必须落在
+        32 网格上，latent 才是偶数边（640×1136 的 1136/16=71 就是这么炸的）。
+        768P 原生 1344×768 本来就是 32 的倍数，这一步不动它。
         本地停在 2048（12G 卡 + 768P 权重就是天花板），云端放到 2560——
         那是官方 2K 的长边（2K＝短边 1440），再往上平台没有档。
         """
@@ -1653,40 +1669,39 @@ class App(WindowCtl):
         if long_ > hi:
             # 只钳长边会把 16:9 钳成 2048×1440：画幅歪了，界面上写的数也和出片对不上
             k = float(hi) / long_
-            w, h = self._h3_native(_snap16(w * k, hi=hi), _snap16(h * k, hi=hi))
+            w, h = _snap32(w * k, hi=hi), _snap32(h * k, hi=hi)
         return (w, h)
 
     def _h3_size_raw(self, v):
         """三处入口按优先级排：自定义宽高 → size 串（界面这一路只落 size，它才是最新的）
         → 档位+画幅（历史配置与自测用例）。
         顺序反过来的话，界面把 size 改成 1280×720 而 tier 还留着 768，出片就成了上一档的尺寸。
-        这里只贴 16 的倍数、不夹通道上限：夹在单边上会把画幅钳歪，缩放交给 _h3_size。
+        这里只贴 32 的倍数、不夹通道上限：夹在单边上会把画幅钳歪，缩放交给 _h3_size。
         """
         cap = self.H3_HI_MAX
-        a16 = lambda x: _snap16(x, hi=cap)
         tier = _to_int(v.get("tier"), 0, 0, cap)
         ratio = str(v.get("ratio") or "")
         size = str(v.get("size") or "").strip().lower()
         if size == "custom" or str(v.get("tier") or "").strip().lower() == "custom":
-            return self._h3_native(a16(_to_int(v.get("cw"), 1344, 16, cap)),
-                                   a16(_to_int(v.get("ch"), 768, 16, cap)))
+            return self._h3_fit(_to_int(v.get("cw"), 1344, 32, cap),
+                                _to_int(v.get("ch"), 768, 32, cap))
         wh = size.split("x")
         if len(wh) == 2 and wh[0].isdigit() and wh[1].isdigit():
-            return self._h3_native(a16(int(wh[0])), a16(int(wh[1])))
+            return self._h3_fit(int(wh[0]), int(wh[1]))
         native = self.H3_NATIVE.get((str(tier), ratio))
         if native:
             return native
         if tier and ratio in self.H3_RATIOS:
             aw, ah = self.H3_RATIOS[ratio]
-            # 「P」数指短边：横屏短边是高，竖屏短边是宽（720P = 1280×720 / 720×1280）
+            # 「P」数指短边：横屏短边是高，竖屏短边是宽（720P = 1280×736 / 736×1280）
             if aw >= ah:
                 h, w = float(tier), tier * aw / float(ah)
             else:
                 w, h = float(tier), tier * ah / float(aw)
-            return self._h3_native(a16(w), a16(h))
+            return self._h3_fit(w, h)
         # 三处都没给数：用自定义宽高兜底，缺啥按原生 1344×768
-        return self._h3_native(a16(_to_int(v.get("cw"), 1344, 16, cap)),
-                               a16(_to_int(v.get("ch"), 768, 16, cap)))
+        return self._h3_fit(_to_int(v.get("cw"), 1344, 32, cap),
+                            _to_int(v.get("ch"), 768, 32, cap))
 
     def _video_params(self, v):
         """界面那几样（描述语 / 清晰度×画幅 / 秒数）折成一份 H3 工作流的参数。
@@ -2088,7 +2103,11 @@ class App(WindowCtl):
         exec_ = "cloud" if str(f.get("exec")) == "cloud" else "local"
         hi = self.H3_HI_CLOUD if exec_ == "cloud" else self.H3_HI_LOCAL
         if f.get("width") and f.get("height"):
-            w, h = int(f["width"]), int(f["height"])
+            # 存量工程直接存了宽高（含 32 网格修好前建的 640×1136）：
+            # 走同一条 _h3_size，续跑才会落到能采样的尺寸上
+            w, h = self._h3_size({"size": "%dx%d" % (
+                _to_int(f.get("width"), 1344, 32, self.H3_HI_MAX),
+                _to_int(f.get("height"), 768, 32, self.H3_HI_MAX))}, hi=hi)
         else:
             w, h = self._h3_size({"size": f.get("size"), "cw": f.get("cw"),
                                   "ch": f.get("ch")}, hi=hi)
@@ -2239,8 +2258,8 @@ class App(WindowCtl):
         from filmkit import project as prj
         out = prj.abs_path(d, prj.shot_file(sh["i"]))
         os.makedirs(os.path.dirname(out), exist_ok=True)
-        w = _to_int(proj.get("width"), 768, 16, 8192)
-        h = _to_int(proj.get("height"), 1344, 16, 8192)
+        w = _snap32(_to_int(proj.get("width"), 768, 32, 8192), hi=8192)
+        h = _snap32(_to_int(proj.get("height"), 1344, 32, 8192), hi=8192)
         prompt = self._film_prompt(proj, sh)
         refs = [prj.abs_path(d, r) if not os.path.isabs(str(r)) else str(r)
                 for r in (refs or [])]
@@ -3110,6 +3129,9 @@ class App(WindowCtl):
         proj["mode"] = chk["mode"]
         proj["ref_mode"] = chk["ref_mode"]
         proj["acct_mode"] = chk["acct_mode"]
+        # 旧工程存的宽高可能不在 32 网格上：落回工程，续跑、合并、画廊尺寸用同一套数
+        proj["width"] = chk["width"]
+        proj["height"] = chk["height"]
         if chk.get("note"):
             self._log("· " + chk["note"])
         # 先占位、写好 view 再起线程：_film_run 第一句就读 st.film，

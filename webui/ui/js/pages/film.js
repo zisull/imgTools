@@ -10,11 +10,11 @@ const C=MIC.form, ic=MIC.ic, esc=MIC.esc;
 const DUR=[[30,'30 秒'],[60,'1 分'],[120,'2 分'],[180,'3 分'],[300,'5 分']];
 const LEN=[{code:'5',name:'5 秒'},{code:'10',name:'10 秒'},{code:'15',name:'15 秒'}];
 
-/* 与视频页同一套原生画幅：H3 的 768P 是 1344×768，竖屏镜像 768×1344 */
+/* 与视频页同一套：H3 的 768P 是 1344×768，竖屏镜像 768×1344；别的档按 32 贴格 */
 const NATIVE={h768:[1344,768],v768:[768,1344]};
 C.dimSnap['film.size']=function(p,o){
   const n=NATIVE[o+p];
-  return n?{w:n[0],h:n[1]}:C.pDims(p,o);
+  return n?{w:n[0],h:n[1]}:C.pDims32(p,o);
 };
 /* 多号不能接帧：每段都要等上一段尾帧，并行就落空了。切到多号时顺手把接法收成逐镜，
    免得界面写着「接帧」、开跑才被降级。 */
@@ -398,8 +398,8 @@ MIC.registerPage('film',{
         C.field('清晰度',C.pSizeSel('film.size',cloud?C.P_VIDEO_CLOUD:C.P_VIDEO,
           {cw:'film.cw',ch:'film.ch'}),
           cloud?'P=短边，云端最高 2K（短边 1440）':'P=短边；768P 是 H3 原生档 1344×768')+
-        (custom?C.field('宽（px）',C.num('film.cw','768'),'自动贴到 16 的倍数'):'')+
-        (custom?C.field('高（px）',C.num('film.ch','1344'),'自动贴到 16 的倍数'):'')+
+        (custom?C.field('宽（px）',C.num('film.cw','768'),'自动贴到 32 的倍数'):'')+
+        (custom?C.field('高（px）',C.num('film.ch','1344'),'自动贴到 32 的倍数'):'')+
         C.field('风格',C.txt('film.style','电影感写实'),
           '会追加到每一段的描述后面；留空就不加')+
       '</div>'+

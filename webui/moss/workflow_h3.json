@@ -1,5 +1,5 @@
 {
-  "_note": "MiniMax H3 视频（本地·内嵌 ComfyUI）API 模板；占位符由 engine/moss_mgr.py 替换。链路照搬官方模板 video_minimax_h3_i2v 的子图：UNETLoader → 4 步 Turbo LoRA → MiniMaxH3ImageToVideo（正向条件 + 音视频同源的 AV latent）→ BasicScheduler/BasicGuider/KSamplerSelect(res_multistep)/SamplerCustomAdvanced → 视频 VAE 解帧 + 音频 VAE 解声 → CreateVideo(24fps) → SaveVideo。两条官方模板里都有的采样常量已经定了调：shift 12 烘在模型配置里（所以没有 ModelSampling 节点），BasicGuider 不带 cfg 输入＝恒定 1，因此没有负向条件、也只有一条正向链。first_frame/first_image 留空时整节 LoadImage 摘掉，同一份模板就同时是文生视频与首帧生视频。",
+  "_note": "MiniMax H3 视频（本地·内嵌 ComfyUI）API 模板；占位符由 engine/moss_mgr.py 替换。链路照搬官方模板 video_minimax_h3_i2v 的子图：UNETLoader → 4 步 Turbo LoRA → MiniMaxH3ImageToVideo（正向条件 + 音视频同源的 AV latent）→ BasicScheduler/BasicGuider/KSamplerSelect(res_multistep)/SamplerCustomAdvanced → 视频 VAE 解帧 + 音频 VAE 解声 → CreateVideo(24fps) → SaveVideo。两条官方模板里都有的采样常量已经定了调：shift 12 烘在模型配置里（所以没有 ModelSampling 节点），BasicGuider 不带 cfg 输入＝恒定 1，因此没有负向条件、也只有一条正向链。first_frame/first_image 留空时整节 LoadImage 摘掉，同一份模板就同时是文生视频与首帧生视频。width/height 必须落在 32 网格上（节点 step=32）：latent 宽高各下采样 16 后再按 2×2 切 patch，非 32 倍数会得到奇数 latent 边，采样第一拍就报 shape invalid；engine/moss_mgr.py 与云端 pick_size 都按 32 传参。",
   "1": {"class_type": "UNETLoader",
         "inputs": {"unet_name": "minimax_h3_fl2va_pruned_int8_convrot.safetensors", "weight_dtype": "default"}},
   "2": {"class_type": "CLIPLoader",

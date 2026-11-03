@@ -958,6 +958,9 @@ PROBE = {
     const plabels=()=>[].slice.call(k('video.size').options).map(o=>o.textContent.trim());
     ok('P 档后面直接写真实分辨率：768P 横版＝原生 1344×768（不是 16 取整的 1360）',
        plabels().some(x=>/^768P : 1344 × 768$/.test(x)), plabels().join('|'));
+    ok('非原生档也贴 32：720P 横版＝1280×736、480P＝864×480',
+       plabels().some(x=>/^720P : 1280 × 736$/.test(x))
+       && plabels().some(x=>/^480P : 864 × 480$/.test(x)), plabels().join('|'));
     await flip(ori(),'v');
     ok('切竖版当场倒过来，仍按登记过的原生画幅 768×1344',
        plabels().some(x=>/^768P : 768 × 1344$/.test(x)), plabels().join('|'));

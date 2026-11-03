@@ -855,7 +855,8 @@ def test_input_image_modes():
 
 
 def test_h3_size():
-    """视频页的清晰度×画幅：短边＝P 数（720P 横 1280×720、竖 720×1280），
+    """视频页的清晰度×画幅：短边＝P 数（720P 横 1280×736、竖 736×1280），
+    宽高一律贴 32（H3 的 latent 下采样 16 后再按 2×2 切 patch，奇数边直接报 shape）；
     768 原生钉成模板里的 1344×768；老配置的 size / cw×ch 不能被新档位悄悄改掉。"""
     import app as webapp
 
@@ -867,25 +868,30 @@ def test_h3_size():
         H3_HI_MAX = webapp.App.H3_HI_MAX
         # 尺寸换算只读这几个常量，不必把整个 App 拉起来（那要 GPU 环境）
         _h3_native = webapp.App._h3_native
+        _h3_fit = webapp.App._h3_fit
         _h3_size_raw = webapp.App._h3_size_raw
 
     p = Probe()
     cases = [
-        ({"tier": 480, "ratio": "16:9"}, (848, 480)),
-        ({"tier": 480, "ratio": "9:16"}, (480, 848)),
-        ({"tier": 720, "ratio": "16:9"}, (1280, 720)),
-        ({"tier": 720, "ratio": "9:16"}, (720, 1280)),
+        ({"tier": 480, "ratio": "16:9"}, (864, 480)),
+        ({"tier": 480, "ratio": "9:16"}, (480, 864)),
+        ({"tier": 720, "ratio": "16:9"}, (1280, 736)),
+        ({"tier": 720, "ratio": "9:16"}, (736, 1280)),
         ({"tier": 768, "ratio": "16:9"}, (1344, 768)),
         ({"tier": 768, "ratio": "9:16"}, (768, 1344)),
         ({"tier": 768, "ratio": "1:1"}, (768, 768)),
         ({"tier": 768, "ratio": "4:3"}, (1024, 768)),
-        ({"size": "custom", "cw": 854, "ch": 480}, (848, 480)),
-        # 840 正好卡在「.5」上：Python 的 round 给 832，界面 C.a16 给 848
+        ({"size": "custom", "cw": 854, "ch": 480}, (864, 480)),
+        # 848 正好卡在「.5」上：Python 的 round 给 832，界面 C.a32 给 864
         # ——两边必须同一个舍入，否则界面写的数和出片的数差一格
-        ({"size": "custom", "cw": 840, "ch": 480}, (848, 480)),
+        ({"size": "custom", "cw": 848, "ch": 480}, (864, 480)),
         ({"size": "1344x768"}, (1344, 768)),
         # 界面只落 size，tier 是上一次留下的：谁新听谁的，不能拿旧档位盖掉刚选的 720P
-        ({"tier": 768, "ratio": "16:9", "size": "1280x720"}, (1280, 720)),
+        ({"tier": 768, "ratio": "16:9", "size": "1280x720"}, (1280, 736)),
+        # 报 shape invalid 的那份工程：1136/16=71（奇数 latent），必须抬到 1152
+        ({"size": "640x1136"}, (640, 1152)),
+        # 用户当前 config 里的成片尺寸：848/16=53，同样要抬到 864
+        ({"size": "848x480"}, (864, 480)),
         ({}, (1344, 768)),
     ]
     for v, want in cases:
@@ -904,8 +910,51 @@ def test_h3_size():
         assert got == want, ("cloud", v, got, want)
     got = webapp.App._h3_size(p, {"size": "2560x1440"})
     assert got == (2048, 1152), ("local 上限按比例缩", got)
-    print("  ✓ 视频尺寸：清晰度×画幅按短边算、768 原生钉死、老配置与自定义不被改掉、"
-          "云端到 2K、本地超限按比例缩")
+    print("  ✓ 视频尺寸：清晰度×画幅按短边算、宽高贴 32、768 原生钉死、"
+          "老配置与自定义不被改掉、云端到 2K、本地超限按比例缩")
+
+
+def test_film_precheck_size():
+    """续跑旧工程：尺寸已写死在 project.json 里，预检也得把它拉回 32 网格。
+
+    21:34 那次「第 1 段失败：shape invalid」就是 640×1136 直接进了采样：
+    1136/16=71（奇数 latent）。预检返回的宽高要落到 640×1152，_film_launch 再写回工程。
+    """
+    import app as webapp
+
+    class Probe:
+        H3_RATIOS = webapp.App.H3_RATIOS
+        H3_NATIVE = webapp.App.H3_NATIVE
+        H3_HI_LOCAL = webapp.App.H3_HI_LOCAL
+        H3_HI_CLOUD = webapp.App.H3_HI_CLOUD
+        H3_HI_MAX = webapp.App.H3_HI_MAX
+        _h3_native = webapp.App._h3_native
+        _h3_fit = webapp.App._h3_fit
+        _h3_size_raw = webapp.App._h3_size_raw
+        _h3_size = webapp.App._h3_size
+        cfg = {"cloud": {}}
+
+        def _ref_file(self, raw, base_dir=""):
+            return ""
+
+        def _env_on(self):
+            return {"h3": True}
+
+        def _ff(self):
+            return False
+
+        def _log(self, *a):
+            pass
+
+    p = Probe()
+    for stored, want in (((640, 1136), (640, 1152)),
+                         ((848, 480), (864, 480)),
+                         ((1344, 768), (1344, 768))):
+        chk = webapp.App._film_precheck(
+            p, {"exec": "local", "width": stored[0], "height": stored[1],
+                "mode": "shot"}, 1)
+        assert not chk["err"] and (chk["width"], chk["height"]) == want, (stored, chk)
+    print("  ✓ 续跑旧工程：工程里写死的宽高也贴 32（640×1136 → 640×1152）")
 
 
 if __name__ == "__main__":
@@ -928,4 +977,5 @@ if __name__ == "__main__":
     test_nav_migration()
     test_input_image_modes()
     test_h3_size()
+    test_film_precheck_size()
     print("全部通过 ✅")

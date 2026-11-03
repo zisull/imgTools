@@ -859,14 +859,16 @@ def pick_size(w, h):
     （实测提交 848×480，回来的文件就是 848×480）。所以宽高我们自己算、自己写，
     档位只按界面口径（P=短边）标一个名，凑不出的就写 Custom，不猜平台的公式。
     """
-    # 与 App._snap16、界面 C.a16 同一套四舍五入（Python 的 round 是 .5 向偶数，会差 16）。
+    # 与 App._snap32、界面 C.a32 同一套舍入（Python 的 round 是 .5 向偶数，会差一格）。
+    # H3 的 latent 再按 2×2 切 patch，宽高必须落在 32 网格上，和本地那条共用一套格子。
+    # 档位名照界面给的短边算：720→736 之后仍叫 720P，不能因为贴格变成 Custom。
     # 上限 2560：云端出片尺寸由我们写进 width/height，官方最高 2K＝短边 1440（长边 2560）。
-    a16 = lambda x: max(16, min(2560, int(float(x) / 16.0 + 0.5) * 16))
-    w, h = a16(w), a16(h)
-    short = min(w, h)
-    tier = min(TIERS, key=lambda t: abs(t - short))
+    snap = lambda x: max(32, min(2560, int(float(x) / 32.0 + 0.5) * 32))
+    short_in = min(w, h)
+    w, h = snap(w), snap(h)
+    tier = min(TIERS, key=lambda t: abs(t - short_in))
     orient = "s" if w == h else ("h" if w > h else "v")
-    return {"resolution": "%dP" % tier if tier == short else "Custom",
+    return {"resolution": "%dP" % tier if tier == short_in else "Custom",
             "aspect_ratio": RATIO_BY_ORIENT[orient], "width": w, "height": h}
 
 

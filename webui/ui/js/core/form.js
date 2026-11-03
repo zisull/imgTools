@@ -218,8 +218,9 @@ function sizeSel(k,list,dis,rr){
 
 /* ---------- P 档分辨率 ----------
    P 数只认短边：横版=16:9、方形=1:1、竖版=9:16，所以同一个 720P
-   在横版是 1280×720、竖版是 720×1280。宽高统一贴 16 的倍数，
-   与 Moss/ComfyUI 的 latent 网格一致；老配置的 WxH 原样保留成「历史尺寸」。 */
+   在横版是 1280×736、竖版是 736×1280。出图页宽高统一贴 16 的倍数；
+   H3 视频那边要贴 32（latent 下采样 16 后再按 2×2 切 patch），
+   由视频/成片页登记 pDims32；老配置的 WxH 原样保留成「历史尺寸」。 */
 const P_ASPECT={h:[16,9],s:[1,1],v:[9,16]};
 const P_ORIENT=[['h','横版'],['s','方形'],['v','竖版']];
 const P_IMG=[480,512,720,768,1024];
@@ -228,13 +229,22 @@ const P_VIDEO=[480,640,720,768];
    本地那条仍停在 768——权重是 768P 训的，再往上是拿算法放大，不值那几分钟。 */
 const P_VIDEO_CLOUD=[480,640,720,768,1024,1080,1440];
 function a16(x){return Math.max(16,Math.min(4096,Math.round(Number(x||0)/16)*16));}
+function a32(x){return Math.max(32,Math.min(4096,Math.round(Number(x||0)/32)*32));}
 function pDims(p,o){
   const a=P_ASPECT[o]||P_ASPECT.s;
   const pn=Math.max(16,Math.round(Number(p)||1024));
   const long=a16(pn*Math.max(a[0],a[1])/Math.min(a[0],a[1]));
-  /* 两边各自贴 16，和后端 _h3_size 同一套：1080 不是 16 的倍数 → 1088，
+  /* 两边各自贴 16：出图模型按 16 对齐 latent；1080 不是 16 的倍数 → 1088，
      长边仍按 1920 贴（别拿贴过的 1088 再去推长边，会推出 1936 这种没人认的数） */
   return a[0]>=a[1]?{w:long,h:a16(pn)}:{w:a16(pn),h:long};
+}
+/* H3 专用：宽高都贴 32。720P 短边贴成 736、480P 长边贴成 864，
+   与后端 _h3_size / 云端 pick_size 同一套数，界面写的数就是出片的数。 */
+function pDims32(p,o){
+  const a=P_ASPECT[o]||P_ASPECT.s;
+  const pn=Math.max(32,Math.round(Number(p)||1024));
+  const long=a32(pn*Math.max(a[0],a[1])/Math.min(a[0],a[1]));
+  return a[0]>=a[1]?{w:long,h:a32(pn)}:{w:a32(pn),h:long};
 }
 function orientOf(w,h){
   const r=Math.log((Number(w)||1)/(Number(h)||1));
@@ -258,7 +268,7 @@ function pOf(n,list){
 function pLabel(p,w,h){return p+'P : '+w+' × '+h;}
 /* 两件套：左边选 P（选项里直接写当前朝向的真实分辨率），右边选横/方/竖。
    朝向不单独存配置，由当前 WxH 反推；换朝向就把 size 改写成新的 WxH。
-   某一路模型有「原生画幅」（H3 的 768P 是 1344×768，不是按 16 取整的 1360）时，
+   某一路模型有「原生画幅」（H3 的 768P 是 1344×768，不是按 32 取整的 1376）时，
    由那一页登记一个 dimSnap：下拉里写的、换朝向写回的、后端算的都是同一套数。 */
 function pSizeSel(k,list,opts){
   const o=opts||{},v=String(MIC.mget(MIC.s.cfg,k)||'');
@@ -528,7 +538,7 @@ document.addEventListener('drop',e=>{
 });
 
 MIC.form={field,card,fold,foldcard,runstat,strow,duo,txt,ta,num,seedRow,sel,chk,sw,seg,pathrow,refsRow,refsOf,refsAdd,refsPick,refsDropOne,refsHydrate,sizeSel,pSizeSel,lock,read,commit,commitPath,commitMany,pickInto,
-  applyCfg,dropCands,resolveDrop,a16,pDims,orientOf,pairOf,pOf,P_IMG,P_VIDEO,P_VIDEO_CLOUD,P_ASPECT,P_ORIENT,
+  applyCfg,dropCands,resolveDrop,a16,a32,pDims,pDims32,orientOf,pairOf,pOf,P_IMG,P_VIDEO,P_VIDEO_CLOUD,P_ASPECT,P_ORIENT,
   /* 每页可登记的「原生画幅」换算：键是 size 控件绑的配置路径；segFit 是「切完顺手校正」的规则 */
   dimSnap:{},segFit:{},
   foldToggle(h){h.classList.toggle('closed');h.nextElementSibling.classList.toggle('hide');},
