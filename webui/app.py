@@ -286,7 +286,7 @@ DEFAULT_CFG = {
     "film": {"story": "", "total": 60, "shot": 15, "size": "768x1344", "cw": 768, "ch": 1344,
              "exec": "cloud", "mode": "chain", "first": "", "refs": [],
              "ref_mode": "same", "acct_mode": "single",
-             "style": "电影感写实", "acct": "", "retry": 2, "seed": -1},
+             "style": "电影感写实", "acct": "", "retry": 2, "seed": -1, "fade": 0},
     # 导航：分组套一页一个标签；组名两字作层级，页名 3~5 字说清这页干什么
     # 环境四页并成一页（页内子页切换），导航只留九页：创作五页 + 系统四页
     "nav": [
@@ -329,6 +329,14 @@ def _to_int(v, default, lo=1, hi=10 ** 6):
     """前端传来的数字一律容错：坏值回落默认档，绝不能让 int() 把任务卡死在半路。"""
     try:
         return max(lo, min(hi, int(v)))
+    except (TypeError, ValueError):
+        return default
+
+
+def _to_float(v, default, lo=0.0, hi=999.0):
+    """小数值同样容错（转场秒数这类）：界面给的是字符串，坏值回落默认。"""
+    try:
+        return max(lo, min(hi, float(v)))
     except (TypeError, ValueError):
         return default
 
@@ -2032,6 +2040,10 @@ class App(WindowCtl):
         out = []
         for x in (proj.get("shots") or []):
             s = dict(x)
+            # 尝试记录是给工程留的账，一秒一次的轮询不把它整叠端给界面：
+            # 要看历史去 project.json，界面上只留最后一次的错
+            s["tries_n"] = len(s.get("tries") or [])
+            s.pop("tries", None)
             f = prj.abs_path(d, s.get("file") or "") if d else ""
             fr = prj.abs_path(d, s.get("frame") or "") if d else ""
             s["file_abs"] = f if f and os.path.isfile(f) else ""
@@ -2212,6 +2224,7 @@ class App(WindowCtl):
             "style": str(f.get("style") or ""), "first": "", "refs": [],
             "seed": _to_int(f.get("seed"), -1, -1, 10 ** 12),
             "retry": _to_int(f.get("retry"), 2, 0, 5),
+            "fade": _to_float(f.get("fade"), 0.0, 0.0, 2.0),
             "shots": shots, "film": "", "merge_ok": True, "merge_missing": 0,
             "created": time.strftime("%Y-%m-%d %H:%M:%S"),
         }
@@ -2254,6 +2267,40 @@ class App(WindowCtl):
             return got
         return ""
 
+    TRIES_KEEP = 8          # 每段最多留几行尝试记录：够查因，又不至于把清单撑大
+
+    def _film_task(self, d, proj, sh, tid):
+        """把这一段当前对应的云端任务号落盘——认领到的那一刻就写，不等出片。
+
+        提交成功、下载前被杀，下一轮全靠这一行号先问一句「这段平台跑完没有」：
+        跑完直接收片，不重交（重交是再扣一次积分）。
+        """
+        from filmkit import project as prj
+        t = re.sub(r"\D", "", str(tid or ""))[:24]
+        if str(sh.get("taskid") or "") == t:
+            return
+        with self._film_lock:
+            sh["taskid"] = t
+            prj.save(d, proj)
+
+    def _film_try(self, d, proj, sh, worker, ok, sec=0.0, err=""):
+        """这一趟用哪个号、认到哪个任务、跑了多久、成还是败——一行记在段上。
+
+        「跑到哪一步了」于是有地方查，不用去翻运行日志；日志只留进度和报错。
+        """
+        from filmkit import project as prj
+        rec = {"t": time.strftime("%m-%d %H:%M:%S"),
+               "acct": str(worker.name if worker is not None else
+                           ("本地" if str(proj.get("exec")) != "cloud" else "自动")),
+               "taskid": str(sh.get("taskid") or ""),
+               "sec": round(_to_float(sec, 0.0, 0.0, 99999.0), 1),
+               "ok": bool(ok), "err": str(err or "")[:180]}
+        with self._film_lock:
+            tr = list(sh.get("tries") or [])
+            tr.append(rec)
+            sh["tries"] = tr[-self.TRIES_KEEP:]
+            prj.save(d, proj)
+
     def _film_one(self, d, proj, sh, refs, worker=None):
         from filmkit import project as prj
         out = prj.abs_path(d, prj.shot_file(sh["i"]))
@@ -2271,11 +2318,19 @@ class App(WindowCtl):
             who = (" · " + worker.name) if worker is not None else ""
             p = {"prompt": prompt, "seconds": sh["seconds"], "width": w, "height": h,
                  "refs": refs, "first": (refs[0] if refs else ""), "acct": acct,
-                 "wf": str(proj.get("workflow") or ""), "out_dir": os.path.dirname(out)}
+                 "wf": str(proj.get("workflow") or ""),
+                 "out_dir": os.path.dirname(out),
+                 # 上一轮认领到的任务号：云端拿它先只读地问一句「这段跑完没有」，
+                 # 跑完直接取回，不重交——重复提交是要再扣一次积分的
+                 "taskid": str(sh.get("taskid") or "")}
             got = gen.run(
                 p, on_progress=lambda m: self._film_step(
                     "第 %d 段%s · %s" % (sh["i"], who, m)),
-                should_stop=self._film_should_stop)
+                should_stop=self._film_should_stop,
+                on_task=lambda tid: self._film_task(d, proj, sh, tid))
+            # 这一段到底出自哪个任务，以执行器当场报的为准：没认到就清掉旧号，
+            # 留着别轮的号下一轮会去收错片
+            self._film_task(d, proj, sh, getattr(gen, "last_task_id", "") or "")
         else:
             # 本机 H3 模板没有多图引用链路：只认第一张，多图留给云端
             first = refs[0] if refs else ""
@@ -2307,6 +2362,10 @@ class App(WindowCtl):
                 shutil.move(got, out)
         if not os.path.isfile(out) or os.path.getsize(out) <= 0:
             raise FilmError("这一段没落盘")
+        # 这一段实际是按什么参数出的：中途换过通道、换过清晰度的人，靠这一行对得上账
+        sh["made"] = {"exec": str(proj.get("exec") or "local"), "w": w, "h": h,
+                      "sec": int(sh["seconds"]), "refs": len(refs),
+                      "bytes": os.path.getsize(out)}
         return out
 
     def _film_merge(self, d, proj):
@@ -2317,7 +2376,13 @@ class App(WindowCtl):
             raise stitch.StitchError("还没有一段成功出片")
         out_dir = _abs_path(self.cfg["console"]["output_dir"])
         out = prj.final_path(out_dir, proj.get("title") or "短剧")
-        r = stitch.concat(ROOT, paths, out, log=self._log)
+        # 交给 stitch 一路管到底：逐段体检、参数不齐就归一化、转场按实测时长算 offset
+        r = stitch.merge(ROOT, paths, out,
+                         w=_to_int(proj.get("width"), 0, 0, 8192),
+                         h=_to_int(proj.get("height"), 0, 0, 8192),
+                         fps=self.FILM_FPS,
+                         fade=_to_float(proj.get("fade"), 0.0, 0.0, 2.0),
+                         work_dir=os.path.join(d, "norm"), log=self._log)
         proj["film"] = r["path"]
         proj["merge_ok"] = len(paths) == len(proj.get("shots") or [])
         proj["merge_missing"] = len(proj.get("shots") or []) - len(paths)
@@ -2334,6 +2399,7 @@ class App(WindowCtl):
                       sec=sec, name=os.path.basename(path))
 
     CLOUD_TRIES = 2         # 同一个号最多两次：第二次前重启那只浏览器
+    FILM_FPS = 24           # H3 本地与云端两份输出都是 24 帧一秒，合成按它对齐
 
     def _film_cloud_try(self, d, proj, sh, refs, fs, worker, total):
         """一个号跑一段：失败先重启浏览器再试一次。回 (ok, err, fatal)。
@@ -2355,9 +2421,11 @@ class App(WindowCtl):
                 path = self._film_one(d, proj, sh, refs, worker=worker)
                 sh["file"] = prj.rel(d, path)
                 sh["sec"] = round(time.time() - t1, 1)
+                self._film_try(d, proj, sh, worker, True, sh["sec"])
                 return True, "", False
             except Exception as e:
                 last = str(e)[:300]
+                self._film_try(d, proj, sh, worker, False, time.time() - t1, last)
                 self._log("⚠️ 第 %d 段 · %s 失败：%s"
                           % (sh["i"], worker.name, last))
                 if self._film_should_stop():
@@ -2763,9 +2831,11 @@ class App(WindowCtl):
                         sh["file"] = prj.rel(d, path)
                         sh["sec"] = round(time.time() - t1, 1)
                         ok = True
+                        self._film_try(d, proj, sh, None, True, sh["sec"])
                         break
                     except Exception as e:
                         last = str(e)[:300]
+                        self._film_try(d, proj, sh, None, False, time.time() - t1, last)
                         self._log("⚠️ %s失败：%s" % (label, last))
                         if self._film_should_stop():
                             break
@@ -3100,6 +3170,7 @@ class App(WindowCtl):
         if not (proj.get("shots") or []):
             return {"ok": False, "msg": "这份工程没有分镜"}
         for sh in proj["shots"]:
+            # taskid 不清：带着它的那一段先只读地问平台，跑完的直接收片，不重交
             if sh.get("state") in ("run", "fail"):
                 sh["state"] = "wait"
                 sh["err"] = ""
@@ -3109,6 +3180,9 @@ class App(WindowCtl):
                 sh["file"] = ""
                 sh["frame"] = ""
                 sh["acct_name"] = ""
+        take = sum(1 for sh in proj["shots"]
+                   if str(sh.get("taskid") or "").strip()
+                   and not prj.ok_file(d, sh) and sh.get("state") == "wait")
         all_done = all(prj.ok_file(d, sh) for sh in proj["shots"])
         film = str(proj.get("film") or "")
         if all_done and film and os.path.isfile(film):
@@ -3118,7 +3192,9 @@ class App(WindowCtl):
                                               status="✅ 已完成")
             return {"ok": True, "msg": "这部已经完成了", "film": film}
         return self._film_launch(
-            d, proj, why="▶️ 继续成片：%s · 从第一段没出的往后跑" % (proj.get("title") or d))
+            d, proj, why="▶️ 继续成片：%s · 从第一段没出的往后跑%s"
+                         % (proj.get("title") or d,
+                            "，其中 %d 段先问平台要不要重交" % take if take else ""))
 
     def _film_launch(self, d, proj, only=None, why=""):
         """预检 → 占位 → 起线程。续跑和单段重出共用这一条，口径不会分叉。"""
@@ -3250,6 +3326,8 @@ class App(WindowCtl):
             sh["state"] = "wait"
             sh["sec"] = 0.0
             sh["err"] = ""
+            # 重出就是要一张新片：任务号一清，云端不会再收回那张旧的去拼
+            sh["taskid"] = ""
         # 旧成片已经拼过被作废的段：指回它只会让人以为「改完了」
         proj["film"] = ""
         proj["merge_ok"] = True

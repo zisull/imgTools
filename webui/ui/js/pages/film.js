@@ -426,10 +426,12 @@ MIC.registerPage('film',{
               :C.seg('film.mode',[['chain','接帧'],['shot','逐镜']]),
             '接帧=每段拿上一段尾帧当参考，画面连贯（要 FFmpeg 抽帧）；'+
             '逐镜=每段各自成片，云端会按空闲号并行')+
+          C.field('转场',C.seg('film.fade',[['0','无'],['0.5','淡化']],true),
+            '段与段之间交叉淡化 0.5 秒')+
           C.field('重试',C.num('film.retry','次'),
             '本机：单段失败重试次数；云端固定每个号试 2 次（失败先重启浏览器）再换号')+
           C.field('种子',C.seedRow('film.seed'),'随机=每段新种子；固定=同参数可复现')+
-        '</div>','接法 · 重试 · 种子')+
+        '</div>','接法 · 转场 · 重试 · 种子')+
       planHTML();
 
     const runKey=s.running==='film'||c.run==='film';

@@ -12,6 +12,8 @@ __pycache__/
 *.tmp
 .cache/
 config.json
+# 改配置时留下的备份：里面是活的 Key/token，和 config.json 一样不进仓库
+config.json.bak*
 
 .idea/
 

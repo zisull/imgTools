@@ -109,6 +109,23 @@ def make_clip(ff, path, color):
     return path
 
 
+def make_raw(ff, path, size="160x288", fps=24, audio=True, d=0.5, color="0x223344"):
+    """按指定尺寸/帧率/有无音轨造一条小片——专门用来造「参数不齐」的分段。"""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    a = ["-f", "lavfi", "-i", "sine=frequency=440:duration=%s" % d] if audio else []
+    r = subprocess.run(
+        [ff, "-hide_banner", "-loglevel", "error", "-y",
+         "-f", "lavfi", "-i", "color=c=%s:s=%s:d=%s:r=%d" % (color, size, d, fps)] + a +
+        ["-c:v", "libx264", "-pix_fmt", "yuv420p"] +
+        (["-c:a", "aac", "-ar", "44100", "-ac", "2"] if audio else []) +
+        ["-shortest", "-movflags", "+faststart", path],
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        timeout=120)
+    if r.returncode != 0:
+        raise RuntimeError("造测试片段失败：%s" % (r.stderr or "")[:300])
+    return path
+
+
 def main():
     a = App()
     out = os.path.join(TMP, "outputs")
@@ -587,6 +604,164 @@ def main():
        and ("A", 2) in calls and all(k[1] == 2 for k in calls),
        (sorted(calls), pool.map["B"].host.restarts, pool.map["A"].host.restarts))
 
+    # ---------------- 段快照：任务号当场落盘，尝试历史留在工程里 ----------------
+    del a.__dict__["_film_one"]        # 还原真的 _film_one：这一节验的就是它和执行器的接口
+    d3 = prj.new_dir(out)
+    prj.save(d3, {"title": "快照", "exec": "cloud", "mode": "shot",
+                  "width": 160, "height": 288,
+                  "shots": [{"i": 1, "seconds": 15, "prompt": "少女推开书店的门",
+                             "state": "wait"}]})
+    proj3 = prj.load(d3)
+    sh1 = proj3["shots"][0]
+    seen_tid, mid_disk = [], []
+
+    class FakeGen:
+        """假执行器：只验两件事——号什么时候落盘、下一轮带不带得上。"""
+        last_task_id = ""
+
+        def run(self, p, on_progress=None, should_stop=None, on_task=None):
+            seen_tid.append(p.get("taskid"))
+            on_task("900001")            # 提交后在任务列表上认领到号
+            mid_disk.append(prj.load(d3)["shots"][0].get("taskid"))
+            self.last_task_id = "900002"  # 真正出片的那条任务，以执行器当场报的为准
+            return make_clip(ff, os.path.join(TMP, "snap%03d.mp4" % len(seen_tid)),
+                             "0x223344")
+
+    wk = FakeWorker("A", "A号")
+    wk.gen = FakeGen()
+    a._film_one(d3, proj3, sh1, [], worker=wk)
+    ok("认到任务号的那一刻就落盘，不等出片",
+       mid_disk == ["900001"] and sh1.get("taskid") == "900002"
+       and prj.load(d3)["shots"][0].get("taskid") == "900002", (mid_disk, sh1.get("taskid")))
+    a._film_one(d3, proj3, sh1, [], worker=wk)
+    ok("下一轮提交带上上一轮的号", seen_tid == ["", "900002"], seen_tid)
+    ok("这一段实际按什么参数出的记在段上",
+       (sh1.get("made") or {}).get("exec") == "cloud" and sh1["made"].get("w") == 160
+       and sh1["made"].get("h") == 288 and sh1["made"].get("bytes") > 0, sh1.get("made"))
+
+    for k in range(10):
+        a._film_try(d3, proj3, sh1, wk, k % 3 == 0, sec=1.5,
+                    err="" if k % 3 == 0 else "平台判失败：测试")
+    tr = prj.load(d3)["shots"][0].get("tries") or []
+    ok("尝试历史落进工程、只留最近 %d 条" % App.TRIES_KEEP,
+       len(tr) == App.TRIES_KEEP and tr[-1]["acct"] == "A号"
+       and tr[-1]["taskid"] == "900002" and tr[-1]["ok"] is True
+       and any((not x["ok"]) and "平台判失败" in x["err"] for x in tr), (len(tr), tr[-1]))
+    rows = a._film_shots(proj3, d3)
+    ok("轮询快照只给条数，不把整叠尝试记录端给界面",
+       rows and "tries" not in rows[0] and rows[0].get("tries_n") == App.TRIES_KEEP,
+       sorted(k for k in (rows[0] or {}) if k.startswith("tries")))
+
+    sh1["state"] = "fail"
+    prj.save(d3, proj3)
+    resumed = []
+
+    def spy_launch(dd, pp, only=None, why=""):
+        resumed.append((prj.abs_path(dd, ""), pp, str(why)))
+        return {"ok": True, "exec": "cloud"}
+
+    a._film_launch = spy_launch
+    r = a.film_resume(d3)
+    ok("续跑保留任务号，并在提示里说明有几段先问平台",
+       r.get("ok") and resumed
+       and resumed[-1][1]["shots"][0].get("taskid") == "900002"
+       and "先问平台" in resumed[-1][2], resumed[-1][2] if resumed else r)
+    a._film_launch = type(a)._film_launch.__get__(a)
+
+    # ---------------- 收片：带号的那一段先问平台，不重交 ----------------
+    got_tid = []
+
+    class HarvestGen(FakeGen):
+        """照着真执行器的收片分支写：认到片子也要把号交回去，只是不提交。"""
+        def run(self, p, on_progress=None, should_stop=None, on_task=None):
+            seen_tid.append(p.get("taskid"))
+            if p.get("taskid"):
+                got_tid.append(p.get("taskid"))
+                on_task(p["taskid"])
+                self.last_task_id = p["taskid"]
+                return make_clip(ff, os.path.join(TMP, "take%03d.mp4" % len(seen_tid)),
+                                 "0x556677")   # 平台上早跑完了：直接取回，没提交
+            return FakeGen.run(self, p, on_progress, should_stop, on_task)
+
+    wk2 = FakeWorker("B", "B号")
+    wk2.gen = HarvestGen()
+    sh1["taskid"] = "700111"
+    path = a._film_one(d3, proj3, sh1, [], worker=wk2)
+    ok("续跑带号那一趟直接收片，不再提交一次",
+       got_tid == ["700111"] and os.path.isfile(path) and os.path.getsize(path) > 0,
+       (got_tid, path))
+    ok("收来的片子仍记着自己的任务号", sh1.get("taskid") == "700111", sh1.get("taskid"))
+
+    from cloudkit import gen as cg
+
+    class HarvestProbe(cg.CloudH3):
+        """不接浏览器：把「列表上查到什么」换成一张假表，验收片的判断表。"""
+        def __init__(self, hit, url, fail_confirm=0.0):
+            self.hit, self.url = hit, url
+            self.settle, self.timeout, self.poll_min = 0.05, 1, 0.01
+            self.fail_confirm = fail_confirm
+            self.logs = []
+
+        def log(self, m):
+            self.logs.append(str(m))
+
+        def task_hit(self, tab, tid):
+            return self.hit or {}
+
+        def task_media(self, tab, tid):
+            return self.url or ""
+
+    def harvest(hit, url="", stop=None, fail_confirm=0.0):
+        return HarvestProbe(hit, url, fail_confirm)._harvest(None, "123", None, stop)
+
+    r = harvest({"s": "已完成"}, "http://x/a.mp4")
+    ok("收片：平台说跑完 + 卡片有地址 → 直接收，不重交",
+       r and r[0] == "http://x/a.mp4" and r[1].endswith("123.mp4"), r)
+    ok("收片：任务列表里查不到这个号 → 交回正常流程重交",
+       harvest({}) is None)
+    ok("收片：平台判了失败 → 交回正常流程重交",
+       harvest({"s": "失败", "d": "额度不足"}) is None)
+    ok("收片：说跑完却没给地址 → 不收，交回重交",
+       harvest({"s": "已完成"}, "") is None)
+    try:
+        harvest({"s": "生成中"}, "")
+        busy = "没抛异常"
+    except cg.CloudError as e:
+        busy = str(e)
+    ok("收片：还在跑就接着等，等满也不当失败", "还在跑" in busy, busy)
+    try:
+        harvest({"s": "已完成"}, "http://x/a.mp4", stop=lambda: True)
+        stopped = "没抛异常"
+    except cg.CloudError as e:
+        stopped = str(e)
+    ok("收片：中途点停止立刻收尾", "已停止" in stopped, stopped)
+    ok("收片：失败也要连续读到才收手（等满 fail_confirm 才交回重交）",
+       harvest({"s": "失败", "d": "安审失败 重试"}, fail_confirm=0.2) is None)
+
+    class SeqProbe(HarvestProbe):
+        """列表上第一次读到失败、下一次就正常了——页面刷新会瞬时报错，不该就此重交。"""
+        def __init__(self, hits, url=""):
+            HarvestProbe.__init__(self, hits[0], url, fail_confirm=0.3)
+            self.seq, self.i = hits, 0
+
+        def task_hit(self, tab, tid):
+            h = self.seq[0] if self.i == 0 else self.seq[-1]
+            self.i += 1
+            return h
+
+    r = SeqProbe([{"s": "失败"}, {"s": "已完成"}], "http://x/b.mp4")._harvest(None, "123", None, None)
+    ok("收片：只读到一次失败不收手，随后跑完了照样收片",
+       r and r[0] == "http://x/b.mp4", r)
+    ok("收片：空任务号不去问平台（_JS_TASK_MEDIA 先拒 bad_id）",
+       "bad_id" in cg._JS_TASK_MEDIA and "no_card" in cg._JS_TASK_MEDIA
+       and cg._task_media_rank(["", "http://x/p.jpg"]) == "",
+       cg._task_media_rank(["", "http://x/p.jpg"]))
+    ok("收片：挑地址先认扩展名，图片一律排掉",
+       cg._task_media_rank(["http://x/p.jpg", "http://x/a.mp4"]) == "http://x/a.mp4"
+       and cg._task_media_rank(["http://x/p.jpg"]) == ""
+       and cg._task_media_rank(["http://x/video?id=9"]) == "http://x/video?id=9",
+       cg._task_media_rank(["http://x/p.jpg", "http://x/a.mp4"]))
+
     # ---------------- film_state / 快照 ----------------
     a._film_launch = type(a)._film_launch.__get__(a)   # 还原，给后面真跑用
     a._ai = real_ai
@@ -636,6 +811,106 @@ def main():
         os.remove(os.path.join(out, "_never.mp4"))
     except OSError:
         pass
+
+    # ---------------- 体检 + 逐段归一化：参数不齐不再整批拒拼 ----------------
+    d5 = prj.new_dir(out)
+    nm = os.path.join(d5, "norm")
+    q1 = make_raw(ff, os.path.join(d5, "shots", "001.mp4"), size="160x288", fps=24)
+    q2 = make_raw(ff, os.path.join(d5, "shots", "002.mp4"), size="144x176", fps=30,
+                  color="0x992233")
+    q3 = make_raw(ff, os.path.join(d5, "shots", "003.mp4"), size="160x288", fps=24,
+                  audio=False, color="0x229933")
+    rows, tw, th, tfps, need = stitch.preflight(ROOT, [q1, q2, q3])
+    ok("体检：读得出每条的尺寸/帧率/有无音轨",
+       [r["w"] for r in rows] == [160, 144, 160] and [r["fps"] for r in rows][:2] == [24.0, 30.0]
+       and [r["audio"] for r in rows] == [True, True, False] and need, 
+       [(r["w"], r["h"], r["fps"], r["audio"]) for r in rows])
+    ok("定档：谁人多听谁的，不拿一段特例定调整部",
+       (tw, th, tfps) == (160, 288, 24.0), (tw, th, tfps))
+    fin5 = os.path.join(d5, "mix.mp4")
+    r5 = stitch.merge(ROOT, [q1, q2, q3], fin5, work_dir=nm)
+    chk5 = stitch.inspect(ROOT, fin5)
+    ok("参数不齐也能拼：重编码到同一画幅，没音轨那段补了静音",
+       r5.get("copy") is False and chk5["w"] == 160 and chk5["h"] == 288
+       and chk5["audio"] and abs(chk5["dur"] - 1.5) < 0.3, (r5.get("size"), chk5))
+    ok("归一化的中间片落在给定的工作目录",
+       os.path.isdir(nm) and len([x for x in os.listdir(nm) if x.endswith(".mp4")]) == 3,
+       sorted(os.listdir(nm)) if os.path.isdir(nm) else nm)
+    mtimes = {x: os.path.getmtime(os.path.join(nm, x)) for x in os.listdir(nm)}
+    fin6 = os.path.join(d5, "fade.mp4")
+    r6 = stitch.merge(ROOT, [q1, q2, q3], fin6, fade=0.2, work_dir=nm)
+    ok("转场总长按实测时长交叠算，不照抄标称",
+       r6.get("copy") is False and abs(r6["fade"] - 0.2) < 0.01
+       and abs(stitch.duration(ROOT, fin6) - 1.1) < 0.25,
+       (r6["fade"], r6["duration"]))
+    ok("归一化有缓存：源片没变就一次 ffmpeg 也不重跑",
+       all(os.path.getmtime(os.path.join(nm, k)) == v for k, v in mtimes.items()))
+    fin7 = os.path.join(d5, "same.mp4")
+    r7 = stitch.merge(ROOT, [q1, q1], fin7, work_dir=os.path.join(d5, "unused"))
+    ok("参数一致又不要转场：仍走不重编码的快路径",
+       r7.get("copy") is True and not os.path.isdir(os.path.join(d5, "unused")), r7)
+    zero = os.path.join(d5, "shots", "000.mp4")
+    open(zero, "wb").close()
+    try:
+        stitch.merge(ROOT, [q1, zero], os.path.join(d5, "no.mp4"), work_dir=nm)
+        msg0 = "没拦住"
+    except stitch.StitchError as e:
+        msg0 = str(e)
+    ok("0 字节的分段在体检这一关就拦下", "0 字节" in msg0, msg0)
+
+    # ---------------- 合成失败/结果不对：不留半截冒充成片 ----------------
+    fin8 = os.path.join(d5, "badfade.mp4")
+    stitch.merge(ROOT, [q1, q2], fin8, fade=0.2, work_dir=nm)   # 先把归一化缓存落好
+    real_run = stitch._run
+    p_bad = make_raw(ff, os.path.join(d5, "wrong.mp4"), size="64x64")
+
+    def fake_run(how):
+        def go(argv, timeout=600):
+            if not any("xfade" in str(x) for x in argv):
+                return real_run(argv, timeout=timeout)
+            if how == "crash":
+                with open(str(argv[-1]), "wb") as f:
+                    f.write(b"half-written")      # 半截文件：这种绝不能留下
+                return type("R", (), {"returncode": 1, "stdout": "",
+                                      "stderr": "测试：滤镜链断了"})()
+            shutil.copyfile(p_bad, str(argv[-1]))
+            return type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+        return go
+
+    for how, word in (("bad", "画幅"), ("crash", "转场合成失败")):
+        fin9 = os.path.join(d5, "bad_%s.mp4" % how)
+        stitch._run = fake_run(how)
+        try:
+            stitch.merge(ROOT, [q1, q2], fin9, fade=0.2, work_dir=nm)
+            msg9 = "没拦住"
+        except stitch.StitchError as e:
+            msg9 = str(e)
+        finally:
+            stitch._run = real_run
+        ok("重编码那步：%s不对就当没成" % word, word in msg9, msg9)
+        ok("%s那次没留下成片，也没留下半截" % word,
+           not os.path.exists(fin9) and not os.path.exists(fin9 + ".part.mp4"), fin9)
+
+    # ---------------- 成片走 app 那一关：中间片只落工程的 norm/ ----------------
+    d6 = prj.new_dir(out)
+    make_raw(ff, os.path.join(d6, "shots", "001.mp4"), size="160x288", fps=24)
+    make_raw(ff, os.path.join(d6, "shots", "002.mp4"), size="96x240", fps=30, audio=False)
+    proj6 = {"title": "混参成片", "exec": "cloud", "width": 160, "height": 288,
+             "fade": 0.15,
+             "shots": [{"i": 1, "seconds": 15, "state": "done", "file": "shots/001.mp4"},
+                       {"i": 2, "seconds": 15, "state": "done", "file": "shots/002.mp4"}]}
+    prj.save(d6, proj6)
+    fin10 = a._film_merge(d6, prj.load(d6))
+    chk10 = stitch.inspect(ROOT, fin10)
+    ok("混着出的片子按工程的画幅归一后拼成",
+       os.path.isfile(fin10) and chk10["w"] == 160 and chk10["h"] == 288
+       and chk10["audio"], (fin10, chk10))
+    ok("归一化的中间片只落工程里的 norm/，不脏输出根目录",
+       os.path.isdir(os.path.join(d6, "norm"))
+       and not os.path.isdir(os.path.join(out, "_norm")),
+       os.path.join(d6, "norm"))
+    ok("转场秒数存在工程里，续跑重拼口径不丢",
+       prj.load(d6).get("fade") == 0.15, prj.load(d6).get("fade"))
 
 
 if __name__ == "__main__":

@@ -851,6 +851,64 @@ def _task_done(text):
     return _task_kind(_task_word(text)) == "done"
 
 
+def _task_media_rank(urls):
+    """任务卡片上挂的一串链接里哪个才是片子：扩展名最硬，其次认路径里的字样。
+
+    卡片同时挂着缩略图（poster）和片子——只按「像不像媒体」挑会挑到 jpg，
+    下载回来就是一张图冒充成片，所以图片扩展名一律先排掉，宁可不收。
+    """
+    vid = [u for u in urls if re.search(r"\.(mp4|mov|webm|m4v)(\?|$)", u, re.I)]
+    if vid:
+        return vid[0]
+    still = [u for u in urls
+             if not re.search(r"\.(jpg|jpeg|png|webp|gif|ico|avif)(\?|$)", u, re.I)
+             and re.search(r"(video|movie|render|h3|tos-|cos)", u, re.I)]
+    return still[0] if still else ""
+
+
+# 已完成那一段的卡片上挂着可播/可下的地址：只读这张卡片，不点任何按钮。
+# 找不到卡片或卡片上没有链接都算「没读到」，交回调用方按正常流程重新提交。
+_JS_TASK_MEDIA = """
+function q(x){return String(x==null?'':x).replace(/\\s+/g,' ').trim();}
+function card(box){
+  var v=box;
+  for(var j=0;j<12;j++){
+    if(!v.parentElement)break;
+    v=v.parentElement;
+    if(v.querySelector('video,a[href],img[src]'))return v;
+  }
+  return v;
+}
+var id=String(arguments[0]||'');
+if(!/^\\d+$/.test(id))return JSON.stringify({err:'bad_id'});
+var box=null;
+var tags=[].slice.call(document.querySelectorAll('.rh-task-id,.history-id'));
+tags.forEach(function(e){
+  if(box)return;
+  if(q(e.textContent).indexOf(id)>=0)box=card(e);
+});
+if(!box){
+  var re=new RegExp('taskid[:\\\\s]*'+id,'i');
+  var all=[].slice.call(document.querySelectorAll('*'));
+  for(var k=0;k<all.length&&!box;k++){
+    var e=all[k];
+    if(e.children&&e.children.length>4)continue;
+    if(re.test(q(e.textContent)))box=card(e);
+  }
+}
+if(!box)return JSON.stringify({err:'no_card'});
+var urls=[];
+function push(u){u=String(u||'');if(u.indexOf('http')===0&&urls.indexOf(u)<0)urls.push(u);}
+[].slice.call(box.querySelectorAll('video')).forEach(function(v){
+  push(v.src);push(v.currentSrc);push(v.getAttribute('data-src'));push(v.poster);
+  [].slice.call(v.querySelectorAll('source')).forEach(function(s){push(s.src);});
+});
+[].slice.call(box.querySelectorAll('a[href]')).forEach(function(a){push(a.href);});
+[].slice.call(box.querySelectorAll('img')).forEach(function(i){push(i.currentSrc||i.src);});
+return JSON.stringify({n:urls.length,u:urls.slice(0,8)});
+"""
+
+
 def pick_size(w, h):
     """把界面的 WxH 翻成云端那四件套：档位标签 + 画幅 + 宽 + 高。
 
@@ -892,11 +950,14 @@ class CloudH3:
         self.fail_confirm = max(0, int(self.cfg.get("fail_confirm_sec") or 15))
         # 灌完图后画布的读数还要稳这么久：平台自己那张图后到会把本地这份盖掉
         self.wf_settle = max(0, min(60, int(self.cfg.get("wf_settle_sec") or 6)))
+        # 只读收片时肯空等多久：任务列表要渲染、卡片上的地址要后挂
+        self.settle = max(10, int(self.cfg.get("harvest_settle_sec") or 90))
         self.tag = str(self.cfg.get("exec_tag") or "Plus")
         self.has_editor = False
         self.shape = SHAPE_FH          # 这一张到底是哪种画法：feihou 还是虚拟节点那张
         self.wf_title = ""
         self._task_id = ""          # 本段提交后从任务列表认领到的 taskid
+        self.last_task_id = ""      # 最近一次交回调用方的 taskid（收片/重交都算）
 
     # ---------- 账号与工作流 ----------
     def account(self, aid=""):
@@ -1165,16 +1226,21 @@ class CloudH3:
                 time.sleep(1.5)
         raise CloudError("浏览器窗口被关掉了：重开也没连上，再点一次开始")
 
-    def run(self, p, on_progress=None, should_stop=None):
-        """p：{prompt, seconds, width, height, refs, wf, acct}；回本地 mp4 路径。
+    def run(self, p, on_progress=None, should_stop=None, on_task=None):
+        """p：{prompt, seconds, width, height, refs, wf, acct, taskid}；回本地 mp4 路径。
 
         refs 是参考图列表，顺序即编号（第 1 张 = @1）。p["first"] 是老调用方的
         单图写法，仍然认。不只一张时必须走 chip 引用，否则模型分不清谁是谁。
+
+        p["taskid"] 是上一轮认领到的任务号：带着它就先只读地问平台这一段到底
+        跑完没有，跑完直接取回、还在跑就接着等，判失败或查不到才正常重新提交。
+        on_task 在认领到任务号的那一刻回调——提交成功但下载前被杀，下一轮才有的问。
         """
         row = self.account(p.get("acct"))
         aid = row["id"]
         state = self.store.load(aid)
         self._task_id = ""          # 这一段的 taskid 从提交后重新认领
+        self.last_task_id = ""
         kind, src = self.wf_src(p.get("wf"))
         secs = max(5, min(15, int(p.get("seconds") or 5)))
         size = pick_size(int(p.get("width") or 768), int(p.get("height") or 768))
@@ -1206,6 +1272,16 @@ class CloudH3:
             self.host.purpose = "gen"            # 这段期间保活别换号，否则中途掉登录
             try:
                 tab = self._enter(state, aid, url, on_progress, should_stop)
+                prev_tid = re.sub(r"\D", "", str(p.get("taskid") or ""))[:24]
+                if prev_tid:
+                    # 上一轮已经交过这一段（进程被杀、软件重启）：先问平台它到哪了。
+                    # 跑完就直接取回来，别再交一遍——重复提交是要再扣一次积分的。
+                    got = self._harvest(tab, prev_tid, on_progress, should_stop)
+                    if got:
+                        self._p(on_progress, should_stop,
+                                "云端：这一段平台上早跑完了，直接取回（没重交）…")
+                        self._notify_task(on_task, prev_tid)
+                        return self._download(got[0], got[1], p.get("out_dir") or "")
                 fid = self._wait_frame(tab, should_stop)
                 if kind == "file":
                     # 平台上那张图只是张跳板：进去之后立刻换成用户本地这一份
@@ -1295,6 +1371,8 @@ class CloudH3:
                         "云端：已提交（%s）…" % hit.replace("clicked ", "").strip())
                 tid = self.capture_task_id(tab, known, should_stop)
                 if tid:
+                    # 认领到就立刻交回：这一刻之后哪怕被杀，下一轮也问得出这一段
+                    self._notify_task(on_task, tid)
                     self._p(on_progress, should_stop,
                             "云端：任务列表已认领 taskid %s" % tid)
                 cos, fname = self._wait_result(tab, fid, ids["out"], base_name,
@@ -1746,6 +1824,94 @@ class CloudH3:
             self._task_id = hit
             self.log("· 任务列表认领 taskid %s" % hit)
         return hit
+
+    def _notify_task(self, cb, tid):
+        """把这一段的 taskid 立刻交回调用方：提交成功但还没下载完就被杀，
+        下一轮拿着它才问得出平台——重复提交是要再扣一次积分的。"""
+        self.last_task_id = str(tid or "")
+        if cb and self.last_task_id:
+            try:
+                cb(self.last_task_id)
+            except Exception:
+                pass
+
+    def task_hit(self, tab, taskid):
+        """任务列表里按 taskid 取那一条；读不到回空 dict（不猜）。"""
+        for x in (self.task_entries(tab).get("items") or []):
+            if str(x.get("id") or "") == str(taskid):
+                return x
+        return {}
+
+    def task_media(self, tab, taskid):
+        """已完成那一段的卡片上的成片地址；读不到回空串。
+
+        地址带签名，只在当场用一下，不进日志也不落盘——日志里留一条能复制的
+        完整签名链接，跟把凭据抄出来是同一类事。
+        """
+        try:
+            raw = self.js(tab, _JS_TASK_MEDIA, str(taskid))
+            d = json.loads(raw) if raw else {}
+        except Exception:
+            return ""
+        if not isinstance(d, dict):
+            return ""
+        return _task_media_rank([str(u or "") for u in (d.get("u") or [])])
+
+    def _harvest(self, tab, tid, cb, stop):
+        """只读地问平台这一段到哪一步，跑完了就回 (地址, 文件名)；不能收片回 None。
+
+        三种不能收片：列表里查不到这个号（多半是那一栏只留最近几条，早就滚出屏幕了）、
+        平台判了失败、跑完了但卡片上没有可直接下载的地址。这几种都交回正常流程
+        重新提交——「收不到」和「没跑成」在这里没法替用户做主。
+        查到但还在跑/排队就等到 self.timeout：这和「重新提交再等一遍」花的是同一份
+        时间，但省下一次提交。
+        """
+        t0 = time.time()
+        told = ""
+        done_at = 0.0
+        fail_at = 0.0
+        while True:
+            if stop and stop():
+                raise CloudError("已停止：这一段没从平台收回来")
+            waited = int(time.time() - t0)
+            hit = self.task_hit(tab, tid)
+            kind = _task_kind(str((hit or {}).get("s") or "")) if hit else ""
+            if not hit and waited > self.settle:
+                return None                       # 那张列表里没有：别拿 30 分钟空等
+            if hit and kind == "fail":
+                if not fail_at:
+                    fail_at = time.time()
+                elif time.time() - fail_at > self.fail_confirm:
+                    # 和「等片」那条同一口径：页面刷新会瞬时报错，连续读到才收手
+                    self.log("· taskid %s 平台判失败：%s"
+                             % (tid, str(hit.get("d") or "")[:120]))
+                    return None
+            elif fail_at:
+                fail_at = 0.0
+            if kind == "done" or (hit and not kind):
+                if not done_at:
+                    done_at = time.time()
+                url = self.task_media(tab, tid)
+                if url:
+                    return url, "h3_take_%s.mp4" % tid
+                if time.time() - done_at > self.settle:
+                    return None                   # 说跑完了却没给地址：只能重交
+            if waited > self.timeout:
+                raise CloudError("等到 %d 秒也没收到这一段（taskid %s）："
+                                 "平台上它还在跑，先去那一页看一眼再点「继续」"
+                                 % (self.timeout, tid))
+            # 列表要渲染、平台要跑，这一句只在状态换了说法时讲一次，别刷屏
+            now = ("没查到这个任务号" if not hit else
+                   "平台刚标了失败，先等 %d 秒再确认" % self.fail_confirm
+                   if kind == "fail" else
+                   "排队/在跑" if kind == "run" else
+                   "跑完了，正在取地址" if kind == "done" else "状态读不出")
+            if now != told:
+                told = now
+                self.log("· 收片：taskid %s %s · 已等 %d 秒" % (tid, now, waited))
+            self._p(cb, stop, "云端：问平台 taskid %s（%s）· 已等 %d 秒"
+                    % (tid, now, waited))
+            time.sleep(self.poll_min)
 
     def platform_state(self, tab, fid, waited, hist0=None, known=None, task_id=""):
         """平台上这一段到底到哪一步了——一句话，读不到就回空串（绝不编一个）。
