@@ -403,6 +403,8 @@ MIC.registerPage('film',{
         C.field('风格',C.txt('film.style','电影感写实'),
           '会追加到每一段的描述后面；留空就不加')+
       '</div>'+
+      /* 风格预设写进上面那一格：{prompt} 就是当前那句风格，套完还是一句话追加到每段 */
+      MIC.styles.row('film.style',cloud?'cloud':'h3')+
       C.field(cloud?'参考图（1~4 张）':'首帧（可选）',
         C.refsRow('film.refs',4,
           cloud?'点「加图」从画廊挑；描述里用 @1 @2 点名第几张'
@@ -432,6 +434,7 @@ MIC.registerPage('film',{
             '本机：单段失败重试次数；云端固定每个号试 2 次（失败先重启浏览器）再换号')+
           C.field('种子',C.seedRow('film.seed'),'随机=每段新种子；固定=同参数可复现')+
         '</div>','接法 · 转场 · 重试 · 种子')+
+      MIC.styles.foldLib('film.style',cloud?'cloud':'h3')+
       planHTML();
 
     const runKey=s.running==='film'||c.run==='film';

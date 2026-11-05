@@ -101,6 +101,9 @@ MIC.registerPage('t2i',{
         ` onclick="MIC.polish.prompt('${K}.prompt','image')">${ic('wand','s')}AI 润色</button></div>`,
         '中文英文都行；「AI 润色」按专业构图补齐机位、景别、光线与材质')+
       MIC.inspire.box(K+'.prompt')+
+      /* 风格一行：套用时把这一页正在写的那句话填进模板的 {prompt}，
+         归属跟着引擎走——Moss 档只列给 Moss 的风格 */
+      MIC.styles.row(K+'.prompt',moss?'moss':'qwen')+
       row+
       (custom?'<div class="grid4">'+
         C.field('宽（px）',C.num(K+'.cw','1024'))+
@@ -109,7 +112,8 @@ MIC.registerPage('t2i',{
       C.fold('高级','cog',adv,'反向提示词'+(moss?'':' · KV 缓存'))+
       /* 词库原来单开一页，挑完还是得回这一页填——并进来：日常看灵感行两行 chips，
          要通览 56 条就展开这块（收起时不占一行地方） */
-      C.fold('词库全览','book',MIC.inspire.panel(K+'.prompt'),'7 类 · 悬停看全句');
+      C.foldLazy('词库全览','book',()=>MIC.inspire.panel(K+'.prompt'),'7 类 · 悬停看全句')+
+      MIC.styles.foldLib(K+'.prompt',moss?'moss':'qwen');
     const btns=moss
       ?'<button class="btn sm gho" onclick="MIC.gen.openDir(true)">'+ic('folder','s')+'Moss 输出目录</button>'
       :'<button class="btn sm gho" onclick="MIC.runner.load()">载入模型</button>'+

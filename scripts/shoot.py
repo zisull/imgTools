@@ -33,6 +33,8 @@ PROBE = {
 (async function(){
   const R=[],ok=(n,c,x)=>R.push((c?'PASS ':'FAIL ')+n+(x!=null?' '+x:''));
   const wait=ms=>new Promise(r=>setTimeout(r,ms));
+  /* 「选原图」现在开的是画廊弹层：点一格才算选完 */
+  async function pickCell(){await wait(700);(document.querySelector('#pickGrid .pickcell')||{click(){}}).click();await wait(600);}
   function ink(){
     const cv=document.getElementById('paintCv');
     if(!cv||!cv.width)return 0;
@@ -43,7 +45,7 @@ PROBE = {
   try{
     await wait(1500);
     MIC.inp.pickBase();
-    await wait(800);
+    await pickCell();
     let cv=document.getElementById('paintCv');
     ok('选完原图有画布', !!cv && cv.width>0, cv&&cv.width);
     /* 每次都要重新取节点：MIC.render() 会换掉 canvas，往旧节点上派发等于没涂 */
@@ -88,7 +90,7 @@ PROBE = {
     ok('移除原图后回到选图态', !document.getElementById('paintCv')
         && !!document.querySelector('.refdrop'));
     MIC.inp.pickBase();                 /* 换图：旧涂抹层对新图没意义 */
-    await wait(800);
+    await pickCell();
     ok('换图后涂抹层清空', ink()===0, ink());
   }catch(e){ok('探针跑完',false,String(e));}
   document.body.insertAdjacentHTML('beforeend','<pre id="probe">'+R.join('\\n')+'</pre>');
@@ -192,6 +194,8 @@ PROBE = {
   const negBtns=()=>[].slice.call(document.querySelectorAll('#view .fold-b .pfoot button'));
   const fhide=()=>{const f=fold();return !!(f&&f.nextElementSibling
       &&f.nextElementSibling.classList.contains('hide'));};
+  /* 懒折叠的展开入口：标题上挂着 closed 才点，已经摊开点它会收回 */
+  const open=()=>{const f=fold();if(f&&f.classList.contains('closed'))f.click();};
   try{
     await wait(1500);
     clearInterval(MIC.s.pollTimer);
@@ -247,15 +251,19 @@ PROBE = {
     ok('生图页里有一块折起来的词库全览', !!f&&f.classList.contains('closed'),
        f?(f.classList.contains('closed')?'折着':'已展开'):'没有这块');
     const total=MIC.lib.CATS.reduce((n,c)=>n+c.items.length,0);
-    ok('折着时全部词条在 DOM 里但不显示', rows()===total&&fhide(), rows()+'/'+total);
+    /* 懒折叠：收着的时候整本根本不在 DOM 里（七类五十来行，跟着每次重画是白扔帧） */
+    ok('折着时整本不进 DOM', rows()===0&&fhide(), rows()+'/'+total);
     f.click();
     await wait(200);
-    ok('点标题摊开整本', rows()===total&&!fhide(), fhide()?'还是折着':'已摊开 '+rows());
+    ok('点标题才画出来并摊开', rows()===total&&!fhide(), fhide()?'还是折着':'已摊开 '+rows());
     ok('七类各有小标题、反向那类的按钮叫「填反向」',
        document.querySelectorAll('#view .fold-b .egroup').length===7
        && by(/^填反向$/).length===MIC.lib.cat('negative').items.length,
        by(/^填反向$/).length+'');
     set('gen.negative','');
+    await wait(200);
+    /* set 走的是整页重画，懒折叠跟着收回；再点开碰里面的按钮 */
+    open();
     await wait(200);
     negBtns().forEach(b=>b.click());
     await wait(300);
@@ -441,10 +449,12 @@ PROBE = {
        bar()&&bar().textContent.trim().slice(0,16));
     ok('补全中不重复给按钮', barBtns().filter(t=>/一键补齐/.test(t)).length===0, barBtns().join('|'));
     ok('补全中给一条「看日志」的路', barBtns().filter(t=>/看日志/.test(t)).length===1, barBtns().join('|'));
-    /* 切去别的页：补全中的提示也跟着收走，不追着人 */
+    /* 补全中切去别的页：这条横幅跟着人走（点了「一键补齐」不该看着像没发生）；
+       「还差几项」那种欠账提示仍然只在环境页出现，前面那条已经钉过 */
     MIC.nav.goto('gallery');
     await wait(600);
-    ok('离了环境页横幅就消失', !bar(), bar()&&bar().textContent.trim().slice(0,12));
+    ok('补全中离了环境页横幅还在', !!bar()&&/补全中|步骤/.test(bar().textContent),
+       bar()?bar().textContent.trim().slice(0,12):'空');
     MIC.nav.goto('t2i');
     await wait(600);
     await wait(9000);
@@ -514,8 +524,12 @@ PROBE = {
     MIC.nav.goto('env');
     await wait(500);
     const zs=[].slice.call(document.querySelectorAll('#view .subtabs .chip'));
+    /* 格子右边那颗欠账数（<span class=n>）是体检晚半拍才挂上来的，
+       比名字会不稳，比名字时把它摘掉——计数本身由 env 探针那条钉 */
+    const zname=c=>{const n=c.querySelector('.n');
+      return (n?c.textContent.replace(n.textContent,''):c.textContent).replace(/\\s+/g,'');};
     ok('环境管理里是五格：基础/千问/Moss/H3/云端账号',
-       zs.map(c=>c.textContent.replace(/\\s+/g,'')).join('|')==='基础|千问|Moss|H3|云端账号',
+       zs.map(zname).join('|')==='基础|千问|Moss|H3|云端账号',
        zs.map(c=>c.textContent.trim()).join('|'));
     const goneZ=[];
     for(const z of ['base','qwen','moss','h3','cloud']){
@@ -1414,13 +1428,126 @@ PROBE["gal"] = """
     const icell=[].slice.call(cells()).find(c=>!c.querySelector('.gvid'));
     ok('成片砖不提供首帧按钮', !!vc && !vc.querySelector('.gsend'));
     ok('图片砖提供首帧按钮', !!icell && !!icell.querySelector('.gsend'));
+    /* 画廊是这一页的记账本：那张图的提示词顺手能存成风格 */
+    const gbtn=[].slice.call(cells()).filter(c=>!c.querySelector('.gvid')
+                 &&c.querySelector('.gstyle'))[0];
+    ok('有提示词记录的图砖上有「存为风格」，成片砖没有',
+       !!gbtn && !vc.querySelector('.gstyle'));
+    if(gbtn){
+      gbtn.querySelector('.gstyle').click();
+      await wait(900);
+      const ed=document.querySelector('.stmodal [data-f="tpl"]');
+      ok('点一下就起好稿：模板里是这张的提示词，缩略图也带上了',
+         !!ed && String(ed.value||'').length>0
+         && !!document.querySelector('.stmodal .stpic'), ed?String(ed.value).slice(0,24):'');
+      MIC.styles.closeEdit();
+      await wait(300);
+    }
     icell.querySelector('.gsend').click();
     await wait(1000);
     const first=String(MIC.s.cfg.video.first||'');
     ok('首帧写进了配置', /\\.(png|jpg|jpeg|webp)$/i.test(first), first);
-    const inp=document.querySelector('#view [data-k="video.first"]');
-    ok('已经跳到视频页', !!inp, (document.getElementById('crumb')||{}).textContent);
-    ok('首帧框显示这张', !!inp && inp.value===first, inp&&inp.value);
+    const box=document.querySelector('#view [data-refs="video.refs"]');
+    ok('已经跳到视频页', !!box, (document.getElementById('crumb')||{}).textContent);
+    /* 多图改版后视频页只剩 refs 那一排，first 只是跟着写的一份备份 */
+    ok('参考图那一排就是这张', !!box
+       && box.querySelectorAll('.refcell').length===1
+       && box.querySelector('.refcell').getAttribute('title')===first,
+       box?box.querySelectorAll('.refcell').length:0);
+  }catch(e){ok('探针跑完',false,String(e));}
+  document.body.insertAdjacentHTML('beforeend','<pre id="probe">'+R.join('\\n')+'</pre>');
+})();
+</script>
+"""
+
+PROBE["style"] = """
+<script>
+(async function(){
+  const R=[],ok=(n,c,x)=>R.push((c?'PASS ':'FAIL ')+n+(x!=null?' '+x:''));
+  const wait=ms=>new Promise(r=>setTimeout(r,ms));
+  const ta=()=>document.querySelector('#view [data-k="gen.prompt"]');
+  const chips=()=>document.querySelectorAll('#view [data-st-chips] .chip');
+  const lib=()=>document.querySelector('#view [data-st-panel]');
+  try{
+    await wait(1700);
+    ok('生图页有一行风格 chips', chips().length>=2, chips().length);
+    ok('风格库收起时不建 DOM（懒折叠）', !!lib() && lib().innerHTML==='',
+       lib()?lib().innerHTML.length:-1);
+
+    const t=ta();
+    t.value='一只猫推开木门';
+    t.dispatchEvent(new Event('change',{bubbles:true}));
+    const neg0=String(MIC.s.cfg.gen.negative||'');
+    chips()[0].click();
+    await wait(800);
+    const got=String(MIC.s.cfg.gen.prompt||'');
+    ok('套用把这一页那句填进模板的 {prompt}', /一只猫推开木门/.test(got), got);
+    ok('模板自己的说法还在', /电影感/.test(got), got.slice(0,24));
+    ok('通用反向跟着这条风格走',
+       String(MIC.s.cfg.gen.negative||'')!==neg0 && !!(MIC.s.cfg.gen.negative||''),
+       MIC.s.cfg.gen.negative);
+
+    const fh=[].slice.call(document.querySelectorAll('#view .fold-h'))
+              .filter(h=>/风格库/.test(h.textContent))[0];
+    ok('参数卡里有「风格库」这一折叠', !!fh);
+    fh.click();
+    await wait(900);
+    ok('展开才画：卡片按这一路过滤',
+       lib().querySelectorAll('.stcard').length>=2, lib().querySelectorAll('.stcard').length);
+    const im=lib().querySelector('img[data-stthumb]');
+    ok('缩略图按需取，清单里不内联 base64',
+       !!im && /^data:image/.test(im.getAttribute('src')||''),
+       im?(im.getAttribute('src')||'').slice(0,18):'');
+
+    lib().querySelector('[onclick*="editNew"]').click();
+    await wait(500);
+    const modal=document.querySelector('.stmodal');
+    ok('编辑器挂在 body 上：整页重画吃不掉正在写的模板',
+       !!modal && !modal.closest('#view'));
+    modal.querySelector('[data-f="name"]').value='探针档';
+    modal.querySelector('[data-f="tpl"]').value='冷色调，{prompt}';
+    [].slice.call(modal.querySelectorAll('.engbtn')).forEach(b=>
+      b.classList.toggle('on',b.dataset.e==='qwen'));
+    ok('适用引擎可以多选，也可以只勾一路',
+       modal.querySelectorAll('.engbtn.on').length===1);
+    MIC.styles.saveEdit();
+    await wait(900);
+    ok('存完 chips 多出一条', chips().length>=3, chips().length);
+    ok('新那条出现在这一路的清单里',
+       [].slice.call(chips()).some(c=>c.textContent==='探针档'), '');
+
+    /* 编辑页那颗「添加参考图」：现在是画廊弹层，不用去文件对话框里翻 */
+    MIC.nav.goto('edit');
+    await wait(1000);
+    MIC.edit.add();
+    await wait(800);
+    const pk=document.querySelector('.pickmodal');
+    ok('加图开的是画廊弹层', !!pk && !pk.classList.contains('hide'));
+    ok('弹层里留着「从文件夹选」兜底',
+       [].slice.call(pk.querySelectorAll('button')).some(b=>/文件夹/.test(b.textContent)));
+    const cell=document.querySelector('#pickGrid .pickcell');
+    if(cell)cell.click();
+    await wait(800);
+    ok('点一格就进了参考图', document.querySelectorAll('#view .gcell').length>=1,
+       document.querySelectorAll('#view .gcell').length);
+
+    /* 带参考图的风格套到视频页：那一格 data-refs 得真收进去（走 form.refsSet，
+       上一版漏导出这个键，套用直接抛 undefined——这条把它钉住） */
+    await MIC.api.styleSave({name:'探针参考',tpl:'{prompt}，镜头缓慢推进',neg:'',eng:[],
+      refs:['D:/x/风格A.png','D:/x/风格B.png']});
+    MIC.styles.invalidate();
+    await wait(500);
+    MIC.nav.goto('video');
+    await wait(1000);
+    const vc=[].slice.call(document.querySelectorAll('#view [data-st-chips] .chip'));
+    const hit=vc.filter(c=>c.textContent==='探针参考')[0];
+    ok('没勾引擎的风格在视频页也列出来', !!hit, vc.length);
+    const refs0=MIC.form.refsOf('video.refs').length;
+    if(hit)hit.click();
+    await wait(900);
+    const refs1=MIC.form.refsOf('video.refs');
+    ok('套用把风格的参考图并进 video.refs',
+       refs1.length>refs0 && refs1.indexOf('D:/x/风格A.png')>=0, JSON.stringify(refs1));
   }catch(e){ok('探针跑完',false,String(e));}
   document.body.insertAdjacentHTML('beforeend','<pre id="probe">'+R.join('\\n')+'</pre>');
 })();
@@ -1489,7 +1616,7 @@ PROBE["win"] = """
 """
 
 # 探针跑在哪一页上（键是探针名，值是 shoot 的页名）
-PROBE_PAGE = {"inpaint": "inpaint", "again": "t2i", "repeat": "t2i", "kits": "t2i",
+PROBE_PAGE = {"style": "t2i", "inpaint": "inpaint", "again": "t2i", "repeat": "t2i", "kits": "t2i",
               "loadbar": "t2i", "env": "env_qwen", "lazy": "t2i", "nav": "t2i",
               "gal": "gallery", "merge": "t2i", "sw": "t2i", "tier": "t2i",
               "greet": "t2i", "vid": "video", "dlbar": "env_qwen", "win": "t2i",
@@ -1497,8 +1624,35 @@ PROBE_PAGE = {"inpaint": "inpaint", "again": "t2i", "repeat": "t2i", "kits": "t2
 
 # 有的探针要等两轮「一键补齐」跑完（mock 里补全按秒级推进），默认 9 秒预算根本活不到收尾。
 # 没列在这里的探针用默认值。
-PROBE_BUDGET = {"env": 60000, "lazy": 40000, "tier": 25000, "vid": 45000, "sw": 20000,
+PROBE_BUDGET = {"style": 30000, "env": 60000, "lazy": 40000, "tier": 25000, "vid": 45000, "sw": 20000,
                 "greet": 30000, "dlbar": 30000, "gal": 30000, "win": 20000, "wf": 30000}
+
+
+def run_edge(cmd, stdout_file=None, timeout=180):
+    """无头 Edge 过一层 PowerShell 起。
+
+    Edge 的 --dump-dom / --screenshot 是它自己拉起的浏览器进程写的：Python 直接起时
+    启动器几毫秒就退，拿回来 0 字节，截图也不落地（这台机器实测）。Start-Process
+    -Wait 等整棵树跑完再收，探针才有输出。
+    """
+    q = lambda s: "'" + str(s).replace("'", "''") + "'"
+    redir = (" -RedirectStandardOutput %s -RedirectStandardError %s"
+             % (q(stdout_file), q(stdout_file + ".err"))) if stdout_file else ""
+    ps = ("$ErrorActionPreference='Stop';Start-Process -FilePath %s "
+          "-ArgumentList @(%s) -NoNewWindow -Wait%s"
+          % (q(cmd[0]), ",".join(q(a) for a in cmd[1:]), redir))
+    try:
+        subprocess.run(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ps],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=timeout)
+    except (subprocess.TimeoutExpired, OSError):
+        return ""
+    if not stdout_file:
+        return ""
+    try:
+        with open(stdout_file, "r", encoding="utf-8", errors="replace") as fh:
+            return fh.read()
+    except OSError:
+        return ""
 
 
 def main():
@@ -1558,9 +1712,7 @@ def main():
                    "--virtual-time-budget=%d" % (args.budget or
                        PROBE_BUDGET.get(args.probe, 9000)),
                    "--dump-dom", url]
-            p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                               timeout=180, encoding="utf-8", errors="replace")
-            dom = p.stdout or ""
+            dom = run_edge(cmd, os.path.join(out, "probe_dom.html"), timeout=180)
             # 探针脚本源码里也带着这个串，取最后一次出现才是真元素
             i = dom.rfind('<pre id="probe">')
             if i < 0:
@@ -1591,8 +1743,7 @@ def main():
                "--screenshot=" + png, url]
         if args.full:
             cmd.append("--force-device-scale-factor=1")
-        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                       timeout=120)
+        run_edge(cmd, timeout=120)
         made.append(png if os.path.exists(png) else "没出图:" + name)
     for m in made:
         print(m)

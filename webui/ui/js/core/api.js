@@ -62,6 +62,13 @@ MIC.api={
   modelsList:()=>call('models_list'),
   modelsSetActive:n=>call('models_set_active',n),
   modelsDownload:(r,n)=>call('models_download',r,n||''),
+  /* 风格预设：一份可手改的 JSON（<数据目录>/styles/presets.json）+ {prompt} 模板渲染 */
+  styleList:e=>call('style_list',e||''),
+  styleApply:(id,t)=>call('style_apply',id,t||''),
+  styleSave:p=>call('style_save',p||{}),
+  styleDelete:id=>call('style_delete',id||''),
+  styleReset:()=>call('style_reset'),
+  styleDraft:(f,e)=>call('style_draft',f,e||''),
   /* 环境体检与一键补全：清单在 ROOT/envs/，缺的包与权重由后端后台补齐 */
   /* 环境：体检/补全 + 每条模型一路的开关（关掉＝后端不体检、功能页一并收起） */
   envCheck:()=>call('env_check'),

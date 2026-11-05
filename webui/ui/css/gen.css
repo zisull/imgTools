@@ -256,3 +256,42 @@
 .pickcell:hover{border-color:var(--ac);transform:translateY(-1px)}
 .pickcell img{display:block;width:100%;aspect-ratio:1/1;object-fit:cover;background:var(--track)}
 .pickcell span{padding:6px 8px;font-size:11.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+
+/* 风格预设库（core/styles.js）：卡片一行，缩略图在左，动作在右 */
+.gstyle{position:absolute;top:6px;right:102px;width:26px;height:26px;padding:0;display:flex;
+  align-items:center;justify-content:center;border-radius:8px;opacity:0;transition:opacity .12s;
+  background:rgba(0,0,0,.45);color:#fff;border:0}
+.gcell:hover .gstyle{opacity:1}
+.gstyle:hover{background:var(--ac)}
+.stbar{margin-bottom:4px;align-items:center}
+.stcard{display:flex;gap:12px;align-items:flex-start;padding:10px 2px;border-bottom:1px solid var(--line)}
+.stcard:last-child{border-bottom:0}
+.stthumb{flex:none;width:76px;height:76px;object-fit:cover;border-radius:10px;
+  border:1px solid var(--line2);background:var(--track)}
+.stthumb.ph{display:flex;align-items:center;justify-content:center;color:var(--fg3)}
+.stmain{flex:1 1 auto;min-width:0;display:flex;flex-direction:column;gap:3px}
+.sth{display:flex;align-items:center;gap:7px;font-size:13px}
+.sth b{font-weight:650}
+.sten{font-style:normal;font-size:11px;color:var(--fg3);border:1px solid var(--line2);
+  border-radius:999px;padding:1px 7px}
+.strefs{display:flex;gap:5px;margin-top:3px}
+.stref{width:34px;height:34px;object-fit:cover;border-radius:7px;border:1px solid var(--line2);
+  background:var(--track)}
+.stacts{flex:none;display:flex;align-items:center;gap:4px}
+
+/* 编辑弹层：在 body 上，不在 #view 里，整页重画吃不掉正在写的模板 */
+.stmodal{width:min(720px,94vw)}
+/* 通用弹层给文本框定了 290px 的下限（那是给提示词大框的），
+   这里两个框按行数走就行，不然「通用反向」两行也撑成半屏 */
+.stmodal textarea{min-height:0}
+.stmodal [data-f="tpl"]{min-height:132px}
+.stgrid{display:grid;grid-template-columns:1fr 1fr;gap:0 14px}
+.stgrid .f{margin-bottom:12px}
+.stmedia{display:flex;flex-wrap:wrap;gap:7px;align-items:center}
+.stpic{position:relative;width:74px;height:74px}
+.stpic .stthumb,.stpic .stref{width:74px;height:74px}
+.stpic .refx{position:absolute;top:-6px;right:-6px;width:20px;height:20px;padding:0;
+  display:flex;align-items:center;justify-content:center;border-radius:50%;border:0;
+  background:var(--danger);color:#fff;opacity:.9}
+.stpic .refx:hover{opacity:1}
+@media (max-width:720px){.stgrid{grid-template-columns:1fr}}

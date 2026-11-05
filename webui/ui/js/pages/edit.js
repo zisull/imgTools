@@ -65,6 +65,7 @@ MIC.registerPage('edit',{
       C.field('编辑指令',C.ta('edit.prompt',4,'把这张铅笔素描变成白底上的同款实物照片。'),
         '说清要怎么改这组图')+
       MIC.inspire.box('edit.prompt')+
+      MIC.styles.row('edit.prompt','qwen')+
       C.field('参考图',dropzone+grid(),'最多 10 张，最后一张决定输出画幅比例')+
       '<div class="grid4">'+
         C.field('画幅',C.sizeSel('edit.res',RES),'比例跟随最后一张参考图；768² 已接近 12G 显存上限')+
@@ -74,7 +75,8 @@ MIC.registerPage('edit',{
         C.field('张数',C.num('edit.count','张'),'连发这么多张，每张一个不同种子')+
       '</div>'+
       C.fold('高级','cog',
-        C.field('反向提示词',C.ta('edit.negative',2,MIC.lib.NEG_BASE),'空着时点灵感卡会自动配一条通用的'));
+        C.field('反向提示词',C.ta('edit.negative',2,MIC.lib.NEG_BASE),'空着时点灵感卡会自动配一条通用的'))+
+      MIC.styles.foldLib('edit.prompt','qwen');
     return C.duo(
       C.card('编辑参数','wand',C.lock(run,params)+MIC.runner.action('MIC.edit.start()'),
         {note:MIC.runner.modelNote(run)}),
@@ -89,7 +91,21 @@ MIC.edit={
     if(imgs.indexOf(p)<0){if(imgs.length>=10){MIC.toast('最多 10 张');return;}imgs.push(p);loadThumb(p);}
     MIC.render();
   },
-  add(){MIC.api.pick('file').then(function(p){MIC.edit.addPath(p);}).catch(function(){});},
+  /* 一次进一组（风格预设带几张配方图）：逐张 addPath 会重画好几遍 */
+  addMany(list){
+    const arr=[].concat(list||[]);
+    let add=0,drop=0;
+    arr.forEach(function(p){
+      if(!p||imgs.indexOf(p)>=0)return;
+      if(imgs.length>=10){drop++;return;}
+      imgs.push(p);loadThumb(p);add++;
+    });
+    if(add)MIC.render();
+    if(drop)MIC.toast('参考图最多 10 张，多出的 '+drop+' 张没加');
+  },
+  /* 默认给画廊弹层：这一页的图绝大多数就是刚出过的那几张，
+     系统对话框要从盘里翻文件名，等于把最近的作品藏起来了（弹层里有「从文件夹选」） */
+  add(){MIC.picker.open('',function(p){MIC.edit.addPath(p);});},
   onDrop(e){
     MIC.form.resolveDrop(e.dataTransfer,'file').then(function(r){
       if(!r||!r.ok){MIC.toast((r&&r.msg)||'没能识别这个文件');return;}

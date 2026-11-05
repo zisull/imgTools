@@ -91,6 +91,7 @@ MIC.registerPage('inpaint',{
     const params=
       C.field('重绘指令',C.ta('inpaint.prompt',3,'在仪表台上放一副墨镜。'),'说清要改成什么')+
       MIC.inspire.box('inpaint.prompt')+
+      MIC.styles.row('inpaint.prompt','qwen')+
       C.field('原图',stage(),'涂到的地方才会重绘，其余保持原样')+
       '<div class="grid4">'+
         C.field('画幅',C.sizeSel('inpaint.res',RES),'输出画幅跟随原图比例，这里只定清晰度')+
@@ -100,7 +101,9 @@ MIC.registerPage('inpaint',{
         C.field('张数',C.num('inpaint.count','张'),'连发这么多张，每张一个不同种子')+
       '</div>'+
       C.fold('高级','cog',
-        C.field('反向提示词',C.ta('inpaint.negative',2,MIC.lib.NEG_BASE),'空着时点灵感卡会自动配一条通用的'));
+        C.field('反向提示词',C.ta('inpaint.negative',2,MIC.lib.NEG_BASE),'空着时点灵感卡会自动配一条通用的'))+
+      /* 风格库只管提示词：重绘这一页的原图是涂过字的，绝不能被预设里的参考图换掉 */
+      MIC.styles.foldLib('inpaint.prompt','qwen');
     return C.duo(
       C.card('重绘参数','brush',C.lock(run,params)+MIC.runner.action('MIC.inp.start()'),
         {note:MIC.runner.modelNote(run)}),
@@ -124,7 +127,9 @@ MIC.inp={
     }).catch(function(){MIC.render();});
   },
   pickBase(){
-    MIC.api.pick('file').then(function(p){if(p)MIC.inp.setBase(p);}).catch(function(){});
+    /* 和编辑页同一个理由：要重绘的多半就是刚出过的那张，先给画廊，
+       弹层里留着「从文件夹选」走系统对话框 */
+    MIC.picker.open('',function(p){MIC.inp.setBase(p);});
   },
   onDrop(e){
     MIC.form.resolveDrop(e.dataTransfer,'file').then(function(r){

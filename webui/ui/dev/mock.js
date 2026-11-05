@@ -406,8 +406,31 @@ const CLOUD={
   ],
 };
 
-window.MIC_MOCK={
-  boot(){return {cfg:cfg,state:st,version:'0.2.0-m2',default_nav:cfg.default_nav};},
+/* 风格预设种子：形状与 App.style_list 一致（thumb_abs/refs_abs 是解析好的绝对路径）。
+   渲染只在 mock 里照 preset.render 那一套做一遍：占位符在模板里就原位插，不在就接在后面。 */
+const STYLES=[
+  {id:'smock0001',name:'电影感',eng:['qwen','moss'],thumb:GAL[0]?GAL[0].file:'',refs:[],
+   tpl:'电影感写实，35mm，柔和侧光，浅景深，胶片颗粒，{prompt}',neg:'卡通，插画，过曝',note:'',
+   ts:Date.now()/1000},
+  {id:'smock0002',name:'棚拍人像',eng:['qwen','moss'],thumb:'',refs:[],
+   tpl:'专业棚拍人像，柔光箱加反光板，皮肤质感真实，背景纯净，{prompt}',neg:'畸形，多手，模糊',
+   note:'要干净底色就补一句背景颜色',ts:Date.now()/1000},
+  {id:'smock0003',name:'镜头推进',eng:['h3','cloud'],thumb:GAL[2]?GAL[2].file:'',refs:[],
+   tpl:'{prompt}，镜头缓慢推进，焦点落在人物眼睛，光线自然变化',neg:'抖动，畸变',
+   ts:Date.now()/1000},
+];
+function styleRender(p,text){
+  const t=String(text||'').trim();
+  if(String(p.tpl||'').indexOf('{prompt}')>=0)return String(p.tpl).replace('{prompt}',t||'，');
+  if(!p.tpl)return t;
+  return t?t+'，'+p.tpl:p.tpl;
+}
+function stylePub(p){
+  const o=Object.assign({},p);
+  o.thumb_abs=p.thumb||'';o.refs_abs=p.refs||[];o.lost=0;return o;
+}
+
+window.MIC_MOCK={  boot(){return {cfg:cfg,state:st,version:'0.2.0-m2',default_nav:cfg.default_nav};},
   poll(c){advance();
     return {seq:seq,logs:logs.slice(c),state:st};},
   save_cfg(patch){
@@ -865,5 +888,37 @@ window.MIC_MOCK={
   cloud_browser_start(){CLOUD.br.on=true;L('☁️ 浏览器已启动（共用调试端口 9333）');return {ok:true};},
   cloud_browser_stop(){CLOUD.br.on=false;L('☁️ 浏览器已关闭');return {ok:true};},
   cloud_auth_names(id){return {ok:true,names:['Rh-Comfy-Auth','Rh-Identify']};},
+  /* 风格预设（core/styles.js）：mock 就在内存里增删，接口形状与 App 一致 */
+  style_list(engine){
+    const e=String(engine||'');
+    const items=STYLES.filter(p=>!e||!(p.eng||[]).length||p.eng.indexOf(e)>=0).map(stylePub);
+    return Promise.resolve({ok:true,items:items});},
+  style_apply(pid,text){
+    const p=STYLES.filter(x=>x.id===pid)[0];
+    if(!p)return {ok:false,msg:'这条风格已经不在了：重新挑一条'};
+    return {ok:true,name:p.name,prompt:styleRender(p,text),negative:p.neg||'',
+      refs:(p.refs||[]).slice(),lost:0};},
+  style_save(p){
+    p=p||{};
+    if(!String(p.name||'').trim())return {ok:false,msg:'名字是空的：给这条风格起个两三个字的短名'};
+    if(!String(p.tpl||'').trim())return {ok:false,msg:'模板是空的：没有提示词的预设点下去什么都不发生'};
+    const one={id:p.id||('smock'+String(Date.now()).slice(-7)),name:String(p.name).slice(0,24),
+      tpl:String(p.tpl),neg:String(p.neg||''),note:String(p.note||''),
+      eng:(p.eng||[]).slice(),thumb:p.thumb||'',refs:(p.refs||[]).slice(),ts:Date.now()/1000};
+    const i=STYLES.map(x=>x.id).indexOf(one.id);
+    if(i>=0)STYLES[i]=one;else STYLES.push(one);
+    L('已保存风格：'+one.name);
+    return {ok:true,items:STYLES.map(stylePub)};},
+  style_delete(pid){
+    const i=STYLES.map(x=>x.id).indexOf(pid);
+    if(i<0)return {ok:false,msg:'没有这条风格'};
+    L('已删除风格：'+STYLES[i].name);STYLES.splice(i,1);
+    return {ok:true,items:STYLES.map(stylePub)};},
+  style_reset(){L('风格库已恢复出厂');return {ok:true,items:STYLES.map(stylePub)};},
+  style_draft(file,engine){
+    const g=GAL.filter(x=>x.file===file)[0];
+    if(!g||!g.prompt)return {ok:false,msg:'画廊里没有这张图的提示词，先写一句再存风格'};
+    return {ok:true,preset:stylePub({name:g.name.replace(/\.[a-z0-9]+$/i,'').slice(0,24),
+      tpl:g.prompt,neg:g.negative||'',eng:engine?[engine]:[],thumb:file,refs:[],note:''})};},
 };
 })();

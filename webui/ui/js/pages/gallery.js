@@ -40,6 +40,7 @@ function cellHTML(it,i){
     <button class="gstar ${it.fav?'on':''}" title="收藏" onclick="MIC.gal.fav(${i})">${ic('star','s')}</button>
     <button class="gfill" title="参数回填到原页" onclick="MIC.gal.backfill(${i})">${ic('wand','s')}</button>
     ${vid?'':`<button class="gsend" title="送到视频页当参考图" onclick="MIC.gal.toVideo(${i})">${ic('film','s')}</button>`}
+    ${vid||!it.prompt?'':`<button class="gstyle" title="把这张的提示词存成风格预设" onclick="MIC.gal.toStyle(${i})">${ic('palette','s')}</button>`}
     <button class="gdel" title="删除这个" onclick="MIC.gal.del(${i})">${ic('trash','s')}</button>
   </div>`;
 }
@@ -169,10 +170,20 @@ MIC.gal={
       MIC.nav.goto(m[1]);
       if(it.mode==='inpaint'){MIC.toast('指令已回填 · 请重新选图涂抹');return;}
       const where={gen:'生图',rgba:'生图（透明档）',edit:'编辑',moss:'生图（Moss 档）',h3:'视频'}[it.mode];
+      /* 回填连种子一起带回来＝同参数复现同一张：想再抽一张得自己开随机，
+         这一句不说，点开始看到同一张图会以为软件没动 */
+      const sd=Number(it.seed)>=0?' · 种子是那张的号，要换一张就开随机':'';
       MIC.toast(it.mode==='moss'&&MIC.s.st.engine!=='moss'
         ?'参数已存好 · 在「生图」页把引擎切到 Moss 就能看到'
-        :'参数已回填到「'+where+'」');
+        :'参数已回填到「'+where+'」'+sd);
     }).catch(()=>MIC.toast('回填失败'));
+  },
+  /* 存成风格：拿这一张的提示词和反向进编辑框，改不改、{prompt} 放哪都由人定 */
+  toStyle(i){
+    const it=at(i);
+    if(!it)return;
+    if(!it.prompt){MIC.toast('这张没有提示词记录，存不成风格');return;}
+    MIC.styles.fromGallery(it.file);
   },
   /* 送到视频页当参考图（本地那一路叫首帧）：列表替换成这一张，first 同步，照常「开始」。
      只认图片：成片本身就是 mp4，参考图得先截一张出来。 */

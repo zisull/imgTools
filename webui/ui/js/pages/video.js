@@ -158,6 +158,8 @@ MIC.registerPage('video',{
         `<div class="btnrow" style="margin-top:6px"><button class="btn sm gho"`+
         ` onclick="MIC.polish.prompt('video.prompt','video')">${ic('wand','s')}AI 润色</button></div>`,
         '写清动作和镜头怎么动，比堆形容词管用；带声音的片子连环境音一起出')+
+      /* 风格那一行跟着通道走：本地 H3 与云端是两套写法，不混着列 */
+      MIC.styles.row('video.prompt',cloud?'cloud':'h3')+
       '<div class="grid3">'+
         C.field('时长',C.sel('video.seconds',LEN),
           '帧数会自动贴到模型认的 17k+5 网格，所以选 5 秒可能出来 5.2 秒')+
@@ -180,6 +182,7 @@ MIC.registerPage('video',{
              :'想接着上一段拍就把那一帧存成图填进来；本地只认第一张')+
       (cloud?wfRow():'')+
       (cloud?'':C.field('种子',C.seedRow('video.seed'),'开着每次换一版；关掉固定种子可复现'))+
+      MIC.styles.foldLib('video.prompt',cloud?'cloud':'h3')+
       MIC.runner.action('MIC.video.start()',{
         lane:cloud?'cloud':'', key:'video', run:ownRun,
         disabled:cloud&&cloudBusy&&!ownRun,

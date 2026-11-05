@@ -22,7 +22,7 @@ CSS_ORDER = [
     "css/gen.css",
 ]
 
-# 依赖顺序：dom → api/state → theme/nav/form/view → router → runner → prompts/inspire → pages → boot
+# 依赖顺序：dom → api/state → theme/nav/form/view → router → runner → prompts/inspire/styles → pages → boot
 JS_ORDER = [
     "js/core/dom.js",
     "js/core/api.js",
@@ -37,6 +37,7 @@ JS_ORDER = [
     "js/core/runner.js",
     "js/core/prompts.js",
     "js/core/inspire.js",
+    "js/core/styles.js",
     "js/pages/t2i.js",
     "js/pages/edit.js",
     "js/pages/inpaint.js",

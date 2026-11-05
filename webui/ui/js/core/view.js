@@ -157,15 +157,18 @@ function fmtT(s){
 }
 function hostOf(u){return String(u||'').replace(/^https?:\/\//,'').split('/')[0];}
 
-/* 环境横幅：只在「环境管理」这一页显示（四路环境收成了页内子页）。
-   数字也按当前子页取：停在 H3 那格只报 H3 还差几项，不拿别的环境的欠账烦人。
-   补全/下载进行中时，这里换成步骤 + 百分比 + 速度 + 剩余时间的那条。
+/* 环境横幅两件事分开管：
+   「还差几项」是欠账，只在环境页对应那一路显示——各环境互相独立，
+     停在生图页被告知 Moss 差六项只会烦人（明细在那一页自己有短提示）。
+   「补全/下载在跑」是刚点下去的活，全局都看得见：不然点了「一键补齐」切回创作页，
+     看着像什么都没发生，进度也只会在环境页里默默走完。
+   数字按当前子页取：停在 H3 那格只报 H3 还差几项。
    挂在 data-role 插槽上而不是整页重画：进度是从轮询并进来的，八百毫秒自己就变了。 */
 function envBarHTML(){
   const s=MIC.s.st;
   const page=MIC.nav&&MIC.nav.pageOf?MIC.nav.pageOf():'';
-  if(page!=='env')return '';
   const d=s.dl||{};
+  if(!(s.env_busy||d.busy)&&page!=='env')return '';
   if(s.env_busy||d.busy){
     const st=Number(s.env_step)||0, n=Number(s.env_steps)||0;
     const head=(n?'步骤 '+(st||'—')+'/'+n+' · ':'')+

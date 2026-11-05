@@ -31,6 +31,41 @@ function foldcard(title,iconName,body,note){
       ${ic('chev')}${ic(iconName,'s')}<span>${title}</span><span class="hint">${note||''}</span></div>
     <div class="fold-b hide">${body}</div></div></section>`;
 }
+/* 懒折叠：折叠体第一次展开才画。词库全览几十行、风格库还带缩略图，
+   跟着整页重画每次建一遍 DOM 是白扔帧——收着的时候它们本来也不在屏幕上。
+   参数顺序和 fold 一致（body 那一位置换成生成函数），mark 是给这块起的标记属性，
+   异步数据回来时只重画它，不动整页。builder 每次渲染现登记，表只留最近 24 条。 */
+const lazyBodies=new Map();
+let lazySeq=0;
+function foldLazy(title,iconName,build,note,mark){
+  const id='f'+(++lazySeq);
+  lazyBodies.set(id,build);
+  while(lazyBodies.size>24)lazyBodies.delete(lazyBodies.keys().next().value);
+  return `<div class="fold">
+    <div class="fold-h closed" onclick="MIC.form.foldToggle(this)">
+      ${ic('chev')}${ic(iconName,'s')}<span>${title}</span><span class="hint">${note||''}</span></div>
+    <div class="fold-b hide" data-lazy="${id}"${mark?` ${mark}=""`:''}></div></div>`;
+}
+function foldToggle(h){
+  const b=h.nextElementSibling;
+  const opening=h.classList.contains('closed');
+  h.classList.toggle('closed');
+  b.classList.toggle('hide');
+  if(!opening||!b.dataset.lazy||b.dataset.built)return;
+  const fn=lazyBodies.get(b.dataset.lazy);
+  if(!fn){
+    /* 登记被后来的渲染挤掉了（表只留最近 24 条）：收回去整页重画一次，同一处会重新登记 */
+    h.classList.toggle('closed');
+    b.classList.toggle('hide');
+    setTimeout(()=>{MIC.render&&MIC.render();},0);
+    return;
+  }
+  b.dataset.built='1';
+  lazyBodies.delete(b.dataset.lazy);
+  let html='';
+  try{html=fn?fn():'';}catch(e){b.dataset.built='';html='<div class="empty">这一块没画出来</div>';}
+  if(typeof html==='string'&&html)b.innerHTML=html;
+}
 /* 运行卡下半截：状态灯 + 进度这两行在各页完全同构，只差最后一行统计，
    所以收成一个 helper；按钮行各页不一样，仍由调用方自己拼。 */
 function strow(k,inner){return `<div class="strow"><span class="k">${k}</span>${inner}</div>`;}
@@ -537,11 +572,11 @@ document.addEventListener('drop',e=>{
   }).catch(err=>MIC.toast('识别失败：'+(err&&err.message||err)));
 });
 
-MIC.form={field,card,fold,foldcard,runstat,strow,duo,txt,ta,num,seedRow,sel,chk,sw,seg,pathrow,refsRow,refsOf,refsAdd,refsPick,refsDropOne,refsHydrate,sizeSel,pSizeSel,lock,read,commit,commitPath,commitMany,pickInto,
+MIC.form={field,card,fold,foldcard,foldLazy,runstat,strow,duo,txt,ta,num,seedRow,sel,chk,sw,seg,pathrow,refsRow,refsOf,refsSet,refsAdd,refsPick,refsDropOne,refsHydrate,sizeSel,pSizeSel,lock,read,commit,commitPath,commitMany,pickInto,
   applyCfg,dropCands,resolveDrop,a16,a32,pDims,pDims32,orientOf,pairOf,pOf,P_IMG,P_VIDEO,P_VIDEO_CLOUD,P_ASPECT,P_ORIENT,
   /* 每页可登记的「原生画幅」换算：键是 size 控件绑的配置路径；segFit 是「切完顺手校正」的规则 */
   dimSnap:{},segFit:{},
-  foldToggle(h){h.classList.toggle('closed');h.nextElementSibling.classList.toggle('hide');},
+  foldToggle,
   /* 页面里非 data-k 的临时控件：取值不写配置 */
   raw(id){const el=MIC.$(id);return el?(el.value!=null?el.value.trim():el.textContent):'';},
 };

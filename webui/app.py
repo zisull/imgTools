@@ -36,6 +36,7 @@ for _p in (_HERE, os.path.join(_HERE, "ui"), os.path.join(ROOT, "engine")):
         sys.path.insert(0, _p)
 
 import datahome  # noqa: E402  # logs/data 的唯一解析点：QIC_CONFIG 在仓库外时跟着配置走
+import preset  # noqa: E402  # 风格预设库：一份可手改的 JSON + {prompt} 占位渲染
 
 LOG_DIR = datahome.logs_dir(ROOT)
 RUN_LOG = os.path.join(LOG_DIR, "run.log")
@@ -4194,6 +4195,77 @@ class App(WindowCtl):
         # 把 PIL 拖去解码 8000px 的原图
         wide = _to_int(wide, 768, 64, 1536)
         return {"ok": True, "url": self._thumb(p, os.path.getmtime(p), wide)}
+
+    # ------------------------------------------------------------ js_api：风格预设
+    def _style_public(self, p):
+        """预设原样发给界面，另外附上解析好的绝对路径与「丢了几张参考图」。
+
+        缩略图不在这里内联：一次给十几张 base64 就是几 MB，界面照画廊那套按需取。
+        """
+        q = dict(p)
+        q["thumb_abs"] = preset.paths(ROOT, p, "thumb")
+        refs, lost = preset.paths(ROOT, p, "refs")
+        q["refs_abs"], q["lost"] = refs, lost
+        return q
+
+    def style_list(self, engine=""):
+        try:
+            items = preset.choose(preset.load(ROOT), engine)
+        except OSError as e:
+            return {"ok": False, "msg": "风格库读不出来：%s" % e}
+        return {"ok": True, "items": [self._style_public(p) for p in items]}
+
+    def style_apply(self, pid, text=""):
+        try:
+            p = preset.find(preset.load(ROOT), pid)
+        except OSError as e:
+            return {"ok": False, "msg": "风格库读不出来：%s" % e}
+        if not p:
+            return {"ok": False, "msg": "这条风格已经不在了：重新挑一条"}
+        refs, lost = preset.paths(ROOT, p, "refs")
+        return {"ok": True, "name": p["name"], "prompt": preset.render(p, text),
+                "negative": p["neg"], "refs": refs, "lost": lost}
+
+    def style_save(self, p):
+        try:
+            items, err = preset.upsert(ROOT, p)
+        except OSError as e:
+            return {"ok": False, "msg": "风格没存上：%s" % e}
+        if err:
+            return {"ok": False, "msg": err}
+        return {"ok": True, "items": [self._style_public(x) for x in items]}
+
+    def style_delete(self, pid):
+        try:
+            items, err = preset.delete(ROOT, pid)
+        except OSError as e:
+            return {"ok": False, "msg": "风格没删掉：%s" % e}
+        if err:
+            return {"ok": False, "msg": err}
+        return {"ok": True, "items": [self._style_public(x) for x in items]}
+
+    def style_reset(self):
+        try:
+            items = preset.reset(ROOT)
+        except OSError as e:
+            return {"ok": False, "msg": "恢复出厂没成功：%s" % e}
+        return {"ok": True, "items": [self._style_public(x) for x in items]}
+
+    def style_draft(self, file, engine=""):
+        """画廊那一张 → 编辑框里的新预设草稿：拿它的提示词与反向，缩略图就是它自己。"""
+        p = os.path.normpath(str(file or ""))
+        if not p or not os.path.isfile(p):
+            return {"ok": False, "msg": "那张图已经不在了"}
+        row = self.store.get(p)
+        if not row or not str(row.get("prompt") or "").strip():
+            return {"ok": False, "msg": "画廊里没有这张图的提示词，先写一句再存风格"}
+        name = os.path.splitext(os.path.basename(p))[0][:20]
+        # 这一张是哪一路出的，这条风格就点名哪一路；认不出的档（edit/inpaint）留通用
+        mode = str(row.get("mode") or "")
+        eng = {"h3": "h3", "moss": "moss", "gen": "qwen", "rgba": "qwen"}.get(
+            mode, engine or "")
+        d = preset.draft(row, name, eng)
+        return {"ok": True, "preset": self._style_public(d)}
 
     # ------------------------------------------------------------ js_api：模型管理
     @staticmethod
